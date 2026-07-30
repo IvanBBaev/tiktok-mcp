@@ -1,0 +1,2054 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tiktok-mcp-ai — TikTok MCP Server documentation</title>
+    <meta
+      name="description"
+      content="Documentation for tiktok-mcp-ai: an unofficial Model Context Protocol server that lets an AI assistant read a creator's TikTok profile and videos and publish posts over the official Display and Content Posting APIs, with plan-then-execute write safety."
+    />
+    <meta name="theme-color" content="#0a0d0c" />
+    <link rel="canonical" href="https://ivanbbaev.github.io/tiktok-mcp/" />
+    <!-- Social sharing -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="tiktok-mcp-ai — Unofficial TikTok MCP Server" />
+    <meta
+      property="og:description"
+      content="Drive TikTok from your AI assistant: read profile and videos, publish videos and photo carousels over the official Display and Content Posting APIs, with plan-then-execute guardrails."
+    />
+    <meta property="og:url" content="https://ivanbbaev.github.io/tiktok-mcp/" />
+    <meta
+      property="og:image"
+      content="https://ivanbbaev.github.io/tiktok-mcp/assets/og-image.png"
+    />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="tiktok-mcp-ai — drive TikTok from your AI assistant. 11 tools, 5 packages, OAuth 2.0 (PKCE), MIT."
+    />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="tiktok-mcp-ai — Unofficial TikTok MCP Server" />
+    <meta
+      name="twitter:description"
+      content="An MCP server that lets an AI assistant operate TikTok over the official Display and Content Posting APIs, with plan-then-execute write safety."
+    />
+    <meta
+      name="twitter:image"
+      content="https://ivanbbaev.github.io/tiktok-mcp/assets/og-image.png"
+    />
+    <meta
+      name="twitter:image:alt"
+      content="tiktok-mcp-ai — drive TikTok from your AI assistant. 11 tools, 5 packages, OAuth 2.0 (PKCE), MIT."
+    />
+    <!-- Structured data: software listing + FAQ rich results -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "SoftwareApplication",
+            "name": "tiktok-mcp-ai",
+            "alternateName": "TikTok MCP Server",
+            "applicationCategory": "DeveloperApplication",
+            "operatingSystem": "Cross-platform (Node.js 22+)",
+            "description": "An unofficial Model Context Protocol server that lets an MCP-capable AI client read a creator's TikTok profile and videos and publish videos and photo carousels over the official TikTok Display and Content Posting APIs, with OAuth 2.0 (PKCE) login, plan-then-execute write safety and multi-account profiles.",
+            "url": "https://ivanbbaev.github.io/tiktok-mcp/",
+            "downloadUrl": "https://www.npmjs.com/package/tiktok-mcp-ai",
+            "softwareVersion": "0.0.0",
+            "license": "https://opensource.org/licenses/MIT",
+            "author": { "@type": "Person", "name": "Ivan Baev" },
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+            "keywords": "mcp, model context protocol, tiktok, content posting api, display api, llm, ai"
+          },
+          {
+            "@type": "FAQPage",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "How is this different from an official TikTok integration?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "It is an independent, community-built MCP server, not affiliated with TikTok. It talks to the same official TikTok for Developers APIs (Display + Content Posting) you would use directly, but wraps them for an AI client: OAuth login, plan-then-execute write safety, multi-account profiles and token-thrifty results. You bring your own TikTok app and your own model and client."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Does the AI post to TikTok without my confirmation?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Not in the default plan mode. Every write tool called without a plan_id returns a non-mutating preview plus a single-use plan_id and posts nothing; the model or you must call again with that id to execute the previewed payload. The opt-in apply mode removes the second step and is documented as trusted automation only."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Why is the npm package called tiktok-mcp-ai?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "The package ships as tiktok-mcp-ai and the GitHub repository is IvanBBaev/tiktok-mcp. This is an independent project, not affiliated with or endorsed by TikTok or ByteDance Ltd.; TikTok is a trademark of ByteDance Ltd., used here only to indicate compatibility."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Why did my direct post end up private?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Until your TikTok app passes TikTok's content-posting audit, TikTok forces every direct post to SELF_ONLY regardless of the privacy_level you send. That is an upstream platform gate, not a limitation of this server; uploading to the inbox as a draft works in the meantime."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Can I manage several accounts from one server?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Yes. One TikTok app can serve many creators: log each in with login --profile <name>, then pass account: <name> on any tool call, or set TT_ACTIVE_PROFILE. Selection is isolated per call via AsyncLocalStorage, so parallel calls to different accounts never mix."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "Which MCP clients work?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Any MCP client over stdio, including Claude Desktop, Claude Code, VS Code Chat and the MCP Inspector. The server declares tool annotations so clients can apply the right confirmation UX for the write tools."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="assets/styles.css" />
+    <!-- Inline enhancements: sidebar doc-search + footer support cluster.
+         Kept inline so index.html stays a single self-contained file. -->
+    <style>
+      /* ---- Sidebar documentation search ---- */
+      .toc-search {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        background: var(--card);
+        padding: 8px 10px;
+        margin: 4px 0 6px;
+      }
+      .toc-search:focus-within {
+        border-color: var(--accent-border);
+        box-shadow: 0 0 0 2px var(--accent-soft);
+      }
+      .toc-search-glyph {
+        display: inline-flex;
+        color: var(--accent);
+        flex: 0 0 auto;
+      }
+      .toc-search-input {
+        flex: 1 1 auto;
+        min-width: 0;
+        border: none;
+        outline: none;
+        background: transparent;
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 13px;
+      }
+      /* Hide the native search "clear" control so styling stays consistent. */
+      .toc-search-input::-webkit-search-cancel-button {
+        -webkit-appearance: none;
+        appearance: none;
+      }
+      .toc-search-input::placeholder {
+        color: var(--dim);
+      }
+      .toc-search-count {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--dim);
+        white-space: nowrap;
+        flex: 0 0 auto;
+      }
+      .toc-search-empty {
+        margin: 0 0 8px;
+        padding: 6px 12px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      /* Dim TOC links whose section is filtered out by the search. */
+      .sidebar nav a.toc-hidden {
+        display: none;
+      }
+      /* Hide a whole TOC group when none of its links match. */
+      .sidebar h4.toc-hidden {
+        display: none;
+      }
+      /* Search highlight applied to matched text in the content. */
+      mark.doc-hit {
+        background: var(--accent-soft);
+        color: var(--accent-strong);
+        border-radius: 3px;
+        padding: 0 1px;
+        box-shadow: inset 0 0 0 1px var(--accent-border);
+      }
+      /* When a search is active, fade sections with no match so hits stand out. */
+      .content.doc-search-active section.doc-nomatch {
+        opacity: 0.28;
+        filter: saturate(0.6);
+      }
+      .content section {
+        transition: opacity 0.15s ease;
+      }
+
+      /* ---- Footer support cluster (Sponsor / Ko-fi / Donate) ---- */
+      .foot-support {
+        display: inline-flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px 12px;
+        margin-left: 12px;
+        padding-left: 12px;
+        border-left: 1px solid var(--hair);
+      }
+      .foot-support-label {
+        color: var(--dim);
+        font-size: 0.85em;
+        letter-spacing: 0.02em;
+      }
+      footer .foot-support a.sponsor-link:hover {
+        color: var(--p1);
+      }
+      footer .foot-support a.kofi-link:hover {
+        color: var(--write);
+      }
+      footer .foot-support a.donate-link:hover {
+        color: var(--accent-strong);
+      }
+      @media (max-width: 720px) {
+        .foot-support {
+          margin-left: 0;
+          padding-left: 0;
+          border-left: none;
+          margin-top: 8px;
+          width: 100%;
+        }
+      }
+    </style>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%2300f2ea'/%3E%3Ctext x='50' y='70' font-size='54' text-anchor='middle' fill='%2304211f' font-family='monospace' font-weight='bold'%3Ett%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div class="bg-glow" aria-hidden="true"></div>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="topbar">
+      <button class="icon-btn" id="menuBtn" aria-label="Toggle menu">☰</button>
+      <a class="brand" href="#top">
+        <span class="logo">tt</span>
+        tiktok-mcp-ai <small>· docs</small>
+      </a>
+      <span class="spacer"></span>
+      <nav class="toplinks">
+        <a href="#quickstart">Quick start</a>
+        <a href="#tools">Tools</a>
+        <a href="#use-cases">Use cases</a>
+        <a href="#security">Security</a>
+        <a
+          class="sponsor-link"
+          href="https://github.com/sponsors/IvanBBaev"
+          target="_blank"
+          rel="noopener"
+          >&#9829; Sponsor</a
+        >
+      </nav>
+      <span class="ver-pill" title="Not released yet — the 11-tool surface is frozen at v1.1, the package is unpublished."
+        >pre-release</span
+      >
+      <a
+        class="icon-btn"
+        href="https://github.com/IvanBBaev/tiktok-mcp"
+        title="GitHub repository"
+        aria-label="GitHub repository"
+        target="_blank"
+        rel="noopener"
+        ><svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg></a>
+    </header>
+
+    <div class="backdrop" id="backdrop"></div>
+
+    <div class="layout" id="top">
+      <aside class="sidebar" id="sidebar">
+        <div class="toc-search" role="search">
+          <span class="toc-search-glyph" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="7" cy="7" r="4.5"></circle><line x1="10.5" y1="10.5" x2="14" y2="14" stroke-linecap="round"></line></svg>
+          </span>
+          <input
+            type="search"
+            id="doc-search"
+            class="toc-search-input"
+            placeholder="Search docs…"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="Search the documentation"
+            aria-describedby="doc-search-count"
+          />
+          <span class="toc-search-count" id="doc-search-count" aria-live="polite"></span>
+        </div>
+        <p class="toc-search-empty" id="doc-search-empty" hidden>
+          No sections match that search.
+        </p>
+        <h4>Getting started</h4>
+        <nav>
+          <a href="#overview">Overview</a>
+          <a href="#quick-demo">Quick demo</a>
+          <a href="#what-is-mcp">Why MCP?</a>
+          <a href="#capabilities">Capabilities</a>
+          <a href="#quickstart">Quick start</a>
+        </nav>
+        <h4>Configuration</h4>
+        <nav>
+          <a href="#credentials">Credentials</a>
+          <a href="#auth">Authentication</a>
+          <a href="#cli">Command-line</a>
+          <a href="#configuration">Environment variables</a>
+          <a href="#packages">Tool packages</a>
+        </nav>
+        <h4>Reference</h4>
+        <nav>
+          <a href="#tools">Tools</a>
+        </nav>
+        <h4>Guides</h4>
+        <nav>
+          <a href="#use-cases">Use cases</a>
+          <a href="#security">Security &amp; governance</a>
+          <a href="#architecture">Architecture</a>
+        </nav>
+        <h4>More</h4>
+        <nav>
+          <a href="#troubleshooting">Troubleshooting</a>
+          <a href="#faq">FAQ</a>
+        </nav>
+      </aside>
+
+      <main class="content" id="main">
+        <!-- HERO -->
+        <section class="hero" id="overview">
+          <div class="hero-grid">
+            <div class="hero-copy">
+          <span class="eyebrow">Model Context Protocol · TikTok</span>
+          <h1>Drive TikTok from your <span class="accent">AI assistant.</span></h1>
+          <p class="lead">
+            <strong>tiktok-mcp-ai</strong> is an unofficial MCP server that turns
+            any MCP-capable AI client — Claude Desktop, Claude Code, VS Code Chat
+            — into a TikTok operator. It reads a creator's profile and videos and
+            publishes videos and photo carousels over the official TikTok
+            <strong>Display</strong> and <strong>Content Posting</strong> APIs,
+            with plan-then-execute guardrails between the model and your account.
+          </p>
+          <div class="hero-cta">
+            <a class="btn primary" href="#quickstart">Get started →</a>
+            <a
+              class="btn"
+              href="https://github.com/IvanBBaev/tiktok-mcp"
+              target="_blank"
+              rel="noopener"
+              >View on GitHub</a
+            >
+            <a class="btn" href="#use-cases">See use cases</a>
+          </div>
+          <div class="badges">
+            <span class="badge">MIT licensed</span>
+            <span class="badge">Node.js 22+</span>
+            <span class="badge">TypeScript · ESM</span>
+            <span class="badge">MCP SDK 1.29</span>
+            <span class="badge">OAuth 2.0 · PKCE</span>
+          </div>
+            </div>
+            <div class="hero-visual">
+              <div class="terminal-wrap">
+                <div class="terminal" aria-hidden="true">
+                  <div class="term-bar">
+                    <span class="term-dot" style="background:#ff5f57"></span>
+                    <span class="term-dot" style="background:#febc2e"></span>
+                    <span class="term-dot" style="background:#28c840"></span>
+                    <span class="term-label">assistant · tiktok</span>
+                    <span class="term-live">live</span>
+                  </div>
+                  <div class="term-body">
+                    <span class="term-scan"></span>
+                    <div class="term-line tl1">
+                      <span class="tprompt">you →</span> Show my 4 latest videos
+                      with their view counts.
+                    </div>
+                    <div class="term-line tl2 term-call">
+                      <span class="pill ro">read</span>
+                      <span class="tcall">tiktok_list_videos</span>
+                      <span class="tdim">· video</span>
+                    </div>
+                    <div class="term-line tl3 tdim2">
+                      4 videos (newest first)
+                    </div>
+                    <div class="term-line tl4 term-row">
+                      <span>Morning studio routine ☕</span
+                      ><span style="font-weight:600;color:#5fb1ff">48.2K views</span>
+                    </div>
+                    <div class="term-line tl5 term-row">
+                      <span>3 editing tricks in 30s</span
+                      ><span style="font-weight:600;color:#5fb1ff">126K views</span>
+                    </div>
+                    <div class="term-line tl6 term-row">
+                      <span>Behind the scenes</span
+                      ><span style="font-weight:600;color:#5fb1ff">22.4K views</span>
+                    </div>
+                    <div class="term-line tl7 term-row last">
+                      <span>Q&amp;A · my camera gear</span
+                      ><span style="font-weight:600;color:#5fb1ff">9.7K views</span>
+                    </div>
+                    <div class="term-line tl8 term-cursor">
+                      ▌<span class="cur">_</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="stat-row">
+            <div class="stat"><b>11</b><span>tools</span></div>
+            <div class="stat"><b>5</b><span>packages</span></div>
+            <div class="stat"><b>2</b><span>official APIs</span></div>
+            <div class="stat"><b>4</b><span>write tools</span></div>
+            <div class="stat"><b>3</b><span>runtime deps</span></div>
+          </div>
+        </section>
+
+        <!-- QUICK DEMO -->
+        <section id="quick-demo">
+          <span class="eyebrow">Quick demo</span>
+          <h2>Three things you'd ask, one call each.</h2>
+          <p class="lead">
+            Two reads that map your account, and a write that
+            <strong>previews without posting</strong> — because the safe default
+            never mutates. All against your own authorized TikTok account.
+          </p>
+
+          <div class="tabs" id="demo-tabs" role="tablist">
+            <button class="tab active" data-tab="0" role="tab" aria-selected="true">
+              <span class="tab-index">01</span>What have I posted?
+            </button>
+            <button class="tab" data-tab="1" role="tab" aria-selected="false">
+              <span class="tab-index">02</span>Post without surprises
+            </button>
+            <button class="tab" data-tab="2" role="tab" aria-selected="false">
+              <span class="tab-index">03</span>What can I post right now?
+            </button>
+          </div>
+
+          <div class="tab-panels">
+            <div class="tab-panel active" data-panel="0" role="tabpanel">
+              <div class="tab-left">
+                <h3>List your own videos.</h3>
+                <p>
+                  Page through the videos on the authorized account with cursor
+                  pagination, and pull just the fields you need — id, title, view
+                  count — instead of the whole payload.
+                </p>
+                <span class="tool-pill"
+                  ><span class="pill ro">read</span
+                  ><code>tiktok_list_videos</code></span
+                >
+              </div>
+              <div class="tab-right">
+                <div class="code-box">
+                  <span class="cb-comment">// "List my last 10 videos with view counts."</span>
+                  <pre>{ "max_count": 10, "fields": ["id", "title", "view_count"] }</pre>
+                </div>
+              </div>
+            </div>
+
+            <div class="tab-panel" data-panel="1" role="tabpanel">
+              <div class="tab-left">
+                <h3>Preview before you publish.</h3>
+                <p>
+                  A write call <strong>without</strong> a <code>plan_id</code>
+                  validates everything and returns a preview plus a single-use
+                  <code>plan_id</code> — and posts <strong>nothing</strong>. Call
+                  again with that id to execute the exact previewed payload.
+                </p>
+                <span class="tool-pill"
+                  ><span class="pill wr">write</span
+                  ><code>tiktok_post_video</code></span
+                >
+              </div>
+              <div class="tab-right">
+                <div class="code-box">
+                  <span class="cb-comment">// "Preview posting demo.mp4 as public." (no plan_id ⇒ preview only)</span>
+                  <pre>{ "source": "url", "video_url": "https://cdn.example.com/demo.mp4", "title": "Launch day!", "privacy_level": "PUBLIC_TO_EVERYONE" }</pre>
+                </div>
+              </div>
+            </div>
+
+            <div class="tab-panel" data-panel="2" role="tabpanel">
+              <div class="tab-left">
+                <h3>Read the publishing context.</h3>
+                <p>
+                  Before any post, TikTok requires the creator's current
+                  publishing context — the privacy options they're allowed, the
+                  interaction toggles, and the daily posting limits.
+                </p>
+                <span class="tool-pill"
+                  ><span class="pill ro">read</span
+                  ><code>tiktok_get_creator_info</code></span
+                >
+              </div>
+              <div class="tab-right">
+                <div class="code-box">
+                  <span class="cb-comment"># privacy options, toggles and limits for the account</span>
+                  <pre>{ "account": "default" }</pre>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- WHAT IS MCP -->
+        <section id="what-is-mcp">
+          <h2>What is this, exactly?</h2>
+          <p>
+            The
+            <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener"
+              >Model Context Protocol</a
+            >
+            (MCP) is an open standard that lets an AI assistant call external
+            <em>tools</em> and read external <em>resources</em>. This project is
+            an MCP <strong>server</strong> for TikTok: you register it with your
+            MCP client once, and from then on the assistant can run real actions
+            against your account — list your videos, read your profile, preview
+            and publish a post — instead of just talking about them.
+          </p>
+          <div class="callout">
+            <span class="c-ico">💡</span>
+            <p>
+              You never call the tools by hand. You talk to your AI assistant in
+              natural language; it picks the right
+              <code>tiktok_*</code> tool, fills in the arguments, and shows you
+              the result. The server's job is to make that safe and accurate.
+            </p>
+          </div>
+        </section>
+
+        <!-- CAPABILITIES -->
+        <section id="capabilities">
+          <h2>Capabilities</h2>
+          <p class="lead">
+            The breadth of TikTok's official developer surface, plus the safety
+            rails a generic API connector doesn't give you.
+          </p>
+          <div class="cards">
+            <div class="card">
+              <div class="ico">🎬</div>
+              <h3>Read profile &amp; videos</h3>
+              <p>
+                The <strong>Display API</strong>: fetch the authorized creator's
+                profile and stats, page through their posted videos with cursor
+                pagination, and look up specific videos by id. Read-only.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico">🚀</div>
+              <h3>Publish &amp; draft</h3>
+              <p>
+                The <strong>Content Posting API</strong>: post videos directly,
+                upload videos or photo carousels to the inbox as drafts, and
+                publish photo carousels — from a verified URL or a local file.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico">🛟</div>
+              <h3>Plan-then-execute writes</h3>
+              <p>
+                Every write returns a non-mutating preview plus a single-use
+                <code>plan_id</code> first; nothing posts until you call again
+                with that id. Injection-resistant by design.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico">🔑</div>
+              <h3>OAuth 2.0 (PKCE)</h3>
+              <p>
+                A one-time interactive <code>login</code> over a loopback
+                redirect; access and refresh tokens are rotated and persisted
+                automatically, so the server then runs non-interactively.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico">👥</div>
+              <h3>Multi-account profiles</h3>
+              <p>
+                One TikTok app, many creator accounts. Per-call
+                <code>account</code> routing via <code>AsyncLocalStorage</code>,
+                so parallel calls never bleed between accounts.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico">🧾</div>
+              <h3>Append-only journal</h3>
+              <p>
+                Every publish attempt is recorded in a local append-only journal
+                — the audit trail for "did it actually post?" — kept even across
+                a <code>login --revoke</code>.
+              </p>
+            </div>
+            <div class="card">
+              <div class="ico">⚙️</div>
+              <h3>Resilience &amp; token thrift</h3>
+              <p>
+                Per-request timeouts, chunked uploads that survive token expiry,
+                a local publish rate-bucket, cursor pagination, and a
+                result-size budget that keeps tool output token-cheap.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <!-- QUICK START -->
+        <section id="quickstart">
+          <span class="eyebrow">Quick start</span>
+          <h2>Connected in under a minute.</h2>
+          <p class="lead">
+            Install once, add your app credentials, log in, and register it with
+            any MCP client. You need <strong>Node.js 22+</strong> and a TikTok
+            developer app (create one in the
+            <a
+              href="https://developers.tiktok.com"
+              target="_blank"
+              rel="noopener"
+              >TikTok for Developers</a
+            >
+            portal).
+          </p>
+
+          <div class="qs-grid">
+            <!-- Left: three install steps -->
+            <div class="qs-steps">
+              <article class="qs-step">
+                <div class="qs-step-head">
+                  <span class="qs-num">1</span>
+                  <span class="qs-step-title">Install the server</span>
+                </div>
+                <div class="qs-cmd">
+                  <pre class="qs-cmd-text"><code>npm install -g tiktok-mcp-ai</code></pre>
+                  <button
+                    class="qs-cmd-copy"
+                    type="button"
+                    aria-label="Copy command"
+                  >
+                    copy
+                  </button>
+                </div>
+              </article>
+
+              <article class="qs-step">
+                <div class="qs-step-head">
+                  <span class="qs-num">2</span>
+                  <span class="qs-step-title">Add your app credentials</span>
+                </div>
+                <div class="qs-cmd">
+                  <pre class="qs-cmd-text"><code>export TT_CLIENT_KEY=your_client_key
+export TT_CLIENT_SECRET=your_client_secret</code></pre>
+                  <button
+                    class="qs-cmd-copy"
+                    type="button"
+                    aria-label="Copy command"
+                  >
+                    copy
+                  </button>
+                </div>
+              </article>
+
+              <article class="qs-step">
+                <div class="qs-step-head">
+                  <span class="qs-num">3</span>
+                  <span class="qs-step-title">Log in once (OAuth)</span>
+                </div>
+                <div class="qs-cmd">
+                  <pre class="qs-cmd-text"><code>npx tiktok-mcp-ai login</code></pre>
+                  <button
+                    class="qs-cmd-copy"
+                    type="button"
+                    aria-label="Copy command"
+                  >
+                    copy
+                  </button>
+                </div>
+              </article>
+            </div>
+
+            <!-- Right: client config panel with tabs -->
+            <div class="qs-config" id="client-config">
+              <div class="qs-config-head">
+                <div class="qs-tabs" role="tablist" aria-label="MCP client">
+                  <button
+                    class="qs-tab active"
+                    type="button"
+                    role="tab"
+                    aria-selected="true"
+                    data-client="claude"
+                  >
+                    Claude Desktop
+                  </button>
+                  <button
+                    class="qs-tab"
+                    type="button"
+                    role="tab"
+                    aria-selected="false"
+                    data-client="vscode"
+                  >
+                    VS Code
+                  </button>
+                  <button
+                    class="qs-tab"
+                    type="button"
+                    role="tab"
+                    aria-selected="false"
+                    data-client="cursor"
+                  >
+                    Cursor
+                  </button>
+                </div>
+                <button class="qs-config-copy" type="button">copy config</button>
+              </div>
+              <div class="qs-config-body">
+                <div class="qs-config-path" data-config-path>
+                  // ~/Library/Application
+                  Support/Claude/claude_desktop_config.json
+                </div>
+                <pre class="qs-config-pre"><code data-config-json>{
+  "mcpServers": {
+    "tiktok": {
+      "command": "npx",
+      "args": ["-y", "tiktok-mcp-ai"],
+      "env": {
+        "TT_CLIENT_KEY": "your_client_key",
+        "TT_CLIENT_SECRET": "your_client_secret"
+      }
+    }
+  }
+}</code></pre>
+              </div>
+            </div>
+          </div>
+
+          <p class="qs-note">
+            <strong>VS Code users:</strong> skip the manual config — install the
+            <a
+              href="https://marketplace.visualstudio.com/items?itemName=ivanbbaev.tiktok-mcp-ai"
+              >TikTok MCP</a
+            >
+            extension
+            (<code>code --install-extension ivanbbaev.tiktok-mcp-ai</code>). It
+            registers the server in GitHub Copilot Chat (agent mode)
+            automatically — no <code>.vscode/mcp.json</code> needed.
+          </p>
+
+          <p class="qs-note">
+            <code>TT_CLIENT_KEY</code> / <code>TT_CLIENT_SECRET</code> identify
+            your TikTok app; the <code>login</code> command opens a browser,
+            captures the loopback redirect, and stores the user tokens in
+            <code>~/.config/tiktok-mcp-ai/.env</code>. Step&nbsp;3 is a CLI
+            command, not an MCP tool — it needs a browser, so an MCP tool never
+            handles token material.
+          </p>
+          <p class="qs-note">
+            Don't want a global install? Use
+            <code>"command": "npx", "args": ["-y", "tiktok-mcp-ai"]</code>
+            instead. On the Claude Code CLI it's a one-liner:
+            <code>claude mcp add tiktok -- npx -y tiktok-mcp-ai</code>.
+          </p>
+
+          <h3>Talk to your assistant</h3>
+          <p>That's it. Try something like:</p>
+          <div class="prompt">
+            <span class="tag">You → assistant</span>
+            "Using TikTok, list my 5 most recent videos with their title and view
+            count."
+          </div>
+          <p>
+            The assistant calls <code>tiktok_list_videos</code> and returns the
+            rows.
+          </p>
+
+          <div class="callout security">
+            <span class="c-ico">🛟</span>
+            <p>
+              <strong>First time? Start safe.</strong> Keep the default
+              <code>TT_WRITE_MODE=plan</code> so every write is previewed and
+              never posts without a second confirming call, and the default
+              <code>TT_TOOL_PACKAGES=core</code> to expose only the read tools.
+              Add <code>publish-write</code> once you trust the workflow.
+            </p>
+          </div>
+          <div class="callout">
+            <span class="c-ico">🧪</span>
+            <p>
+              Developing from source instead?
+              <code>npm install &amp;&amp; npm run build</code>, then
+              <code>npm run inspector</code> to drive it from the MCP Inspector,
+              or <code>npm start</code> to run it directly.
+            </p>
+          </div>
+        </section>
+
+        <!-- CREDENTIALS -->
+        <section id="credentials">
+          <h2>Credentials &amp; where they live</h2>
+          <p>The env file is resolved in this order:</p>
+          <ol>
+            <li><code>TT_ENV_FILE</code> — an explicit path, if set.</li>
+            <li>
+              <code>$XDG_CONFIG_HOME/tiktok-mcp-ai/.env</code> (falling back to
+              <code>~/.config/tiktok-mcp-ai/.env</code>) on POSIX;
+              <code>%LOCALAPPDATA%\tiktok-mcp-ai\.env</code> on Windows. A global
+              / <code>npx</code> install writes here, not into
+              <code>node_modules</code>.
+            </li>
+          </ol>
+          <p>
+            Real environment variables always win over the file. The file is
+            written <strong>owner-only (<code>0600</code>)</strong> because it
+            holds the access and refresh tokens, and it lives outside the repo —
+            never commit real credentials. On Windows tokens are stored in
+            <code>%LOCALAPPDATA%</code>, never the roaming
+            <code>%APPDATA%</code>, so they don't replicate to other machines.
+            The publish journal and the env-file lock always live
+            <strong>beside</strong> the resolved env file.
+          </p>
+          <div class="callout security">
+            <span class="c-ico">🔐</span>
+            <p>
+              The client secret and the user tokens are
+              <strong>never</strong> logged and never returned by any tool.
+              <code>tiktok_get_auth_status</code> reports only which profiles are
+              authorized, their granted scopes and token freshness.
+            </p>
+          </div>
+        </section>
+
+        <!-- AUTH -->
+        <section id="auth">
+          <h2>Authentication</h2>
+          <p>
+            TikTok uses OAuth 2.0 (Login Kit) with <strong>user access
+            tokens</strong> — there is no password or API-key mode. App-level
+            credentials (<code>TT_CLIENT_KEY</code> /
+            <code>TT_CLIENT_SECRET</code>) identify your developer app; user
+            tokens identify the creator account. The path is a one-time
+            interactive login — <strong>Authorization Code + PKCE</strong>:
+          </p>
+          <div class="codeblock" data-lang="bash">
+            <pre><code># 1) Create a TikTok app in the developer portal and register the loopback
+#    redirect URI — the wildcard-port form, trailing slash mandatory:
+#       http://127.0.0.1:*/callback/
+# 2) Set the app credentials:
+TT_CLIENT_KEY=your_client_key
+TT_CLIENT_SECRET=your_client_secret
+# 3) Log in once — opens the browser, captures the redirect, stores the tokens:
+npx tiktok-mcp-ai login</code></pre>
+          </div>
+          <p>
+            PKCE is always used — TikTok's <strong>hex-encoded</strong> variant
+            of S256, not the RFC 7636 base64url default — the loopback listener
+            captures the redirect automatically, and the obtained access and
+            refresh tokens are persisted. The server then runs non-interactively
+            and refreshes on your behalf. TikTok lets a user
+            <strong>deselect scopes</strong> on the consent screen, so a partial
+            grant is normal; <code>login</code> prints granted vs. requested
+            scopes.
+          </p>
+          <p>
+            Access tokens last 24 hours and refresh tokens 365 days, both stored
+            as absolute expiries. A live <code>401</code> triggers exactly
+            <strong>one</strong> forced refresh and replay; the refresh token may
+            rotate on every refresh, so refreshes are single-flighted per profile
+            and serialized across processes by an env-file lock. Disconnect an
+            account with <code>npx tiktok-mcp-ai login --revoke</code>.
+          </p>
+
+          <h3>Scopes <code>login</code> can request</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Scope</th><th>Enables</th></tr>
+              </thead>
+              <tbody>
+                <tr><td><code>user.info.basic</code></td><td>Display name and avatar.</td></tr>
+                <tr><td><code>user.info.profile</code></td><td>Bio, profile deep link, verified flag.</td></tr>
+                <tr><td><code>user.info.stats</code></td><td>Follower / like / video counts.</td></tr>
+                <tr><td><code>video.list</code></td><td>List and query your own videos.</td></tr>
+                <tr><td><code>video.publish</code></td><td>Directly post a video or photo carousel.</td></tr>
+                <tr><td><code>video.upload</code></td><td>Upload video / photo drafts to the inbox.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            The default requested set is <strong>least-privilege</strong>,
+            derived from your enabled tool packages — a draft-only setup never
+            asks for <code>video.publish</code>. Override it with
+            <code>TT_LOGIN_SCOPES</code>.
+          </p>
+
+          <h3>Multiple accounts (one app, many creators)</h3>
+          <p>
+            One TikTok app can serve many creator accounts. The default profile
+            is the bare token set; extra accounts use
+            <code>TT_PROFILE_&lt;NAME&gt;_*</code> keys:
+          </p>
+          <div class="codeblock" data-lang="dotenv">
+            <pre><code># the app — shared by every profile
+TT_CLIENT_KEY=your_client_key
+TT_CLIENT_SECRET=your_client_secret
+
+# default profile (written by `login`)
+TT_ACCESS_TOKEN=••••••
+TT_REFRESH_TOKEN=••••••
+
+# a second creator, logged in with `login --profile brand`
+TT_PROFILE_BRAND_ACCESS_TOKEN=••••••
+TT_PROFILE_BRAND_REFRESH_TOKEN=••••••
+
+TT_ACTIVE_PROFILE=default</code></pre>
+          </div>
+          <p>
+            Every tool accepts an <code>account</code> argument to target one
+            call at another profile; the selection travels via
+            <code>AsyncLocalStorage</code>, so parallel calls with different
+            accounts can't bleed into each other.
+            <code>tiktok_get_auth_status</code> lists all profiles with their
+            expiry info.
+          </p>
+        </section>
+
+        <!-- COMMAND-LINE INTERFACE -->
+        <section id="cli">
+          <h2>Command-line interface</h2>
+          <p class="lead">
+            The published <code>tiktok-mcp-ai</code> binary — run it directly or
+            via <code>npx tiktok-mcp-ai</code> — starts the MCP server by default
+            and has two OAuth-related subcommands. All connection settings come
+            from environment variables (see
+            <a href="#configuration">Environment variables</a>).
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Command</th><th>Parameters</th><th>What it does</th><th>Exit codes</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>tiktok-mcp-ai</code></td>
+                  <td><em>none</em></td>
+                  <td>Starts the MCP server; the transport (<code>stdio</code> default, or <code>http</code>) is chosen by <code>TT_TRANSPORT</code>. Runs until <code>SIGINT</code>/<code>SIGTERM</code>.</td>
+                  <td><code>0</code> clean shutdown · <code>1</code> fatal startup error</td>
+                </tr>
+                <tr>
+                  <td><code>tiktok-mcp-ai login</code></td>
+                  <td><code>--profile &lt;name&gt;</code>, <code>--scopes &lt;csv&gt;</code></td>
+                  <td>One-time OAuth 2.0 Authorization Code + PKCE login: opens the browser, captures the loopback redirect, stores the tokens.</td>
+                  <td><code>0</code> success · <code>1</code> login failed</td>
+                </tr>
+                <tr>
+                  <td><code>tiktok-mcp-ai login --revoke</code></td>
+                  <td><code>--profile &lt;name&gt;</code>, <code>--purge-journal</code></td>
+                  <td>Revokes the profile's access token upstream and clears its token fields — keeps the publish journal unless <code>--purge-journal</code> is given.</td>
+                  <td><code>0</code> success · <code>1</code> failed</td>
+                </tr>
+                <tr>
+                  <td><code>tiktok-mcp-ai doctor</code></td>
+                  <td><em>none</em></td>
+                  <td>Health &amp; credential check: env-file location and permissions, configured profiles, token freshness and refresh-horizon warnings.</td>
+                  <td><code>0</code> healthy · <code>1</code> problems found</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3><code>login</code> — interactive OAuth</h3>
+          <p>
+            Authorization-code flow with PKCE (TikTok's hex variant) and a
+            loopback redirect on <code>127.0.0.1</code>. The registered redirect
+            is the wildcard-port form <code>http://127.0.0.1:*/callback/</code>
+            (trailing slash mandatory), and the default flow binds an ephemeral
+            port, so "port busy" is a non-event. <code>TT_REDIRECT_PORT</code> is
+            an <strong>optional pin only</strong>. When no listener can serve the
+            redirect (headless / SSH), <code>login</code> prints the authorize URL
+            and accepts the pasted redirect URL or the bare code.
+          </p>
+          <div class="codeblock" data-lang="bash">
+            <pre><code>npx tiktok-mcp-ai login --profile brand</code></pre>
+          </div>
+
+          <h3><code>doctor</code> — health check</h3>
+          <p>
+            A read-only health check: it prints the resolved env-file path and
+            its permissions, the configured profiles, each token's freshness, and
+            warns when a refresh token is within 30 days of expiry. On Windows it
+            prints the optional <code>icacls</code> hardening command as text only
+            — it never runs it.
+          </p>
+          <div class="codeblock" data-lang="bash">
+            <pre><code>npx tiktok-mcp-ai doctor</code></pre>
+          </div>
+        </section>
+
+        <!-- CONFIGURATION -->
+        <section id="configuration">
+          <h2>Environment variables</h2>
+          <p>
+            Everything is <code>TT_</code>-prefixed; per-key resolution is
+            process env (from the MCP client) → env file. Only the first two are
+            required; the rest are optional tuning knobs. See
+            <a
+              href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/.env.example"
+              target="_blank"
+              rel="noopener"
+              >.env.example</a
+            >
+            for a template.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Variable</th>
+                  <th>Default</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>TT_CLIENT_KEY</code> <span class="req">*</span></td>
+                  <td>—</td>
+                  <td>TikTok app client key.</td>
+                </tr>
+                <tr>
+                  <td><code>TT_CLIENT_SECRET</code> <span class="req">*</span></td>
+                  <td>—</td>
+                  <td>TikTok app client secret. Never logged or returned.</td>
+                </tr>
+                <tr>
+                  <td><code>TT_ACCESS_TOKEN</code> / <code>TT_REFRESH_TOKEN</code></td>
+                  <td>—</td>
+                  <td>Default-profile user tokens, written by <code>login</code>/refresh — don't set by hand.</td>
+                </tr>
+                <tr>
+                  <td><code>TT_ACTIVE_PROFILE</code></td>
+                  <td><code>DEFAULT</code></td>
+                  <td>Profile used when a tool call has no <code>account</code> argument.</td>
+                </tr>
+                <tr>
+                  <td><code>TT_TOOL_PACKAGES</code></td>
+                  <td><code>core</code></td>
+                  <td><code>core</code> = all reads (<code>auth</code>+<code>user</code>+<code>video</code>+<code>publish</code>); <code>all</code> = everything.</td>
+                </tr>
+                <tr>
+                  <td><code>TT_PACKAGES_DENY</code></td>
+                  <td>—</td>
+                  <td>Packages forced off regardless of the above (deny wins).</td>
+                </tr>
+                <tr>
+                  <td><code>TT_PACKAGES_READONLY</code></td>
+                  <td><code>0</code></td>
+                  <td><code>1</code> registers only read tools (drops <code>publish-write</code>).</td>
+                </tr>
+                <tr>
+                  <td><code>TT_WRITE_MODE</code></td>
+                  <td><code>plan</code></td>
+                  <td>
+                    <code>plan</code> (default) previews without posting;
+                    <code>apply</code> executes directly; <code>deny</code>
+                    unregisters <code>publish-write</code>.
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>TT_PLAN_TTL_S</code></td>
+                  <td><code>600</code></td>
+                  <td>Lifetime of a minted <code>plan_id</code> (seconds).</td>
+                </tr>
+                <tr>
+                  <td><code>TT_MEDIA_ROOT</code></td>
+                  <td>—</td>
+                  <td>The only directory <code>FILE_UPLOAD</code> tools may read from; unset ⇒ file uploads disabled (URL posting still works).</td>
+                </tr>
+                <tr>
+                  <td><code>TT_DEFAULT_AIGC_LABEL</code></td>
+                  <td><code>1</code></td>
+                  <td>Default for the <code>is_aigc</code> label on posts.</td>
+                </tr>
+                <tr>
+                  <td><code>TT_TRANSPORT</code></td>
+                  <td><code>stdio</code></td>
+                  <td><code>stdio</code> or <code>http</code> (Streamable HTTP).</td>
+                </tr>
+                <tr>
+                  <td><code>TT_HTTP_TOKEN</code></td>
+                  <td>—</td>
+                  <td>Bearer token, <strong>required</strong> whenever <code>TT_TRANSPORT=http</code> (loopback included).</td>
+                </tr>
+                <tr>
+                  <td><code>TT_TIMEOUT_MS</code></td>
+                  <td><code>30000</code></td>
+                  <td>Per-request timeout (ms).</td>
+                </tr>
+                <tr>
+                  <td><code>TT_MAX_RETRIES</code></td>
+                  <td><code>3</code></td>
+                  <td>Retry cap for idempotent reads (429/5xx/network); publish inits are never retried.</td>
+                </tr>
+                <tr>
+                  <td><code>TT_PUBLISH_RPM</code></td>
+                  <td><code>6</code></td>
+                  <td>Local token bucket for publish inits, per profile.</td>
+                </tr>
+                <tr>
+                  <td><code>TT_RESULT_CHAR_BUDGET</code></td>
+                  <td><code>25000</code></td>
+                  <td>Character budget before a result is truncated (always valid JSON).</td>
+                </tr>
+                <tr>
+                  <td><code>TT_LOG_LEVEL</code></td>
+                  <td><code>info</code></td>
+                  <td><code>error</code> · <code>warn</code> · <code>info</code> · <code>debug</code> (stderr; never logs secrets).</td>
+                </tr>
+                <tr>
+                  <td><code>TT_ENV_FILE</code></td>
+                  <td>—</td>
+                  <td>Explicit env-file path; the journal and lock follow the resolved file.</td>
+                </tr>
+                <tr>
+                  <td><code>TT_PROFILE_&lt;NAME&gt;_*</code></td>
+                  <td>—</td>
+                  <td>The six token keys for an extra account profile.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            <span class="req">*</span> required. The full reference — HTTP,
+            upload, journal and env-lock knobs — is in
+            <a
+              href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/docs/CONFIGURATION.md"
+              target="_blank"
+              rel="noopener"
+              >CONFIGURATION.md</a
+            >.
+          </p>
+        </section>
+
+        <!-- PACKAGES -->
+        <section id="packages">
+          <h2>Tool packages</h2>
+          <p>
+            Tools are grouped into packages so you expose only what a given
+            client needs — fewer tools keep the model focused. Set
+            <code>TT_TOOL_PACKAGES</code> to a comma-separated list of packages
+            or a named profile:
+          </p>
+          <ul>
+            <li>
+              <code>core</code> (default) — <code>auth</code>,
+              <code>user</code>, <code>video</code>, <code>publish</code> (every
+              read-only tool).
+            </li>
+            <li><code>all</code> — every package, including the writes.</li>
+            <li>
+              Individual: <code>auth</code>, <code>user</code>,
+              <code>video</code>, <code>publish</code>,
+              <code>publish-write</code>.
+            </li>
+          </ul>
+          <div class="codeblock" data-lang="dotenv">
+            <pre><code># Reads plus direct publishing (no separate draft tooling needed)
+TT_TOOL_PACKAGES=core,publish-write</code></pre>
+          </div>
+          <p>
+            <code>publish-write</code> holds the four write tools and obeys
+            <code>TT_WRITE_MODE</code>; <code>TT_PACKAGES_DENY</code> always wins,
+            and <code>TT_PACKAGES_READONLY=1</code> drops the writes entirely.
+            <code>tiktok_get_auth_status</code> reports the resolved
+            configuration.
+          </p>
+        </section>
+
+        <!-- TOOLS -->
+        <section id="tools">
+          <h2>Tools reference</h2>
+          <p>
+            11 tools across 5 packages. <span class="pill ro">read</span> tools
+            never mutate your account; <span class="pill wr">write</span> tools
+            are gated by plan-then-execute — a call without a
+            <code>plan_id</code> previews and posts nothing.
+            <strong>Click any tool</strong> to expand its full parameter list —
+            name, type, whether it is required and any allowed values.
+          </p>
+          <div class="tools-search">
+            <span class="ts-glyph" aria-hidden="true">⌘</span>
+            <input
+              type="text"
+              id="tools-filter"
+              placeholder="Search tools…  e.g. video, post, journal"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="Search tools"
+            />
+            <span class="ts-count" id="tools-count" aria-live="polite"></span>
+          </div>
+          <p class="tools-controls">
+            <button type="button" class="ghost-btn" id="expand-all-tools">
+              Expand all
+            </button>
+            <button type="button" class="ghost-btn" id="collapse-all-tools">
+              Collapse all
+            </button>
+          </p>
+          <p class="tools-empty" id="tools-empty">
+            No tools match that search.
+          </p>
+
+          <h3 id="pkg-auth">auth <span class="pkg-meta">— Authorization status across account profiles. <em>(1 tool)</em></span></h3>
+          <details class="tool">
+            <summary><code>tiktok_get_auth_status</code> <span class="pill ro">read</span><span class="tool-sum">Report which account profiles are authorized, their granted scopes and token freshness — without exposing any secrets.</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td>Profile to report on; omit for every configured profile.</td></tr>
+              <tr><td><code>probe</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Make one live <code>user/info</code> call to confirm the token actually works.</td></tr>
+            </tbody></table></div>
+          </details>
+
+          <h3 id="pkg-user">user <span class="pkg-meta">— The authorized creator's public profile (Display API). <em>(1 tool)</em></span></h3>
+          <details class="tool">
+            <summary><code>tiktok_get_user_info</code> <span class="pill ro">read</span><span class="tool-sum">Fetch the authorized creator's public profile — display name, avatar and bio, plus optional profile and stats fields.</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td>Which profile to read; defaults to the active one.</td></tr>
+              <tr><td><code>fields</code></td><td>array</td><td><span class="opt">optional</span></td><td>Profile/stats fields to include; fields outside the granted scopes are dropped and noted.</td></tr>
+            </tbody></table></div>
+          </details>
+
+          <h3 id="pkg-video">video <span class="pkg-meta">— Your own posted videos (Display API). <em>(2 tools)</em></span></h3>
+          <details class="tool">
+            <summary><code>tiktok_list_videos</code> <span class="pill ro">read</span><span class="tool-sum">Page through the authorized user's own posted videos with cursor pagination.</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>cursor</code></td><td>string</td><td><span class="opt">optional</span></td><td>Pagination cursor from a previous page.</td></tr>
+              <tr><td><code>max_count</code></td><td>number</td><td><span class="opt">optional</span></td><td>1–20; page size.</td></tr>
+              <tr><td><code>fetch_all</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Follow the cursor up to the item cap (<code>TT_FETCH_ALL_CAP</code>).</td></tr>
+              <tr><td><code>fields</code></td><td>array</td><td><span class="opt">optional</span></td><td>Video fields to return.</td></tr>
+            </tbody></table></div>
+          </details>
+          <details class="tool">
+            <summary><code>tiktok_query_videos</code> <span class="pill ro">read</span><span class="tool-sum">Look up specific videos by id for the authorized user.</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>video_ids</code></td><td>array</td><td><span class="req">required</span></td><td>1–20 video ids to fetch.</td></tr>
+              <tr><td><code>fields</code></td><td>array</td><td><span class="opt">optional</span></td><td>Video fields to return.</td></tr>
+            </tbody></table></div>
+          </details>
+
+          <h3 id="pkg-publish">publish <span class="pkg-meta">— Read-only publishing context (Content Posting API). <em>(3 tools)</em></span></h3>
+          <details class="tool">
+            <summary><code>tiktok_get_creator_info</code> <span class="pill ro">read</span><span class="tool-sum">Read the creator's current publishing context — privacy options, interaction toggles and limits — required before any post.</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td>Which profile's publishing context to read.</td></tr>
+            </tbody></table></div>
+          </details>
+          <details class="tool">
+            <summary><code>tiktok_get_publish_status</code> <span class="pill ro">read</span><span class="tool-sum">Poll a publish or upload by publish_id until it reaches a terminal state (bounded wait).</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>publish_id</code></td><td>string</td><td><span class="req">required</span></td><td>The id returned by a post/upload tool.</td></tr>
+              <tr><td><code>wait_for_completion</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Default <code>true</code>; poll until terminal or the poll budget.</td></tr>
+            </tbody></table></div>
+          </details>
+          <details class="tool">
+            <summary><code>tiktok_list_publish_journal</code> <span class="pill ro">read</span><span class="tool-sum">Read the local append-only journal of every publish attempt this server has made.</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>limit</code></td><td>number</td><td><span class="opt">optional</span></td><td>1–100 entries.</td></tr>
+              <tr><td><code>since</code></td><td>string</td><td><span class="opt">optional</span></td><td>ISO-8601 lower bound on the entry timestamp.</td></tr>
+            </tbody></table></div>
+          </details>
+
+          <h3 id="pkg-publish-write">publish-write <span class="pkg-meta">— The four writes, gated by plan-then-execute. <em>(4 tools)</em></span></h3>
+          <details class="tool">
+            <summary><code>tiktok_post_video</code> <span class="pill wr">write</span><span class="tool-sum">Publish a video directly to TikTok (plan-then-execute); returns a publish_id.</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>source</code></td><td>enum</td><td><span class="req">required</span></td><td>one of: <code>file</code> · <code>url</code></td></tr>
+              <tr><td><code>file_path</code></td><td>string</td><td><span class="opt">optional</span></td><td>Required when <code>source=file</code>; resolved under <code>TT_MEDIA_ROOT</code>.</td></tr>
+              <tr><td><code>video_url</code></td><td>string</td><td><span class="opt">optional</span></td><td>Required when <code>source=url</code>; must be a verified-domain URL.</td></tr>
+              <tr><td><code>title</code></td><td>string</td><td><span class="opt">optional</span></td><td>Caption, ≤ 2200 chars.</td></tr>
+              <tr><td><code>privacy_level</code></td><td>enum</td><td><span class="req">required</span></td><td>one of: <code>PUBLIC_TO_EVERYONE</code> · <code>MUTUAL_FOLLOW_FRIENDS</code> · <code>FOLLOWER_OF_CREATOR</code> · <code>SELF_ONLY</code></td></tr>
+              <tr><td><code>disable_comment</code></td><td>boolean</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>disable_duet</code></td><td>boolean</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>disable_stitch</code></td><td>boolean</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>video_cover_timestamp_ms</code></td><td>number</td><td><span class="opt">optional</span></td><td>Frame to use as the cover.</td></tr>
+              <tr><td><code>brand_content_toggle</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Paid-partnership disclosure.</td></tr>
+              <tr><td><code>brand_organic_toggle</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Your own brand promotion.</td></tr>
+              <tr><td><code>is_aigc</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>AI-generated-content label (default from <code>TT_DEFAULT_AIGC_LABEL</code>).</td></tr>
+              <tr><td><code>wait_for_completion</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Default <code>false</code>.</td></tr>
+              <tr><td><code>plan_id</code></td><td>string</td><td><span class="opt">optional</span></td><td>Omit to preview; pass a minted id to execute the previewed payload.</td></tr>
+              <tr><td><code>force</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Re-validate and bypass a stale-plan guard.</td></tr>
+            </tbody></table></div>
+          </details>
+          <details class="tool">
+            <summary><code>tiktok_upload_video_draft</code> <span class="pill wr">write</span><span class="tool-sum">Upload a video to the creator's TikTok inbox as a draft (plan-then-execute) — no caption or privacy is set until they finish it in the app.</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>source</code></td><td>enum</td><td><span class="req">required</span></td><td>one of: <code>file</code> · <code>url</code></td></tr>
+              <tr><td><code>file_path</code></td><td>string</td><td><span class="opt">optional</span></td><td>Required when <code>source=file</code>; resolved under <code>TT_MEDIA_ROOT</code>.</td></tr>
+              <tr><td><code>video_url</code></td><td>string</td><td><span class="opt">optional</span></td><td>Required when <code>source=url</code>; verified-domain URL.</td></tr>
+              <tr><td><code>wait_for_completion</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Default <code>false</code>.</td></tr>
+              <tr><td><code>plan_id</code></td><td>string</td><td><span class="opt">optional</span></td><td>Omit to preview; pass a minted id to execute.</td></tr>
+              <tr><td><code>force</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Re-validate and bypass a stale-plan guard.</td></tr>
+            </tbody></table></div>
+          </details>
+          <details class="tool">
+            <summary><code>tiktok_post_photos</code> <span class="pill wr">write</span><span class="tool-sum">Publish a photo carousel post (plan-then-execute); returns a publish_id.</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>photo_urls</code></td><td>array</td><td><span class="req">required</span></td><td>1–35 verified-domain image URLs, in order.</td></tr>
+              <tr><td><code>photo_cover_index</code></td><td>number</td><td><span class="opt">optional</span></td><td>Which photo is the cover.</td></tr>
+              <tr><td><code>title</code></td><td>string</td><td><span class="opt">optional</span></td><td>≤ 90 chars.</td></tr>
+              <tr><td><code>description</code></td><td>string</td><td><span class="opt">optional</span></td><td>≤ 4000 chars.</td></tr>
+              <tr><td><code>privacy_level</code></td><td>enum</td><td><span class="req">required</span></td><td>one of: <code>PUBLIC_TO_EVERYONE</code> · <code>MUTUAL_FOLLOW_FRIENDS</code> · <code>FOLLOWER_OF_CREATOR</code> · <code>SELF_ONLY</code></td></tr>
+              <tr><td><code>disable_comment</code></td><td>boolean</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>auto_add_music</code></td><td>boolean</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>brand_content_toggle</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Paid-partnership disclosure.</td></tr>
+              <tr><td><code>brand_organic_toggle</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Your own brand promotion.</td></tr>
+              <tr><td><code>is_aigc</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>AI-generated-content label (default from <code>TT_DEFAULT_AIGC_LABEL</code>).</td></tr>
+              <tr><td><code>wait_for_completion</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Default <code>false</code>.</td></tr>
+              <tr><td><code>plan_id</code></td><td>string</td><td><span class="opt">optional</span></td><td>Omit to preview; pass a minted id to execute.</td></tr>
+              <tr><td><code>force</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Re-validate and bypass a stale-plan guard.</td></tr>
+            </tbody></table></div>
+          </details>
+          <details class="tool">
+            <summary><code>tiktok_upload_photos_draft</code> <span class="pill wr">write</span><span class="tool-sum">Upload a photo post to the inbox as a draft (plan-then-execute).</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>photo_urls</code></td><td>array</td><td><span class="req">required</span></td><td>1–35 verified-domain image URLs, in order.</td></tr>
+              <tr><td><code>photo_cover_index</code></td><td>number</td><td><span class="opt">optional</span></td><td>Which photo is the cover.</td></tr>
+              <tr><td><code>title</code></td><td>string</td><td><span class="opt">optional</span></td><td>≤ 90 chars.</td></tr>
+              <tr><td><code>description</code></td><td>string</td><td><span class="opt">optional</span></td><td>≤ 4000 chars.</td></tr>
+              <tr><td><code>wait_for_completion</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Default <code>false</code>.</td></tr>
+              <tr><td><code>plan_id</code></td><td>string</td><td><span class="opt">optional</span></td><td>Omit to preview; pass a minted id to execute.</td></tr>
+              <tr><td><code>force</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Re-validate and bypass a stale-plan guard.</td></tr>
+            </tbody></table></div>
+          </details>
+        </section>
+
+        <!-- USE CASES -->
+        <section id="use-cases">
+          <h2>Use cases</h2>
+          <p class="lead">
+            What you'd actually ask your assistant to do. Each example is plain
+            English — the server maps it to the right tools.
+          </p>
+
+          <div class="usecase">
+            <h3>📋 Weekly performance recap</h3>
+            <div class="who">Creator · social manager</div>
+            <p>
+              Summarize how the last week of videos performed — views, the best
+              and worst performers, and how the follower count moved — by paging
+              your own videos and reading the profile stats.
+            </p>
+            <div class="prompt">
+              <span class="tag">Prompt</span>
+              "Recap how my videos did this week and whether my followers grew."
+            </div>
+            <div class="under-hood">
+              <span class="tag">Tools</span> <code>tiktok_list_videos</code>
+              <span class="arrow">→</span> <code>tiktok_get_user_info</code>
+            </div>
+          </div>
+
+          <div class="usecase">
+            <h3>🚀 Publish with a preview</h3>
+            <div class="who">Creator · brand</div>
+            <p>
+              Read the account's publishing context, then post a video — but the
+              first call only <strong>previews</strong> and mints a
+              <code>plan_id</code>. You confirm, the assistant calls again with
+              the id, and only then does it post.
+            </p>
+            <div class="prompt">
+              <span class="tag">Prompt</span>
+              "Post launch.mp4 as public, but show me the preview first."
+            </div>
+            <div class="under-hood">
+              <span class="tag">Tools</span> <code>tiktok_get_creator_info</code>
+              <span class="arrow">→</span> <code>tiktok_post_video</code>
+            </div>
+          </div>
+
+          <div class="usecase">
+            <h3>🖼️ Photo carousel drop</h3>
+            <div class="who">Creator · e-commerce</div>
+            <p>
+              Upload a set of product shots as a draft photo carousel to the
+              inbox, so you can add music and finish it in the TikTok app before
+              it goes live.
+            </p>
+            <div class="prompt">
+              <span class="tag">Prompt</span>
+              "Upload these 8 product photos as a draft carousel for me to review."
+            </div>
+            <div class="under-hood">
+              <span class="tag">Tools</span> <code>tiktok_get_creator_info</code>
+              <span class="arrow">→</span> <code>tiktok_upload_photos_draft</code>
+            </div>
+          </div>
+
+          <div class="usecase">
+            <h3>🔎 Look up specific videos</h3>
+            <div class="who">Analyst · reporting</div>
+            <p>
+              Pull the metadata and stats for a known set of video ids in one
+              call — no scrolling the whole list — to drop into a report.
+            </p>
+            <div class="prompt">
+              <span class="tag">Prompt</span>
+              "Get the view and like counts for these three video ids."
+            </div>
+            <div class="under-hood">
+              <span class="tag">Tools</span> <code>tiktok_query_videos</code>
+            </div>
+          </div>
+
+          <div class="usecase">
+            <h3>👥 Manage two accounts</h3>
+            <div class="who">Agency · multi-brand</div>
+            <p>
+              One server, two logins. Route a single post to the brand account
+              instead of your personal one by naming the profile — the selection
+              is isolated per call, so nothing crosses over.
+            </p>
+            <div class="prompt">
+              <span class="tag">Prompt</span>
+              "Post this clip to the brand account, not my personal one."
+            </div>
+            <div class="under-hood">
+              <span class="tag">Tools</span> <code>tiktok_get_auth_status</code>
+              <span class="arrow">→</span>
+              <code>tiktok_post_video</code> <span class="tdim">(account: "brand")</span>
+            </div>
+          </div>
+
+          <div class="usecase">
+            <h3>🧾 Prove it posted</h3>
+            <div class="who">Ops · automation</div>
+            <p>
+              Did last night's post actually go out? Read the append-only publish
+              journal for the attempt, then poll its
+              <code>publish_id</code> for the final state.
+            </p>
+            <div class="prompt">
+              <span class="tag">Prompt</span>
+              "Did my scheduled post from last night actually publish?"
+            </div>
+            <div class="under-hood">
+              <span class="tag">Tools</span>
+              <code>tiktok_list_publish_journal</code>
+              <span class="arrow">→</span> <code>tiktok_get_publish_status</code>
+            </div>
+          </div>
+        </section>
+
+        <!-- SECURITY -->
+        <section id="security">
+          <h2>Security &amp; governance</h2>
+          <p>
+            An AI with publish access to a TikTok account is high-stakes by
+            definition. The server is built to keep that safe and auditable.
+          </p>
+          <div class="cards">
+            <div class="card">
+              <h3>Plan-then-execute</h3>
+              <p>
+                Every write returns a non-mutating preview and a single-use
+                <code>plan_id</code>; nothing posts until you call again with
+                that id (valid <code>TT_PLAN_TTL_S</code> seconds).
+                <code>apply</code> mode is opt-in and documented as "trusted
+                automation only".
+              </p>
+            </div>
+            <div class="card">
+              <h3>Read-only deployments</h3>
+              <p>
+                <code>TT_PACKAGES_READONLY=1</code> registers only the read
+                tools; <code>TT_WRITE_MODE=deny</code> drops publishing entirely.
+                Ideal for an analytics-only client.
+              </p>
+            </div>
+            <div class="card">
+              <h3>Least-privilege scopes</h3>
+              <p>
+                <code>login</code> requests only the OAuth scopes the enabled
+                packages need — a draft-only setup never asks for
+                <code>video.publish</code> — and the user can narrow the grant
+                further on the consent screen.
+              </p>
+            </div>
+            <div class="card">
+              <h3>Media containment &amp; SSRF</h3>
+              <p>
+                <code>FILE_UPLOAD</code> tools read only from
+                <code>TT_MEDIA_ROOT</code> (fail-closed when unset); URL posting
+                is confined to your portal-verified domains. Tokens live only in
+                the <code>0600</code> env file — never in logs, journal or tool
+                results.
+              </p>
+            </div>
+          </div>
+          <div class="callout warn">
+            <span class="c-ico">⚠️</span>
+            <p>
+              <strong>The write guard doesn't replace TikTok's app-audit
+              gate.</strong> Until your app passes TikTok's content-posting
+              audit, direct posts land as <code>SELF_ONLY</code> regardless of
+              the <code>privacy_level</code> you send — TikTok enforces that
+              upstream, not this server. Uploading drafts to the inbox works
+              meanwhile.
+            </p>
+          </div>
+          <p>
+            Full details — including the reporting channel — are in
+            <a
+              href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/SECURITY.md"
+              target="_blank"
+              rel="noopener"
+              >SECURITY.md</a
+            >.
+          </p>
+        </section>
+
+        <!-- ARCHITECTURE -->
+        <section id="architecture">
+          <h2>Architecture</h2>
+          <p>
+            A small, layered TypeScript codebase with <strong>one-way
+            dependencies</strong> (enforced at lint time), so each concern stays
+            testable in isolation. Each layer may use only the layers beneath it:
+          </p>
+
+          <figure class="diagram">
+            <svg viewBox="0 0 760 352" role="img"
+              aria-label="Layered architecture: tools depend on mcp, which depends on api, which depends on core.">
+              <!-- tools (layer 3) -->
+              <rect class="box" x="120" y="14" width="540" height="64" rx="11" />
+              <text class="lbl" x="144" y="41">tools</text>
+              <text class="sub" x="144" y="60">declarative ToolSpec files — a package is a plug-in</text>
+              <text class="tag" x="636" y="40" text-anchor="end">LAYER 3</text>
+              <!-- mcp (layer 2) -->
+              <rect class="box" x="120" y="100" width="540" height="64" rx="11" />
+              <text class="lbl" x="144" y="127">mcp</text>
+              <text class="sub" x="144" y="146">registry · plan store · journal · result envelope · define</text>
+              <text class="tag" x="636" y="126" text-anchor="end">LAYER 2 · MCP SDK</text>
+              <!-- api (layer 1) -->
+              <rect class="box" x="120" y="186" width="540" height="64" rx="11" />
+              <text class="lbl" x="144" y="213">api</text>
+              <text class="sub" x="144" y="232">user · video · publish · chunked upload (Display + Content Posting)</text>
+              <text class="tag" x="636" y="212" text-anchor="end">LAYER 1</text>
+              <!-- core (layer 0) -->
+              <rect class="box accent" x="120" y="272" width="540" height="64" rx="11" />
+              <text class="lbl" x="144" y="299">core</text>
+              <text class="sub" x="144" y="318">http · oauth (PKCE) · config · env-lock · redact · errors</text>
+              <text class="tag" x="636" y="298" text-anchor="end">LAYER 0 · no SDK</text>
+              <!-- dependency arrows (down = "uses") -->
+              <line class="edge" x1="390" y1="80" x2="390" y2="93" />
+              <polygon class="ah" points="384,93 396,93 390,99" />
+              <text class="edge-lbl" x="404" y="93">uses ↓</text>
+              <line class="edge" x1="390" y1="166" x2="390" y2="179" />
+              <polygon class="ah" points="384,179 396,179 390,185" />
+              <line class="edge" x1="390" y1="252" x2="390" y2="265" />
+              <polygon class="ah" points="384,265 396,265 390,271" />
+            </svg>
+            <figcaption>
+              Layers and one-way dependencies — a deliberate
+              <code>api → mcp</code> import fails the lint.
+            </figcaption>
+          </figure>
+
+          <p>
+            Tools are <em>data</em>: a declarative manifest drives MCP
+            registration, the generated docs and the contract snapshot tests, so
+            adding a package touches exactly one list. A single tool call then
+            flows through the same guards every time:
+          </p>
+
+          <figure class="diagram">
+            <svg viewBox="0 0 760 414" role="img"
+              aria-label="Request lifecycle: client to registry to plan/policy/auth to HTTP client to TikTok, and a result envelope back to the client.">
+              <!-- 1 client -->
+              <rect class="box" x="60" y="14" width="470" height="56" rx="11" />
+              <text class="lbl" x="84" y="40">MCP client</text>
+              <text class="sub" x="84" y="58">Claude · VS Code — a natural-language request</text>
+              <!-- 2 registry -->
+              <rect class="box" x="60" y="96" width="470" height="56" rx="11" />
+              <text class="lbl" x="84" y="122">Registry · runSpec</text>
+              <text class="sub" x="84" y="140">strict zod validation · per-profile routing (ALS)</text>
+              <!-- 3 plan/policy/auth -->
+              <rect class="box" x="60" y="178" width="470" height="56" rx="11" />
+              <text class="lbl" x="84" y="204">Plan · Policy · Auth</text>
+              <text class="sub" x="84" y="222">plan-then-execute · package guards · OAuth refresh</text>
+              <!-- 4 http -->
+              <rect class="box" x="60" y="260" width="470" height="56" rx="11" />
+              <text class="lbl" x="84" y="286">HTTP client</text>
+              <text class="sub" x="84" y="304">egress allowlist · concurrency · retry + publish bucket</text>
+              <!-- 5 tiktok -->
+              <rect class="box accent" x="60" y="342" width="470" height="56" rx="11" />
+              <text class="lbl" x="84" y="368">TikTok APIs</text>
+              <text class="sub" x="84" y="386">Display &amp; Content Posting over HTTPS</text>
+              <!-- down arrows -->
+              <line class="edge" x1="295" y1="72" x2="295" y2="88" />
+              <polygon class="ah" points="289,88 301,88 295,94" />
+              <text class="edge-lbl" x="309" y="86">request ↓</text>
+              <line class="edge" x1="295" y1="154" x2="295" y2="170" />
+              <polygon class="ah" points="289,170 301,170 295,176" />
+              <line class="edge" x1="295" y1="236" x2="295" y2="252" />
+              <polygon class="ah" points="289,252 301,252 295,258" />
+              <line class="edge" x1="295" y1="318" x2="295" y2="334" />
+              <polygon class="ah" points="289,334 301,334 295,340" />
+              <!-- return path: tiktok -> client -->
+              <path class="edge"
+                d="M 530 370 H 668 Q 690 370 690 348 V 64 Q 690 42 668 42 H 540" />
+              <polygon class="ah" points="540,36 540,48 531,42" />
+              <text class="edge-lbl" transform="rotate(-90 706 206)" x="706" y="206"
+                text-anchor="middle">result envelope · ok() / fail()</text>
+            </svg>
+            <figcaption>
+              The lifecycle of one tool call — every request passes the same
+              plan, auth and resilience layers, and all network access flows
+              through the <code>api</code> layer.
+            </figcaption>
+          </figure>
+
+          <p>
+            Quality is enforced by a single gate — <code>npm run check</code>
+            (build, type-checked lint, format, coverage-gated tests, prod audit)
+            — and a CI matrix across Node 22/24. See
+            <a
+              href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/docs/ARCHITECTURE.md"
+              target="_blank"
+              rel="noopener"
+              >ARCHITECTURE.md</a
+            >
+            for the layer map and rationale.
+          </p>
+        </section>
+
+        <!-- TROUBLESHOOTING -->
+        <section id="troubleshooting">
+          <h2>Troubleshooting</h2>
+          <p>
+            Errors come back <strong>structured</strong> (with an HTTP status and
+            a code), so your assistant can usually explain them — but here are the
+            common ones and their fix.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>401</code> / invalid token</td>
+                  <td>The access token expired, or the user revoked the app in TikTok settings.</td>
+                  <td>
+                    The server auto-refreshes once; if it persists, re-run
+                    <code>npx tiktok-mcp-ai login</code>. Check status with
+                    <code>tiktok_get_auth_status</code>.
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>scope_not_authorized</code></td>
+                  <td>The token predates a scope a tool needs (e.g. <code>video.publish</code>).</td>
+                  <td>
+                    Re-run login requesting the scope:
+                    <code>npx tiktok-mcp-ai login --scopes video.publish</code>.
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>url_ownership_unverified</code></td>
+                  <td>The video/photo URL's domain isn't verified in your TikTok developer portal.</td>
+                  <td>
+                    Verify the domain in the portal, or set
+                    <code>TT_VERIFIED_URL_PREFIXES</code> to catch it at plan time.
+                  </td>
+                </tr>
+                <tr>
+                  <td>"source 'file' is disabled"</td>
+                  <td><code>TT_MEDIA_ROOT</code> is unset (fail-closed), or the file is outside it.</td>
+                  <td>
+                    Set <code>TT_MEDIA_ROOT</code> to a dedicated media folder and
+                    restart, or host the media on a verified URL and use
+                    <code>source: "url"</code>.
+                  </td>
+                </tr>
+                <tr>
+                  <td><code>plan_not_found</code></td>
+                  <td>The <code>plan_id</code> expired (<code>TT_PLAN_TTL_S</code>) or the server restarted.</td>
+                  <td>
+                    Re-run the tool <strong>without</strong> a <code>plan_id</code>
+                    for a fresh preview, then execute with the new id.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Direct post landed as private</td>
+                  <td>Your app hasn't passed TikTok's content-posting audit yet.</td>
+                  <td>
+                    Enforced by TikTok, not the server — submit your app for
+                    review. Drafts (<code>upload_*_draft</code>) work meanwhile.
+                  </td>
+                </tr>
+                <tr>
+                  <td>Result says <code>truncated</code></td>
+                  <td>The read exceeded <code>TT_RESULT_CHAR_BUDGET</code>.</td>
+                  <td>
+                    Select fewer <code>fields</code> or a smaller
+                    <code>max_count</code>, or raise the budget.
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="callout">
+            <span class="c-ico">🔎</span>
+            <p>
+              Set <code>TT_LOG_LEVEL=debug</code> for verbose
+              <code>stderr</code> logging (never logs tokens), and run
+              <code>npx tiktok-mcp-ai doctor</code> to see the env-file location,
+              the configured profiles and each token's freshness.
+            </p>
+          </div>
+        </section>
+
+        <!-- FAQ -->
+        <section id="faq">
+          <h2>FAQ</h2>
+          <h3>How is this different from an official TikTok integration?</h3>
+          <p>
+            It's an independent, community-built MCP server, not affiliated with
+            TikTok. It talks to the same official
+            <a href="https://developers.tiktok.com" target="_blank" rel="noopener"
+              >TikTok for Developers</a
+            >
+            APIs (Display + Content Posting) you'd use directly, but wraps them
+            for an AI client: OAuth login, plan-then-execute write safety,
+            multi-account profiles and token-thrifty results. You bring your own
+            TikTok app and the model and client you choose.
+          </p>
+          <h3>Does the AI post to TikTok without my confirmation?</h3>
+          <p>
+            Not in the default <code>plan</code> mode. Every write tool called
+            without a <code>plan_id</code> returns a non-mutating preview plus a
+            single-use <code>plan_id</code> and posts nothing; the model (or you)
+            must call again with that id to execute the previewed payload. The
+            opt-in <code>apply</code> mode removes the second step and is
+            documented as "trusted automation only".
+          </p>
+          <h3>Why is the npm package <code>tiktok-mcp-ai</code>?</h3>
+          <p>
+            The package ships as <code>tiktok-mcp-ai</code> and the GitHub
+            repository is
+            <a
+              href="https://github.com/IvanBBaev/tiktok-mcp"
+              target="_blank"
+              rel="noopener"
+              ><code>IvanBBaev/tiktok-mcp</code></a
+            >. This is an independent project, not affiliated with or endorsed by
+            TikTok or ByteDance Ltd.; "TikTok" is a trademark of ByteDance Ltd.,
+            used here only to indicate compatibility.
+          </p>
+          <h3>Why did my direct post end up private?</h3>
+          <p>
+            Until your TikTok app passes TikTok's content-posting audit, TikTok
+            forces every direct post to <code>SELF_ONLY</code> regardless of the
+            <code>privacy_level</code> you send. That's an upstream platform gate,
+            not a server limitation; uploading to the inbox as a draft works in
+            the meantime.
+          </p>
+          <h3>Can I manage several accounts from one server?</h3>
+          <p>
+            Yes. One TikTok app can serve many creators: log each in with
+            <code>login --profile &lt;name&gt;</code>, then pass
+            <code>account: "&lt;name&gt;"</code> on any tool call, or set
+            <code>TT_ACTIVE_PROFILE</code>. Selection is isolated per call via
+            <code>AsyncLocalStorage</code>, so parallel calls to different
+            accounts never mix.
+          </p>
+          <h3>Which clients work?</h3>
+          <p>
+            Any MCP client over stdio — Claude Desktop, Claude Code, VS Code
+            Chat, the MCP Inspector, and others. The server declares tool
+            annotations so clients can apply the right confirmation UX for the
+            write tools.
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <footer>
+      <div class="foot-inner">
+        <div>
+          <strong>tiktok-mcp-ai</strong> · MIT License · built by Ivan Baev
+          <br />
+          An unofficial Model Context Protocol server for TikTok.
+        </div>
+        <div>
+          <a href="https://github.com/IvanBBaev/tiktok-mcp" target="_blank" rel="noopener">GitHub</a> ·
+          <a href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/README.md" target="_blank" rel="noopener">README</a> ·
+          <a href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a> ·
+          <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">About MCP</a>
+          <span class="foot-support" aria-label="Support this project">
+            <span class="foot-support-label">Support:</span>
+            <a class="sponsor-link" href="https://github.com/sponsors/IvanBBaev" target="_blank" rel="noopener">&#9829; Sponsor</a>
+            <a class="kofi-link" href="https://ko-fi.com/ivanbbaev" target="_blank" rel="noopener">&#9749; Ko-fi</a>
+            <a class="donate-link" href="https://donatr.ee/ivanbbaev/" target="_blank" rel="noopener">&#127873; Donate</a>
+          </span>
+        </div>
+      </div>
+      <p class="disclaimer" style="opacity: 0.7; font-size: 0.8rem; margin-top: 1rem">
+        <strong>Trademark &amp; affiliation.</strong> <strong>tiktok-mcp-ai</strong>
+        is an independent, community-built open-source project. It is
+        <strong>not</strong> affiliated with, endorsed by, sponsored by, or in any
+        way officially connected to TikTok, ByteDance Ltd., or any of their
+        subsidiaries or affiliates.
+      </p>
+      <p class="disclaimer" style="opacity: 0.7; font-size: 0.8rem; margin-top: 0.6rem">
+        "TikTok" and all related names, marks, logos, and brand features are
+        trademarks of ByteDance Ltd. and its affiliates. They are used in this
+        project only <strong>nominatively</strong> — to identify the third-party
+        service that this MCP server connects to — as permitted by nominative fair
+        use. No sponsorship or endorsement is implied.
+      </p>
+      <p class="disclaimer" style="opacity: 0.7; font-size: 0.8rem; margin-top: 0.6rem">
+        This project accesses TikTok exclusively through the official TikTok for
+        Developers APIs and is subject to TikTok's Developer Terms of Service and
+        platform policies. You are responsible for your own use of the TikTok APIs
+        and for complying with all applicable TikTok terms. The software is
+        provided "as is", without warranty of any kind.
+      </p>
+    </footer>
+
+    <button id="toTop" class="to-top" aria-label="Back to top" title="Back to top">
+      ↑
+    </button>
+
+    <script src="assets/app.js"></script>
+    <!-- Inline, dependency-free client-side documentation search.
+         Filters the sticky sidebar TOC and highlights matches in-page.
+         No external assets, no network, plain DOM over the page's own content. -->
+    <script>
+      (function () {
+        "use strict";
+        var input = document.getElementById("doc-search");
+        var content = document.querySelector("main.content");
+        var sidebar = document.getElementById("sidebar");
+        var countEl = document.getElementById("doc-search-count");
+        var emptyEl = document.getElementById("doc-search-empty");
+        if (!input || !content || !sidebar) return;
+
+        // All content sections that carry an id (these are the TOC targets).
+        var sections = Array.prototype.slice.call(
+          content.querySelectorAll("section[id]"),
+        );
+        // Sidebar TOC links + their group heading (h4) for group hiding.
+        var navLinks = Array.prototype.slice.call(
+          sidebar.querySelectorAll("nav a[href^='#']"),
+        );
+        var groupHeadings = Array.prototype.slice.call(
+          sidebar.querySelectorAll("h4"),
+        );
+
+        // Map: section id -> its sidebar link (may be undefined for some).
+        var linkById = {};
+        navLinks.forEach(function (a) {
+          var id = (a.getAttribute("href") || "").slice(1);
+          if (id) linkById[id] = a;
+        });
+
+        // Cache the lowercased searchable text per section once (headings +
+        // body text), so typing stays cheap even with all 11 tools on the page.
+        var sectionText = new Map();
+        sections.forEach(function (sec) {
+          sectionText.set(sec, (sec.textContent || "").toLowerCase());
+        });
+
+        // ---- Highlighting (safe, fully reversible) --------------------------
+        // We only wrap matches inside text nodes, never touching element markup,
+        // and we remember every <mark> we create so clearing restores the DOM.
+        var SKIP = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, MARK: 1 };
+        var activeMarks = [];
+
+        function clearHighlights() {
+          activeMarks.forEach(function (mark) {
+            var parent = mark.parentNode;
+            if (!parent) return;
+            // Replace the <mark> with its plain text, then merge text nodes.
+            parent.replaceChild(
+              document.createTextNode(mark.textContent),
+              mark,
+            );
+            parent.normalize();
+          });
+          activeMarks = [];
+        }
+
+        function highlightIn(root, needle) {
+          if (!needle) return;
+          var walker = document.createTreeWalker(
+            root,
+            NodeFilter.SHOW_TEXT,
+            {
+              acceptNode: function (node) {
+                if (!node.nodeValue || !node.nodeValue.trim())
+                  return NodeFilter.FILTER_REJECT;
+                var p = node.parentNode;
+                while (p && p !== root) {
+                  if (SKIP[p.nodeName]) return NodeFilter.FILTER_REJECT;
+                  p = p.parentNode;
+                }
+                return node.nodeValue.toLowerCase().indexOf(needle) !== -1
+                  ? NodeFilter.FILTER_ACCEPT
+                  : NodeFilter.FILTER_REJECT;
+              },
+            },
+          );
+          var targets = [];
+          var n;
+          while ((n = walker.nextNode())) targets.push(n);
+          targets.forEach(function (textNode) {
+            var text = textNode.nodeValue;
+            var lower = text.toLowerCase();
+            var frag = document.createDocumentFragment();
+            var pos = 0;
+            var idx;
+            while ((idx = lower.indexOf(needle, pos)) !== -1) {
+              if (idx > pos)
+                frag.appendChild(
+                  document.createTextNode(text.slice(pos, idx)),
+                );
+              var mark = document.createElement("mark");
+              mark.className = "doc-hit";
+              mark.textContent = text.slice(idx, idx + needle.length);
+              frag.appendChild(mark);
+              activeMarks.push(mark);
+              pos = idx + needle.length;
+            }
+            if (pos < text.length)
+              frag.appendChild(document.createTextNode(text.slice(pos)));
+            textNode.parentNode.replaceChild(frag, textNode);
+          });
+        }
+
+        // ---- Apply the current query ---------------------------------------
+        function apply() {
+          var q = input.value.trim().toLowerCase();
+          clearHighlights();
+
+          if (q === "") {
+            content.classList.remove("doc-search-active");
+            sections.forEach(function (s) {
+              s.classList.remove("doc-nomatch");
+            });
+            navLinks.forEach(function (a) {
+              a.classList.remove("toc-hidden");
+            });
+            groupHeadings.forEach(function (h) {
+              h.classList.remove("toc-hidden");
+            });
+            if (countEl) countEl.textContent = "";
+            if (emptyEl) emptyEl.hidden = true;
+            return;
+          }
+
+          content.classList.add("doc-search-active");
+          var matches = 0;
+          var matchedLinks = new Set();
+          sections.forEach(function (sec) {
+            var hit = (sectionText.get(sec) || "").indexOf(q) !== -1;
+            sec.classList.toggle("doc-nomatch", !hit);
+            if (hit) {
+              matches++;
+              highlightIn(sec, q);
+              var link = linkById[sec.id];
+              if (link) matchedLinks.add(link);
+            }
+          });
+
+          // Filter the sidebar TOC to the sections that matched.
+          navLinks.forEach(function (a) {
+            a.classList.toggle("toc-hidden", !matchedLinks.has(a));
+          });
+          // Hide a group heading when all of its links are hidden.
+          groupHeadings.forEach(function (h) {
+            var group = [];
+            var node = h.nextElementSibling;
+            while (node && node.tagName !== "H4") {
+              if (node.tagName === "NAV") {
+                group = group.concat(
+                  Array.prototype.slice.call(node.querySelectorAll("a")),
+                );
+              }
+              node = node.nextElementSibling;
+            }
+            var anyVisible = group.some(function (a) {
+              return !a.classList.contains("toc-hidden");
+            });
+            h.classList.toggle("toc-hidden", group.length > 0 && !anyVisible);
+          });
+
+          if (countEl)
+            countEl.textContent =
+              matches + "/" + sections.length;
+          if (emptyEl) emptyEl.hidden = matches !== 0;
+        }
+
+        // Debounce input so highlighting many nodes never blocks typing.
+        var debounce;
+        input.addEventListener("input", function () {
+          clearTimeout(debounce);
+          debounce = setTimeout(apply, 120);
+        });
+
+        // Escape clears the search from within the field.
+        input.addEventListener("keydown", function (e) {
+          if (e.key === "Escape" && input.value) {
+            e.preventDefault();
+            input.value = "";
+            apply();
+          }
+        });
+
+        // Global "/" shortcut focuses the doc search (unless already typing).
+        document.addEventListener("keydown", function (e) {
+          if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
+          var t = e.target;
+          var tag = t && t.tagName;
+          if (
+            tag === "INPUT" ||
+            tag === "TEXTAREA" ||
+            (t && t.isContentEditable)
+          )
+            return;
+          e.preventDefault();
+          input.focus();
+        });
+      })();
+    </script>
+  </body>
+</html>

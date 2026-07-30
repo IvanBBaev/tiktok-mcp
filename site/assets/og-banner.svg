@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Open Graph / social share banner for tiktok-mcp-ai (1200x630).
+  This SVG is the source of truth for the social card. Most crawlers
+  (Slack, Discord, iMessage, Twitter/X) prefer a raster image, so a
+  1200x630 raster og-image.png SHOULD be exported from this file and
+  added alongside it; point og:image at the PNG once it exists.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="tiktok-mcp-ai — Unofficial TikTok MCP Server">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#0a1615"/>
+    </linearGradient>
+    <linearGradient id="tt" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#00f2ea"/>
+      <stop offset="1" stop-color="#ff0050"/>
+    </linearGradient>
+    <radialGradient id="glowCyan" cx="0.82" cy="0.08" r="0.6">
+      <stop offset="0" stop-color="#00f2ea" stop-opacity="0.20"/>
+      <stop offset="1" stop-color="#00f2ea" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowPink" cx="0.05" cy="0.95" r="0.6">
+      <stop offset="0" stop-color="#ff0050" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#ff0050" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#glowCyan)"/>
+  <rect width="1200" height="630" fill="url(#glowPink)"/>
+  <rect x="8" y="8" width="1184" height="614" rx="22" fill="none" stroke="#ffffff" stroke-opacity="0.07"/>
+
+  <!-- Logo mark -->
+  <g transform="translate(96,120)">
+    <rect width="104" height="104" rx="24" fill="url(#tt)"/>
+    <text x="52" y="70" text-anchor="middle" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace" font-size="46" font-weight="700" fill="#ffffff">tt</text>
+  </g>
+
+  <!-- Wordmark + eyebrow -->
+  <text x="230" y="150" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="20" letter-spacing="3" fill="#5ff6f0">UNOFFICIAL · MCP SERVER</text>
+  <text x="230" y="212" font-family="'Space Grotesk', 'Segoe UI', system-ui, sans-serif" font-size="66" font-weight="700" fill="#f4faf7">tiktok-mcp-ai</text>
+
+  <!-- Headline -->
+  <text x="96" y="322" font-family="'Space Grotesk', 'Segoe UI', system-ui, sans-serif" font-size="42" font-weight="600" fill="#e7efea">Drive TikTok from your AI assistant.</text>
+
+  <!-- Sub description -->
+  <text x="96" y="382" font-family="'IBM Plex Sans', system-ui, sans-serif" font-size="26" fill="#9aa8a0">A safe, policy-governed MCP server over the official TikTok</text>
+  <text x="96" y="418" font-family="'IBM Plex Sans', system-ui, sans-serif" font-size="26" fill="#9aa8a0">Display &amp; Content Posting APIs — plan-then-execute writes.</text>
+
+  <!-- Fact strip -->
+  <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="22" fill="#cfe0d8">
+    <text x="96" y="500">11 tools</text>
+    <text x="236" y="500" fill="#6f7d75">·</text>
+    <text x="262" y="500">5 packages</text>
+    <text x="420" y="500" fill="#6f7d75">·</text>
+    <text x="446" y="500">OAuth 2.0 (PKCE)</text>
+    <text x="700" y="500" fill="#6f7d75">·</text>
+    <text x="726" y="500">MIT</text>
+  </g>
+
+  <!-- Footer URL -->
+  <text x="96" y="566" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="22" fill="#5ff6f0">github.com/IvanBBaev/tiktok-mcp-ai</text>
+</svg>

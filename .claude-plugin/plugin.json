@@ -1,0 +1,23 @@
+{
+  "name": "tiktok-mcp-ai",
+  "displayName": "TikTok MCP",
+  "version": "0.0.0",
+  "description": "Drive TikTok from your AI assistant — 11 tools over the Display API and Content Posting API, with OAuth 2.0 (PKCE) and plan-then-execute write safety.",
+  "author": { "name": "Ivan Baev", "url": "https://github.com/IvanBBaev" },
+  "homepage": "https://ivanbbaev.github.io/tiktok-mcp/",
+  "repository": "https://github.com/IvanBBaev/tiktok-mcp",
+  "license": "MIT",
+  "keywords": [
+    "tiktok",
+    "mcp",
+    "model-context-protocol",
+    "content-posting-api",
+    "display-api"
+  ],
+  "mcpServers": {
+    "tiktok": {
+      "command": "npx",
+      "args": ["-y", "tiktok-mcp-ai"]
+    }
+  }
+}

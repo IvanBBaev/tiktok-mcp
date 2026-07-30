@@ -1,0 +1,42 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.IvanBBaev/tiktok-mcp-ai",
+  "description": "Unofficial TikTok MCP server — 11 tools over the Display API and Content Posting API, with OAuth 2.0 (PKCE) and plan-then-execute write safety.",
+  "repository": {
+    "url": "https://github.com/IvanBBaev/tiktok-mcp",
+    "source": "github"
+  },
+  "version": "0.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "tiktok-mcp-ai",
+      "version": "0.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "TT_CLIENT_KEY",
+          "description": "TikTok app client key.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "TT_CLIENT_SECRET",
+          "description": "TikTok app client secret.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "TT_MEDIA_ROOT",
+          "description": "Directory that confines FILE_UPLOAD posting of local files; omit for URL-based posting only.",
+          "isRequired": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "tiktok-mcp-ai",
+  "owner": { "name": "Ivan Baev", "url": "https://github.com/IvanBBaev" },
+  "plugins": [
+    {
+      "name": "tiktok-mcp-ai",
+      "source": "./",
+      "description": "Unofficial TikTok MCP server — 11 tools over the Display API and Content Posting API, with plan-then-execute write safety. Add with: /plugin marketplace add IvanBBaev/tiktok-mcp"
+    }
+  ]
+}
