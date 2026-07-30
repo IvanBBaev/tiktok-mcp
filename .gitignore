@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build output
+build/
+*.tsbuildinfo
+
+# Throwaway verification builds. They must live inside the repo so that bare
+# imports (`fast-check`, …) still resolve against ./node_modules at runtime,
+# which they cannot do from an OS temp directory.
+.tmp-verify*/
+
+# Coverage output (c8)
+coverage/
+
+# Credentials & environment
+.env
+.env.*
+!.env.example
+
+# Packed tarballs
+*.tgz
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor junk
+.DS_Store
+Thumbs.db

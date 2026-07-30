@@ -1,0 +1,72 @@
+{
+  "name": "tiktok-mcp-ai",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Unofficial MCP server for TikTok (Display API + Content Posting API). Not affiliated with, endorsed by, or sponsored by TikTok or ByteDance; \"TikTok\" is a trademark of its owner, used here nominatively to indicate what this server connects to.",
+  "license": "MIT",
+  "author": "Ivan Baev <ivanbbaev@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IvanBBaev/tiktok-mcp.git"
+  },
+  "homepage": "https://github.com/IvanBBaev/tiktok-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/IvanBBaev/tiktok-mcp/issues"
+  },
+  "type": "module",
+  "mcpName": "io.github.IvanBBaev/tiktok-mcp-ai",
+  "bin": {
+    "tiktok-mcp-ai": "./bin/tiktok-mcp-ai.cjs"
+  },
+  "main": "./build/src/index.js",
+  "files": [
+    "bin",
+    "build/src",
+    "!build/**/*.map",
+    "!build/**/*.test.js"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('build',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node --test \"build/test/**/*.test.js\"",
+    "coverage": "npm run build && c8 node --test \"build/test/**/*.test.js\"",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "dotenv": "^17.4.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.20.1",
+    "c8": "^12.0.0",
+    "eslint": "^9.39.5",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "eslint-plugin-import-x": "^4.17.1",
+    "fast-check": "^3.23.2",
+    "globals": "^15.15.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.65.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "tiktok",
+    "content-posting-api",
+    "display-api",
+    "oauth",
+    "llm",
+    "ai"
+  ],
+  "trademark": "This is an independent, community-built project and is not affiliated with, endorsed by, or sponsored by TikTok or ByteDance Ltd. TikTok and related marks are trademarks of their owner, used here only nominatively to indicate compatibility."
+}

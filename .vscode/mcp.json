@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "tiktok-mcp-ai": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${workspaceFolder}/build/src/index.js"]
+    }
+  }
+}

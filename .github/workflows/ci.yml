@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    # The advisory leg (next-major Node) reports but never blocks a merge;
+    # every other leg is blocking. See docs/ROADMAP.md § Phase 0.
+    continue-on-error: ${{ matrix.advisory == true }}
+    strategy:
+      # A red advisory leg must not cancel the blocking ones.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        node: [22, 24]
+        include:
+          # One macOS leg (the development platform) on the .nvmrc Node.
+          - os: macos-latest
+            node: 24
+          # Advisory early-warning leg on the next major. It may fail because
+          # the release does not exist yet, or on a genuine forward-compat
+          # break — either way it is informational, and it runs no coverage.
+          - os: ubuntu-latest
+            node: 26
+            advisory: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          check-latest: ${{ matrix.advisory == true }}
+          cache: npm
+      - run: npm ci
+      # Full gate: typecheck + lint + format:check + build + test.
+      - run: npm run check
+      # Coverage — thresholds are enforced by .c8rc.json. Runs once, on the
+      # ubuntu/Node 22 leg.
+      - if: matrix.node == 22 && matrix.os == 'ubuntu-latest'
+        run: npm run coverage
+      # Upload the lcov report to Codecov (public repo, tokenless). Non-blocking:
+      # a Codecov outage must not fail CI. Runs once, on the same ubuntu/Node 22 leg.
+      - if: matrix.node == 22 && matrix.os == 'ubuntu-latest'
+        continue-on-error: true
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage/lcov.info
+          fail_ci_if_error: false
+      # Production-dependency audit: fail on high+ advisories.
+      - if: matrix.node == 22 && matrix.os == 'ubuntu-latest'
+        run: npm audit --omit=dev --audit-level=high
+
+  # Windows run (win32 path/line-ending safety). LF is enforced so the generated
+  # docs stay byte-identical to their LF originals on the Windows checkout; lint
+  # and format run here too, so style consistency is proven on win32 paths.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  # The bin launcher must print a human message (not a SyntaxError) under ancient
+  # Node and exit non-zero.
+  launcher-node12:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No container: checkout runs under the runner's modern Node; setup-node
+      # then installs the old runtime so only the launcher probe runs on it.
+      # (A node:12 container cannot run the Node 20 that powers checkout@v4.)
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 12
+      - run: |
+          set +e
+          out=$(node bin/tiktok-mcp-ai.cjs 2>&1)
+          code=$?
+          echo "$out"
+          test $code -ne 0 || exit 1
+          echo "$out" | grep -q "requires Node.js >= 22" || exit 1

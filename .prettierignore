@@ -1,0 +1,20 @@
+node_modules/
+build/
+coverage/
+package-lock.json
+*.tgz
+
+# Not owned by this project's formatter: the design-doc corpus and local-only
+# AI-harness files are maintained (or intentionally not formatted) by their
+# own owners.
+docs/
+WORKLOG.md
+
+# The published README carries hand-formatted tables (centered badge block,
+# the GENERATED tools table) that Prettier would reflow — kept out of the gate.
+README.md
+
+# The GitHub Pages site (static HTML/CSS/JS) and the VS Code extension have
+# their own toolchains and are not formatted by the root gate.
+site/
+extension/
