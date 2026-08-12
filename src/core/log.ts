@@ -157,3 +157,20 @@ function makeLogger(
 export function createLogger(opts?: { level?: LogLevel; clock?: Clock }): Logger {
   return makeLogger(opts?.level ?? DEFAULT_LEVEL, opts?.clock ?? systemClock, {});
 }
+
+/**
+ * The logger a module falls back to when the caller injects none: importing it
+ * writes nowhere.
+ *
+ * A level filter would not do — `createLogger({ level: 'error' })` still emits
+ * on `error()`, and a library module that logs by default is a module that
+ * writes to a stream its embedder never opted into. `child()` returns the same
+ * instance because binding fields to silence is still silence.
+ */
+export const silentLogger: Logger = Object.freeze({
+  debug: (): void => undefined,
+  info: (): void => undefined,
+  warn: (): void => undefined,
+  error: (): void => undefined,
+  child: (): Logger => silentLogger,
+});

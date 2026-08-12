@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createLogger } from '../src/core/log.js';
+import { createLogger, silentLogger } from '../src/core/log.js';
 import { registerSecret } from '../src/core/redact.js';
 
 type WriteFn = typeof process.stderr.write;
@@ -312,4 +312,29 @@ test('cc-g3 a registered secret never reaches the stderr sink', () => {
   const raw = err.join('');
   assert.ok(raw.length > 0);
   assert.ok(!raw.includes(secret), 'the seeded secret leaked to stderr');
+});
+
+test('the silent logger writes to neither stream, at any level', () => {
+  // The fallback for `logger?` options across core/*: importing a module must
+  // never write to a stream its embedder did not open (CC-G3).
+  const { out, err } = capture(() => {
+    silentLogger.debug('d', { a: 1 });
+    silentLogger.info('i');
+    silentLogger.warn('w');
+    silentLogger.error('e', { boom: true });
+  });
+
+  assert.deepEqual(out, []);
+  assert.deepEqual(err, []);
+});
+
+test('binding fields to the silent logger yields a logger that is still silent', () => {
+  const child = silentLogger.child({ request_id: 'abc' }).child({ attempt: 2 });
+  const { out, err } = capture(() => {
+    child.error('still nothing');
+  });
+
+  assert.equal(child, silentLogger);
+  assert.deepEqual(out, []);
+  assert.deepEqual(err, []);
 });

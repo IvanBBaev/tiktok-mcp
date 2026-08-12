@@ -261,7 +261,12 @@ test('TT_MEDIA_ROOT must be absolute and expands a leading ~ itself', () => {
 });
 
 test('TT_ENV_FILE is made absolute so it never depends on the client’s cwd', () => {
-  assert.equal(load({ TT_ENV_FILE: '/etc/tt/.env' }).envFile, '/etc/tt/.env');
+  // Resolved rather than spelled out: on win32 an absolute POSIX path picks up
+  // the cwd's drive letter, and the claim under test is "absolute", not "POSIX".
+  assert.equal(
+    load({ TT_ENV_FILE: '/etc/tt/.env' }).envFile,
+    path.resolve('/etc/tt/.env'),
+  );
   assert.equal(load({ TT_ENV_FILE: '~/.env' }).envFile, path.resolve(homedir(), '.env'));
   assert.equal(path.isAbsolute(load({ TT_ENV_FILE: 'rel/.env' }).envFile ?? ''), true);
 });

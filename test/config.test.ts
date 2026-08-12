@@ -37,6 +37,16 @@ const posixOnly: { skip?: string } =
     ? { skip: 'POSIX mode bits: win32 has no st_mode permissions to assert (CC-F3)' }
     : {};
 
+/**
+ * A regular file standing where a directory belongs is the only way to make the
+ * *read* half fail without touching permissions — and win32 reports that as
+ * ENOENT, which is the tolerated "no file yet", not a failure.
+ */
+const canFailRead: { skip?: string } =
+  process.platform === 'win32'
+    ? { skip: 'ENOTDIR: win32 reports ENOENT for a file used as a directory' }
+    : {};
+
 /** `chmod` denies nothing to root, and nothing at all on win32. */
 const canDenyAccess: { skip?: string } =
   process.platform === 'win32'
@@ -85,8 +95,17 @@ function snapshotOf(values: Record<string, string> = {}): EnvFileSnapshot {
 /**
  * Run a promise to completion under virtual time: fire any pending `sleep` one
  * virtual millisecond at a time (so the retry delays stay observable through
- * `clock.now()`), and otherwise just give the event loop a turn for real I/O.
- * Nothing here waits on wall-clock time (CC-H4).
+ * `clock.now()`), and otherwise wait for the real I/O that is in flight.
+ *
+ * The idle turn is deliberately *not* a bare `setImmediate`: that spins the
+ * whole turn budget in a couple of milliseconds, so on a loaded CI runner the
+ * pump outran a real `fs` round trip, gave up, and handed back a promise that
+ * never settled — a hang rather than a failure. Racing the work against a real
+ * one-millisecond tick spends the budget on waiting instead of on empty turns,
+ * and returns the instant the work is done.
+ *
+ * Virtual time still only moves for a waiter that exists, so a delay the code
+ * under test forgot to take is still visible in `clock.now()` (CC-H4).
  */
 async function settle<T>(promise: Promise<T>, clock: MockClock): Promise<T> {
   let done = false;
@@ -100,11 +119,32 @@ async function settle<T>(promise: Promise<T>, clock: MockClock): Promise<T> {
       throw err;
     },
   );
-  for (let turn = 0; turn < 20_000 && !done; turn += 1) {
+  // The caller owns the outcome; this only keeps an in-flight rejection from
+  // surfacing as an unhandled one while the pump is still running.
+  const finished = tracked.then(
+    () => undefined,
+    () => undefined,
+  );
+  // 5_000 turns is ~14x the 350 virtual milliseconds the rename ladder needs,
+  // and bounds a genuine hang at ~5 real seconds instead of forever.
+  for (let turn = 0; turn < 5_000 && !done; turn += 1) {
     if (clock.pending() > 0) await clock.advance(1);
-    else await new Promise<void>((resolve) => setImmediate(resolve));
+    else await Promise.race([finished, tick()]);
+  }
+  if (!done) {
+    throw new Error(
+      'settle: the call had not finished after 5000 turns — either it is waiting ' +
+        'on something the mock clock does not own, or an injected seam never answered',
+    );
   }
   return tracked;
+}
+
+/** One real millisecond — the unit the pump waits in when nothing is virtual. */
+function tick(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 1);
+  });
 }
 
 async function withSandbox(fn: (dir: string) => Promise<void>): Promise<void> {
@@ -145,9 +185,12 @@ function throws(fn: () => unknown): TikTokError {
 // ---------------------------------------------------------------------------
 
 test('TT_ENV_FILE wins over every platform default and is made absolute', () => {
+  // `platform` selects which *default location* rule applies; absolutisation is
+  // always the host's, so the expectation is resolved the same way rather than
+  // spelled out POSIX-style (on win32 "/etc/tt/.env" resolves onto the cwd drive).
   assert.equal(
     resolveEnvFilePath({ TT_ENV_FILE: '/etc/tt/.env' }, 'linux'),
-    '/etc/tt/.env',
+    path.resolve('/etc/tt/.env'),
   );
   assert.equal(
     resolveEnvFilePath({ TT_ENV_FILE: '~/tt.env' }, 'darwin'),
@@ -790,31 +833,35 @@ test('cc-h3 an error the ladder cannot help with degrades immediately', async ()
   });
 });
 
-test('cc-h3 a read that fails during a write degrades rather than throwing', async () => {
-  await withSandbox(async (dir) => {
-    // A regular file where a directory is expected: the read fails with ENOTDIR,
-    // not ENOENT, so it is a genuine failure rather than "no file yet".
-    const blocker = path.join(dir, 'blocker');
-    await writeFile(blocker, 'not a directory\n');
-    const { logger, records } = recordingLogger();
+test(
+  'cc-h3 a read that fails during a write degrades rather than throwing',
+  canFailRead,
+  async () => {
+    await withSandbox(async (dir) => {
+      // A regular file where a directory is expected: the read fails with ENOTDIR,
+      // not ENOENT, so it is a genuine failure rather than "no file yet".
+      const blocker = path.join(dir, 'blocker');
+      await writeFile(blocker, 'not a directory\n');
+      const { logger, records } = recordingLogger();
 
-    const result = await persistProfilePatch(
-      path.join(blocker, '.env'),
-      'DEFAULT',
-      { accessToken: 'act.new' },
-      { logger },
-    );
+      const result = await persistProfilePatch(
+        path.join(blocker, '.env'),
+        'DEFAULT',
+        { accessToken: 'act.new' },
+        { logger },
+      );
 
-    assert.deepEqual(result, { persisted: false });
-    assert.equal(records.length, 1);
-    assert.match(
-      records[0]?.msg ?? '',
-      /could not be read, keeping state in memory only/,
-    );
-    assert.equal(records[0]?.fields?.['code'], 'ENOTDIR');
-    assert.equal(await readFile(blocker, 'utf8'), 'not a directory\n');
-  });
-});
+      assert.deepEqual(result, { persisted: false });
+      assert.equal(records.length, 1);
+      assert.match(
+        records[0]?.msg ?? '',
+        /could not be read, keeping state in memory only/,
+      );
+      assert.equal(records[0]?.fields?.['code'], 'ENOTDIR');
+      assert.equal(await readFile(blocker, 'utf8'), 'not a directory\n');
+    });
+  },
+);
 
 test(
   'cc-h3 a write into a read-only directory warns and degrades',

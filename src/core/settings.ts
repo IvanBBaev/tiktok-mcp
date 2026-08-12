@@ -74,12 +74,50 @@ export const TOOL_PACKAGES = [
 export type ToolPackage = (typeof TOOL_PACKAGES)[number];
 
 /**
- * `TT_TOOL_PACKAGES` also accepts the two named profiles. Expanding them into a
- * concrete package set is the mcp layer's job; settings only pins the vocabulary
- * so a typo fails at startup instead of silently registering nothing.
+ * `TT_TOOL_PACKAGES` also accepts the two named profiles; the vocabulary is
+ * pinned here so a typo fails at startup instead of silently registering
+ * nothing, and {@link resolveEnabledPackages} expands them.
  */
 export const PACKAGE_SELECTORS = [...TOOL_PACKAGES, 'core', 'all'] as const;
 export type PackageSelector = (typeof PACKAGE_SELECTORS)[number];
+
+/** `core` = everything except the writes; `all` = every package. */
+const PACKAGE_PROFILES: Readonly<Record<'core' | 'all', readonly ToolPackage[]>> =
+  Object.freeze({
+    core: Object.freeze(['auth', 'user', 'video', 'publish'] as const),
+    all: TOOL_PACKAGES,
+  });
+
+/**
+ * Which packages this installation serves.
+ *
+ * `TT_TOOL_PACKAGES` selects (with the two named profiles expanded),
+ * `TT_PACKAGES_DENY` subtracts, and the two safety switches — `TT_WRITE_MODE=deny`
+ * and `TT_PACKAGES_READONLY=1` — drop `publish-write` outright and win over any
+ * profile setting (TOOLS.md § 1, CONFIGURATION.md). The result keeps manifest
+ * order, never selector order, so `tools/list` is stable.
+ *
+ * It lives in `core` rather than in the mcp layer that consumes it because the
+ * `login` command needs the same answer to derive its least-privilege scope set
+ * (AUTH.md § 2) and must reach it without loading the MCP SDK. Two copies of
+ * this reduction would be two things that have to stay equal; `mcp/server`
+ * re-exports this one under its contracted name.
+ */
+export function resolveEnabledPackages(settings: Settings): readonly ToolPackage[] {
+  const selected = new Set<ToolPackage>();
+  for (const selector of settings.toolPackages) {
+    if (selector === 'core' || selector === 'all') {
+      for (const pkg of PACKAGE_PROFILES[selector]) selected.add(pkg);
+    } else {
+      selected.add(selector);
+    }
+  }
+  for (const denied of settings.packagesDeny) selected.delete(denied);
+  if (settings.writeMode === 'deny' || settings.packagesReadonly) {
+    selected.delete('publish-write');
+  }
+  return TOOL_PACKAGES.filter((pkg) => selected.has(pkg));
+}
 
 /** `TT_LOG_LEVEL` — `satisfies` keeps this in lockstep with `core/log`. */
 const LOG_LEVELS = [
