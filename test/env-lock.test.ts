@@ -28,7 +28,7 @@ import type { Clock } from '../src/core/clock.js';
 import { envLockDir, withEnvLock } from '../src/core/env-lock.js';
 import { isTikTokError, type TikTokError } from '../src/core/errors.js';
 import type { Logger } from '../src/core/log.js';
-import { deferred, flush } from './harness/deferred.js';
+import { deferred } from './harness/deferred.js';
 import { runContendingChildren } from './harness/multi-process.js';
 import { BASELINE_NOW_MS, fsSandbox, mockClock, type MockClock } from './helpers.js';
 
@@ -155,6 +155,22 @@ function tick(): Promise<void> {
 async function until(condition: () => boolean, what: string, turns = 500): Promise<void> {
   for (let turn = 0; turn < turns; turn += 1) {
     if (condition()) return;
+    await tick();
+  }
+  throw new Error(
+    `timed out waiting for ${what} after ${String(turns)} ms of real time ` +
+      '(no virtual time passed — the mock clock probably needs advancing)',
+  );
+}
+
+/** `until` for a condition that has to read the filesystem to answer. */
+async function untilAsync(
+  condition: () => Promise<boolean>,
+  what: string,
+  turns = 500,
+): Promise<void> {
+  for (let turn = 0; turn < turns; turn += 1) {
+    if (await condition()) return;
     await tick();
   }
   throw new Error(
@@ -770,10 +786,15 @@ test('cc-f5 the heartbeat keeps a slow holder’s lock alive', async () => {
     );
     await until(() => entered, 'the holder to take the lock');
 
-    for (let tick = 0; tick < 3; tick += 1) {
-      await f.clock.advance(2_000);
-      await flush(4);
-    }
+    for (let beat = 0; beat < 3; beat += 1) await f.clock.advance(2_000);
+
+    // The timer firing is not the stamp landing: `utimes` is real I/O, and a
+    // fixed number of event-loop turns is a fraction of a millisecond — less
+    // than a loaded runner needs to return it. Wait for the stamp itself.
+    await untilAsync(
+      async () => (await stat(f.lockDir)).mtimeMs >= BASELINE_NOW_MS + 2_000,
+      'the heartbeat to stamp the lock directory',
+    );
 
     // The mtime now comes from the injected clock, which is what proves the
     // heartbeat ran: `mkdir` had stamped it with real wall time.
