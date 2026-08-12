@@ -1,0 +1,33 @@
+{
+  "$comment": [
+    "Per-area coverage floors (docs/TESTING.md § Coverage floors). Each source",
+    "file is charged to the FIRST matching rule, so the rules partition src/ and",
+    "no file is counted twice. `advisory` rules are reported but do not fail the",
+    "gate; a rule matching no file yet (a roadmap module) is reported as a note.",
+    "Ratchet: at each phase exit run `npm run coverage:gate -- --ratchet`, which",
+    "raises every floor to max(floor, achieved - 2)."
+  ],
+  "global": { "lines": 90, "branches": 80, "functions": 95 },
+  "rules": [
+    { "path": "src/core/oauth.ts", "lines": 95, "branches": 90, "functions": 100 },
+    { "path": "src/core/redact.ts", "lines": 95, "branches": 90, "functions": 100 },
+    { "path": "src/api/upload.ts", "lines": 95, "branches": 90, "functions": 100 },
+    { "path": "src/mcp/plan-store.ts", "lines": 95, "branches": 90, "functions": 100 },
+    { "path": "src/core/http.ts", "lines": 92, "branches": 88, "functions": 100 },
+    { "path": "src/core/config.ts", "lines": 92, "branches": 85, "functions": 100 },
+    { "path": "src/core/settings.ts", "lines": 92, "branches": 85, "functions": 100 },
+    { "path": "src/mcp/journal.ts", "lines": 92, "branches": 85, "functions": 100 },
+    { "path": "src/api/**", "lines": 90, "branches": 85, "functions": 95 },
+    { "path": "src/mcp/**", "lines": 90, "branches": 80, "functions": 95 },
+    { "path": "src/tools/**", "lines": 90, "branches": 80, "functions": 95 },
+    {
+      "path": "src/cli/**",
+      "lines": 85,
+      "branches": 75,
+      "functions": 90,
+      "advisory": true,
+      "advisoryReason": "blocking from Phase 1 (docs/TESTING.md); the CLI is exercised end-to-end by the login/doctor worker tests, which c8 cannot attribute in Phase 0"
+    },
+    { "path": "src/core/**", "lines": 90, "branches": 80, "functions": 95 }
+  ]
+}
