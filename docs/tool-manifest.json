@@ -1,0 +1,716 @@
+{
+  "$comment": [
+    "GENERATED — run `npm run sync:write` after changing a tool definition.",
+    "The wire surface of tools/list for an installation holding every scope.",
+    "A diff here is a change agents can see: review it as an API change."
+  ],
+  "resultSchema": {
+    "type": "object",
+    "properties": {
+      "ok": {
+        "type": "boolean",
+        "description": "False when the call failed; `error` is then present."
+      },
+      "data": {
+        "description": "Tool-specific payload; absent on failure."
+      },
+      "error": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "log_id": {
+            "type": "string"
+          },
+          "details": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "additionalProperties": true
+      },
+      "hints": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "wait",
+                "poll",
+                "approval_required",
+                "user_action",
+                "reauth",
+                "note"
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "journal": {
+        "type": "string",
+        "enum": [
+          "unavailable"
+        ]
+      }
+    },
+    "required": [
+      "ok"
+    ],
+    "additionalProperties": false
+  },
+  "tools": [
+    {
+      "package": "auth",
+      "scopes": [],
+      "name": "tiktok_get_auth_status",
+      "title": "TikTok auth status",
+      "description": "Report authentication status for the configured TikTok profile(s): granted scopes, token expiry, and which tool packages are usable per profile. Local and instant by default; set probe: true to additionally verify the token against TikTok with a single user-info call. Call this first when any tool reports an auth or scope error, and again after the user re-runs the login CLI. Never returns token material.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok."
+          },
+          "probe": {
+            "type": "boolean",
+            "description": "true = make one live user-info request to confirm the token works. false (default) = report from local state only, no network."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "TikTok auth status",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "package": "user",
+      "scopes": [
+        "user.info.basic"
+      ],
+      "name": "tiktok_get_user_info",
+      "title": "TikTok user info",
+      "description": "Fetch the authenticated TikTok user's profile: display name, avatar, bio, and counts (followers, following, likes, videos). With the user.info.profile scope it also returns the @username and profile link. Read-only. Requested fields not covered by the granted scopes are omitted and listed in meta.omitted_fields — that is not an error. Avatar URLs are TikTok CDN links that expire after roughly 6 hours; do not store them long-term.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok."
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "display_name",
+                "avatar_url",
+                "bio_description",
+                "username",
+                "profile_web_link",
+                "follower_count",
+                "following_count",
+                "likes_count",
+                "video_count"
+              ]
+            },
+            "description": "Profile fields to return. Omit for all fields your scopes allow. Unknown field names fail locally."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "TikTok user info",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "package": "video",
+      "scopes": [
+        "video.list"
+      ],
+      "name": "tiktok_list_videos",
+      "title": "List TikTok videos",
+      "description": "List the authenticated user's PUBLIC videos, newest first, up to 20 per page. Pass cursor from the previous result to get the next page, or set fetch_all: true to auto-paginate up to the server cap. Read-only. TikTok's Display API never returns private or friends-only videos — an incomplete-looking list is usually privacy, not an error. share_url is the stable link to give the user; media/cover URLs expire in about 6 hours.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok."
+          },
+          "cursor": {
+            "type": "string",
+            "description": "Opaque pagination token from the previous result's meta.next_cursor. Pass it back unchanged. Do not construct this value yourself."
+          },
+          "max_count": {
+            "type": "integer",
+            "description": "Videos per page (1–20)."
+          },
+          "fetch_all": {
+            "type": "boolean",
+            "description": "true = follow pagination automatically until done or the server cap (default 200 items) is hit; the result then reports truncation with a resume cursor."
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "id",
+                "create_time",
+                "title",
+                "video_description",
+                "duration",
+                "height",
+                "width",
+                "cover_image_url",
+                "share_url",
+                "embed_html",
+                "embed_link",
+                "like_count",
+                "comment_count",
+                "share_count",
+                "view_count"
+              ]
+            },
+            "description": "Video fields to return. Omit for the default set (id, title, create_time, duration, stats, share_url)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "List TikTok videos",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "package": "video",
+      "scopes": [
+        "video.list"
+      ],
+      "name": "tiktok_query_videos",
+      "title": "Query TikTok videos by id",
+      "description": "Fetch full details for up to 20 specific videos by id. Ids come from tiktok_list_videos or from the user. Read-only. Ids that do not belong to the authenticated user are silently absent from the response — TikTok does not report them as errors — so compare the returned ids against the requested ones.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok."
+          },
+          "video_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 20,
+            "description": "TikTok video ids to fetch (max 20 per call). More than 20 fails locally — split into batches."
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "id",
+                "create_time",
+                "title",
+                "video_description",
+                "duration",
+                "height",
+                "width",
+                "cover_image_url",
+                "share_url",
+                "embed_html",
+                "embed_link",
+                "like_count",
+                "comment_count",
+                "share_count",
+                "view_count"
+              ]
+            },
+            "description": "Video fields to return. Omit for the default set (id, title, create_time, duration, stats, share_url)."
+          }
+        },
+        "required": [
+          "video_ids"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Query TikTok videos by id",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "package": "publish",
+      "scopes": [
+        "video.publish"
+      ],
+      "name": "tiktok_get_creator_info",
+      "title": "Get creator posting state",
+      "description": "Fetch the creator's live posting state: nickname, the privacy_level options currently available, whether comments/duets/stitch are disabled account-wide, and the maximum allowed video duration. Requires scope video.publish; TikTok limit 20 requests/min. You do NOT need to call this before posting — the preview step of tiktok_post_video and tiktok_post_photos runs it automatically and embeds the result. Call it directly only to answer user questions about posting capabilities. If privacy_level_options contains only SELF_ONLY, the app is unaudited: every post will be visible to the account owner only, regardless of arguments.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Get creator posting state",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "package": "publish",
+      "scopes": [],
+      "scopesAnyOf": [
+        "video.publish",
+        "video.upload"
+      ],
+      "name": "tiktok_get_publish_status",
+      "title": "Get publish status",
+      "description": "Check — and by default briefly wait on — the status of a publish attempt by publish_id. Read-only, idempotent, safe to repeat; TikTok limit 30 requests/min. Statuses: PROCESSING_DOWNLOAD (pulling from URL), PROCESSING_UPLOAD (checking the uploaded file), SEND_TO_USER_INBOX (draft delivered — the user must open the TikTok app notification to finish), PUBLISH_COMPLETE (live; public_post_id present when TikTok exposes it), FAILED (fail_reason mapped to a recovery action in the result). With wait_for_completion: true (the default) the call polls on a backoff schedule (2 s, then 5 s, then every 10 s, with jitter) up to ~60 s and returns the last observed status; a timeout is NOT a failure — call again with the same publish_id. Never re-run a posting tool just because processing is slow.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok."
+          },
+          "publish_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The publish_id returned by a posting tool (or found in tiktok_list_publish_journal)."
+          },
+          "wait_for_completion": {
+            "type": "boolean",
+            "description": "true (default) = poll internally until a terminal status or ~60 s, then return the last observed status. false = one status request, return immediately."
+          }
+        },
+        "required": [
+          "publish_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Get publish status",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "package": "publish",
+      "scopes": [],
+      "name": "tiktok_list_publish_journal",
+      "title": "List publish journal entries",
+      "description": "Read this server's local, append-only journal of publish attempts: timestamp, account, tool, title excerpt, publish_id, and outcome. Outcomes: \"ok\" (upstream accepted the request), \"error\" (clean failure), \"upload_failed\" (init succeeded, upload aborted), \"unknown\" (the request was sent but no response was recorded — the post MAY exist; verify with tiktok_get_publish_status or tiktok_list_videos before retrying anything). Local file read; no network, no scopes required. Check this first before re-trying any failed or ambiguous publish. The journal only covers posts made through this server on this machine.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "description": "Filter to one profile. Omit for all profiles."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Newest entries to return."
+          },
+          "since": {
+            "type": "string",
+            "description": "Only entries at or after this UTC timestamp."
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "List publish journal entries",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "package": "publish-write",
+      "scopes": [
+        "video.publish"
+      ],
+      "name": "tiktok_post_video",
+      "title": "Post a video to TikTok",
+      "description": "Post a video DIRECTLY to the authenticated account's TikTok profile — it goes live without further user action once TikTok finishes processing. Requires scope video.publish. Use when the user says \"post/publish this video\". NOT for \"send it to my drafts\" — use tiktok_upload_video_draft for that. Posts cannot be edited or deleted through this server; removal requires the TikTok app.\n\nTwo-step contract: calling WITHOUT plan_id validates everything (file or URL, title, toggles, live creator settings) and returns a preview plus a single-use plan_id valid for 10 minutes — no post is created. Show the preview to the user, including the consent line it contains. After the user explicitly approves, call again with identical arguments plus plan_id to execute. privacy_level has NO default: the user must pick one of the options listed in the preview (unaudited apps: SELF_ONLY only — the post will be private).\n\nRate limits: 6 posts/min (enforced locally) and roughly 15 posts/24 h per account shared across ALL apps using TikTok's API. On success the call returns publish_id immediately; processing continues asynchronously — follow the returned poll hint to tiktok_get_publish_status.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "file",
+              "url"
+            ],
+            "description": "Where the video bytes come from. \"file\": a local file under the operator-configured TT_MEDIA_ROOT, uploaded in chunks. \"url\": TikTok pulls from an HTTPS URL that must match a verified prefix in TT_VERIFIED_URL_PREFIXES."
+          },
+          "file_path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the video file (absolute, or relative to TT_MEDIA_ROOT). Must resolve inside TT_MEDIA_ROOT; checked at preview and re-checked at apply. Mutually exclusive with video_url."
+          },
+          "video_url": {
+            "type": "string",
+            "minLength": 1,
+            "description": "HTTPS URL of the video. Must start with one of the verified URL prefixes; TikTok refuses pulls from unverified domains. Must serve the bytes without redirects and stay reachable for about 1 hour. Mutually exclusive with file_path."
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 2200,
+            "description": "Caption. Up to 2200 UTF-16 code units (emoji count as 2, the way TikTok counts). #hashtags and @mentions are parsed by TikTok. Omit for an untitled post."
+          },
+          "privacy_level": {
+            "type": "string",
+            "enum": [
+              "PUBLIC_TO_EVERYONE",
+              "MUTUAL_FOLLOW_FRIENDS",
+              "FOLLOWER_OF_CREATOR",
+              "SELF_ONLY"
+            ],
+            "description": "Who can see the post. NO default — the user must choose from the options in the preview (they depend on account type and app audit status; unaudited apps allow only SELF_ONLY). A preview without this field returns the options and no plan_id."
+          },
+          "disable_comment": {
+            "type": "boolean",
+            "description": "true disables comments on this post. Leave false unless the user asks."
+          },
+          "disable_duet": {
+            "type": "boolean",
+            "description": "true disables duets. If the creator's account already disables duets, the server forces true and flags it in the preview — a false here cannot override it."
+          },
+          "disable_stitch": {
+            "type": "boolean",
+            "description": "true disables stitch. Forced true when the creator's account disables stitch, flagged in the preview."
+          },
+          "video_cover_timestamp_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Video frame to use as the cover, in milliseconds from the start. Omit for TikTok's default."
+          },
+          "brand_content_toggle": {
+            "type": "boolean",
+            "description": "true ONLY when the user states this is paid partnership / branded content for a third party. Incompatible with privacy_level SELF_ONLY — and therefore unavailable while the app is unaudited. Adds the Branded Content consent line to the preview."
+          },
+          "brand_organic_toggle": {
+            "type": "boolean",
+            "description": "true when the post promotes the user's OWN business (organic branded content)."
+          },
+          "is_aigc": {
+            "type": "boolean",
+            "description": "Label the post as AI-generated content on TikTok. Defaults to true because posts made through an AI assistant usually are. Set false only if the user confirms the content is not AI-generated."
+          },
+          "wait_for_completion": {
+            "type": "boolean",
+            "description": "After a successful apply, keep polling publish status inside this call (up to ~60 s) before returning. Default false: return publish_id immediately with a poll hint — prefer that; long calls risk client timeouts, and a timed-out write call must never be re-run blindly."
+          },
+          "plan_id": {
+            "type": "string",
+            "description": "Execution token from this tool's own preview. Present = execute the previewed post. Single-use, expires 10 minutes after the preview, bound to the exact previewed payload and this account. Never invent or reuse one."
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Override the duplicate guard. Set true only after verifying via tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical attempt did not create a post."
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Post a video to TikTok",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "package": "publish-write",
+      "scopes": [
+        "video.upload"
+      ],
+      "name": "tiktok_upload_video_draft",
+      "title": "Upload a video draft to the TikTok inbox",
+      "description": "Upload a video to the user's TikTok INBOX as a draft — the user must open the TikTok app notification, edit, and publish it themselves; nothing goes live from this call. Requires scope video.upload (NOT video.publish — this tool works on draft-only authorizations). Use when the user says \"send it to my drafts / I'll finish it in the app\". NOT for direct publishing — use tiktok_post_video. Drafts carry no caption, privacy, or toggles — the user sets those in the app — so this tool takes only the video source. Same preview/plan_id contract as tiktok_post_video. TikTok allows at most 5 unpublished API drafts per account per 24 h; unopened drafts expire on their own. After success, tell the user to open the TikTok app inbox notification to finish the post.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "file",
+              "url"
+            ],
+            "description": "Where the video bytes come from. \"file\": a local file under the operator-configured TT_MEDIA_ROOT, uploaded in chunks. \"url\": TikTok pulls from an HTTPS URL that must match a verified prefix in TT_VERIFIED_URL_PREFIXES."
+          },
+          "file_path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Path to the video file (absolute, or relative to TT_MEDIA_ROOT). Must resolve inside TT_MEDIA_ROOT; checked at preview and re-checked at apply. Mutually exclusive with video_url."
+          },
+          "video_url": {
+            "type": "string",
+            "minLength": 1,
+            "description": "HTTPS URL of the video. Must start with one of the verified URL prefixes; TikTok refuses pulls from unverified domains. Must serve the bytes without redirects and stay reachable for about 1 hour. Mutually exclusive with file_path."
+          },
+          "wait_for_completion": {
+            "type": "boolean",
+            "description": "After a successful apply, keep polling publish status inside this call (up to ~60 s) before returning; the terminal status for a draft is SEND_TO_USER_INBOX. Default false: return publish_id immediately with a poll hint — prefer that; long calls risk client timeouts, and a timed-out write call must never be re-run blindly."
+          },
+          "plan_id": {
+            "type": "string",
+            "description": "Execution token from this tool's own preview. Present = execute the previewed upload. Single-use, expires 10 minutes after the preview, bound to the exact previewed payload and this account. Never invent or reuse one."
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Override the duplicate guard. Set true only after verifying via tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical attempt did not create a draft."
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Upload a video draft to the TikTok inbox",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "package": "publish-write",
+      "scopes": [
+        "video.publish"
+      ],
+      "name": "tiktok_post_photos",
+      "title": "Post a photo carousel to TikTok",
+      "description": "Post a photo carousel DIRECTLY to the user's TikTok profile — it goes live once processing completes. Requires scope video.publish. Use for \"post these photos\". NOT for \"send photos to my drafts\" — use tiktok_upload_photos_draft. Posts cannot be edited or deleted through this server.\n\nPhotos can only be pulled by TikTok from verified URLs (prefixes configured in TT_VERIFIED_URL_PREFIXES) — the photo API has no local-file upload. For photos on disk, the user must first host them under a verified prefix. Title is much shorter than for videos: max 90 UTF-16 code units; the longer text belongs in description (max 4000). Same preview/plan_id contract and the same rate limits (6/min local, ~15 posts/24 h shared) as tiktok_post_video.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok."
+          },
+          "photo_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 35,
+            "description": "HTTPS URLs of the photos, in carousel order (1–35). Every URL must start with a verified prefix from TT_VERIFIED_URL_PREFIXES — TikTok refuses unverified domains. JPEG or WebP, up to 20 MB and 1080p each."
+          },
+          "photo_cover_index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Zero-based index of the cover photo. Must be a valid index into photo_urls."
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 90,
+            "description": "Photo post title — max 90 UTF-16 code units (NOT 2200; photos differ from videos). Longer text goes in description."
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4000,
+            "description": "Photo post description, up to 4000 UTF-16 code units. #hashtags and @mentions are parsed here."
+          },
+          "privacy_level": {
+            "type": "string",
+            "enum": [
+              "PUBLIC_TO_EVERYONE",
+              "MUTUAL_FOLLOW_FRIENDS",
+              "FOLLOWER_OF_CREATOR",
+              "SELF_ONLY"
+            ],
+            "description": "Who can see the post. NO default — the user must choose from the options in the preview (they depend on account type and app audit status; unaudited apps allow only SELF_ONLY). A preview without this field returns the options and no plan_id."
+          },
+          "disable_comment": {
+            "type": "boolean",
+            "description": "true disables comments on this post."
+          },
+          "auto_add_music": {
+            "type": "boolean",
+            "description": "true lets TikTok add recommended music to the carousel. Ask the user; photo posts without music play silent."
+          },
+          "brand_content_toggle": {
+            "type": "boolean",
+            "description": "true ONLY when the user states this is paid partnership / branded content for a third party. Incompatible with privacy_level SELF_ONLY — and therefore unavailable while the app is unaudited. Adds the Branded Content consent line to the preview."
+          },
+          "brand_organic_toggle": {
+            "type": "boolean",
+            "description": "true when the post promotes the user's OWN business (organic branded content)."
+          },
+          "is_aigc": {
+            "type": "boolean",
+            "description": "Label the post as AI-generated content on TikTok. Defaults to true because posts made through an AI assistant usually are. Set false only if the user confirms the content is not AI-generated."
+          },
+          "wait_for_completion": {
+            "type": "boolean",
+            "description": "After a successful apply, keep polling publish status inside this call (up to ~60 s) before returning. Default false: return publish_id immediately with a poll hint — prefer that; long calls risk client timeouts, and a timed-out write call must never be re-run blindly."
+          },
+          "plan_id": {
+            "type": "string",
+            "description": "Execution token from this tool's own preview. Present = execute the previewed post. Single-use, expires 10 minutes after the preview, bound to the exact previewed payload and this account. Never invent or reuse one."
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Override the duplicate guard. Set true only after verifying via tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical attempt did not create a post."
+          }
+        },
+        "required": [
+          "photo_urls"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Post a photo carousel to TikTok",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "package": "publish-write",
+      "scopes": [
+        "video.upload"
+      ],
+      "name": "tiktok_upload_photos_draft",
+      "title": "Upload a photo draft to the TikTok inbox",
+      "description": "Send a photo carousel to the user's TikTok INBOX as a draft — the user finishes and publishes it in the TikTok app; nothing goes live from this call. Requires scope video.upload. Use for \"send these photos to my drafts\". NOT for direct posting — use tiktok_post_photos. Same verified-URL-only rule as tiktok_post_photos (no local photo files — the platform has no photo upload endpoint). Same preview/plan_id contract. Counts toward TikTok's cap of 5 unpublished API drafts per 24 h. After success, tell the user to open the TikTok app inbox notification.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok."
+          },
+          "photo_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "maxItems": 35,
+            "description": "HTTPS URLs of the photos, in carousel order (1–35). Every URL must start with a verified prefix from TT_VERIFIED_URL_PREFIXES — TikTok refuses unverified domains. JPEG or WebP, up to 20 MB and 1080p each."
+          },
+          "photo_cover_index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Zero-based index of the cover photo. Must be a valid index into photo_urls."
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 90,
+            "description": "Photo post title — max 90 UTF-16 code units (NOT 2200; photos differ from videos). Longer text goes in description."
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4000,
+            "description": "Photo post description, up to 4000 UTF-16 code units. #hashtags and @mentions are parsed here."
+          },
+          "wait_for_completion": {
+            "type": "boolean",
+            "description": "After a successful apply, keep polling publish status inside this call (up to ~60 s) before returning; the terminal status for a draft is SEND_TO_USER_INBOX. Default false: return publish_id immediately with a poll hint — prefer that; long calls risk client timeouts, and a timed-out write call must never be re-run blindly."
+          },
+          "plan_id": {
+            "type": "string",
+            "description": "Execution token from this tool's own preview. Present = execute the previewed upload. Single-use, expires 10 minutes after the preview, bound to the exact previewed payload and this account. Never invent or reuse one."
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Override the duplicate guard. Set true only after verifying via tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical attempt did not create a draft."
+          }
+        },
+        "required": [
+          "photo_urls"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Upload a photo draft to the TikTok inbox",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    }
+  ]
+}
