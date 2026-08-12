@@ -2,7 +2,7 @@
 
 TypeScript ESM MCP server, Node **`engines >= 22`** (`.nvmrc` pins **24**), built to
 `build/` with `tsc`. Three runtime dependencies: `@modelcontextprotocol/sdk`, `zod`
-(v3), `dotenv`. CI runs a blocking matrix of ubuntu×{22,24}, macos×24, and
+(v3), `zod-to-json-schema`. CI runs a blocking matrix of ubuntu×{22,24}, macos×24, and
 **windows×24** (advisory ubuntu×26). The structure is a direct port of the proven
 `servicenow-mcp-ai` architecture with TikTok-specific internals and a clean `TT_` env
 prefix from day one.
@@ -86,8 +86,8 @@ await connectTransport(server);
 4. Graceful shutdown on SIGINT/SIGTERM; `unhandledRejection`/`uncaughtException`
    handlers log to stderr and exit cleanly. **stdout is reserved for the MCP stdio
    protocol; all logging is stderr-only structured JSON.** The env file is read via
-   `fs.readFile` + `dotenv.parse()` — never the side-effectful `dotenv/config`
-   import — so no library can print to stdout before transport connect.
+   `fs.readFile` + `core/config`'s own parser — never a side-effectful
+   `dotenv/config` import — so no library can print to stdout before transport connect.
 
 ## 3. Transport (`src/mcp/server.ts`)
 
@@ -227,8 +227,11 @@ non-envelope 206/201 responses).
 
 ### 7.1 Env file & profiles (`src/core/config.ts`)
 
-- `dotenv` semantics with `override: false` — process env (from the MCP client)
-  beats the file. Resolution: `TT_ENV_FILE` → `$XDG_CONFIG_HOME`/
+- `dotenv`-compatible semantics with `override: false` — process env (from the
+  MCP client) beats the file — implemented by `core/config`'s **own** parser, so
+  the round-trip writer and the reader share one grammar and the package ships
+  no `dotenv` dependency. Precedence is presence-based (CC-F2): an exported
+  empty value still wins. Resolution: `TT_ENV_FILE` → `$XDG_CONFIG_HOME`/
   `~/.config/tiktok-mcp-ai/.env` on POSIX → `%LOCALAPPDATA%\tiktok-mcp-ai\.env`
   on win32 (never Roaming). Writes always target the resolved path: atomic
   temp-file (0600, `O_EXCL`) + fsync + rename, comment- and CRLF-preserving

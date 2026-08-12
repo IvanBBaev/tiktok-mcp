@@ -80,6 +80,21 @@ there.
   base64url); a pinned test vector lives in AUTH.md. The code isolates the
   encoding in one function so a flip is a one-line change if TikTok ever
   aligns with the RFC.
+- **CC-A14 — a forced refresh must not replay the token TikTok just rejected.**
+  ADDED by TC-1. The 401 fallback of CC-A4 calls the refresher with `force`, and
+  the refresher re-reads the env file under the lock to adopt whatever a sibling
+  process may have rotated in. Absent a sibling, that re-read returns *this*
+  process's own credentials — so a naive "adopt what is on disk" handed the
+  replay exactly the access token that had just produced the 401, and the retry
+  failed identically. Under `force`, a token found on disk is therefore adopted
+  only when it **differs** from the one already held; a forced refresh that
+  finds only its own falls through to a real refresh, and if the lock is held by
+  a sibling it surfaces the retryable `env_file_busy` rather than a silent
+  no-op. The same reasoning covers the per-process **spent-refresh-token memo**:
+  a refresh token that TikTok has already consumed is remembered per profile, so
+  a `TT_REFRESH_TOKEN` pinned in the ambient environment (which CC-F2 makes
+  un-rewritable — the env file loses to the real environment) is not offered a
+  second time in a loop. `revokeToken` clears the memo together with the cache.
 
 ## B. HTTP, envelope & retry
 
@@ -143,6 +158,9 @@ there.
 
 - **CC-D1 — zero-byte / missing / unreadable file.** Rejected locally at plan
   time (stat + open check) with the file path in the error; no init is spent.
+  Codes: `file_empty` (0 bytes), `file_not_found` (missing, or not a regular
+  file — a dangling symlink and a directory both land here),
+  `file_outside_media_root`, `file_too_large`.
 - **CC-D2 — chunk plan boundaries.** Decimal algorithm (SYNTHESIS § 2.4,
   normative in TIKTOK-API.md): `MIN_WHOLE = 5_000_000`,
   `CHUNK_SIZE = 64_000_000` — decimal bytes, not MiB. Files below 5,000,000
@@ -152,9 +170,14 @@ there.
   the remainder** (may reach 127,999,999 bytes). Count bounds 1–1000; size cap
   4 GiB. Worked vectors V1–V8 are the shared property-test fixture; property
   tests assert chunks are in-bounds, contiguous, and sum to the file size.
-- **CC-D3 — file changed between plan and apply.** Plan records size + mtime;
-  apply re-stats and aborts on mismatch ("file changed since plan") — the chunk
-  plan and the preview the human approved are otherwise stale.
+- **CC-D3 — file changed between plan and apply.** The plan records the
+  resolved path plus a four-field identity — `size`, `mtimeMs`, `dev`, `ino` —
+  and apply re-resolves and re-stats, aborting with `plan_mismatch` on any
+  difference ("file changed since plan"). `dev`/`ino` catch the case `size` and
+  `mtimeMs` miss: a *different* file swapped in at the same path with the same
+  length and timestamp. Re-resolution also re-runs the media-root containment
+  check, so a symlink retargeted outside the root after preview is caught here
+  too. Otherwise the chunk plan and the preview the human approved are stale.
 - **CC-D4 — file deleted between plan and apply.** Same re-stat catches it;
   clean local error, no init spent.
 - **CC-D5 — upload_url TTL (1 h) expires mid-upload.** PUTs start failing;

@@ -170,8 +170,8 @@ table and retry semantics are in § 4.8. Raw response fixtures are recorded by
 | `user.info.profile` | bio, profile deep link, verification status | `tiktok_get_user_info` (extended fields) |
 | `user.info.stats` | follower/following/likes/video counts | `tiktok_get_user_info` (stats fields) |
 | `video.list` | read the user's **public** videos | `tiktok_list_videos`, `tiktok_query_videos` |
-| `video.publish` | direct-post content on the user's behalf | `tiktok_post_video`, `tiktok_post_photos` (DIRECT_POST) |
-| `video.upload` | send content to the user's inbox as a draft | `tiktok_upload_video_draft`, `tiktok_post_photos` (MEDIA_UPLOAD) |
+| `video.publish` | direct-post content on the user's behalf | `tiktok_post_video`, `tiktok_post_photos` (both DIRECT_POST); `tiktok_get_creator_info`; `tiktok_get_publish_status` (either publish scope suffices) |
+| `video.upload` | send content to the user's inbox as a draft | `tiktok_upload_video_draft`, `tiktok_upload_photos_draft` (both MEDIA_UPLOAD); `tiktok_get_publish_status` (either publish scope suffices) |
 
 Scopes must be enabled for the app in the developer portal *and* granted by the
 user at consent time. A granted-scope mismatch surfaces as
@@ -197,11 +197,15 @@ user at consent time. A granted-scope mismatch surfaces as
 - `fields` in the **query string**; JSON body `{ "cursor": <int64 ms>, "max_count": 1–20 }`.
 - Returns `videos[]`, `cursor` (for the next page), `has_more`. Sorted by
   `create_time` descending. Only **public** videos of the authorized user.
-- Video fields include: `id`, `create_time`, `title`, `video_description`,
-  `duration`, `height`, `width`, `cover_image_url`, `embed_html`, `embed_link`,
-  `like_count`, `comment_count`, `share_count`, `view_count`.
+- Video fields, and the exact vocabulary this server accepts (`VIDEO_FIELDS` in
+  `src/api/video.ts`): `id`, `create_time`, `title`, `video_description`,
+  `duration`, `height`, `width`, `cover_image_url`, `share_url`, `embed_html`,
+  `embed_link`, `like_count`, `comment_count`, `share_count`, `view_count`.
+  A name outside this list is rejected locally, before the round trip.
 - `cover_image_url` and similar CDN URLs are **short-lived (~6 h)** — results
-  must be treated as ephemeral, not stored long-term.
+  must be treated as ephemeral, not stored long-term. `share_url` is the one
+  durable link and is therefore in the default set (TOOLS.md § 3.3), while the
+  three long, expiring fields are not.
 
 ### 3.3 `POST /v2/video/query/?fields=…` — videos by id
 
@@ -383,7 +387,8 @@ satisfies both interpretations of the maximum (64,000,000 < 67,108,864).
 ```
 CHUNK_SIZE   = 64_000_000        // constant; safe under decimal and binary readings
 MIN_WHOLE    = 5_000_000         // below this, whole-file upload is mandatory
-MAX_FILE     = 4 * 1024**3      // 4 GB hard cap (S4); reject larger before init
+MAX_FILE     = 4 * 1024**3       // 4 GiB = 4_294_967_296 bytes, hard cap (S4);
+                                 // reject larger locally, before init
 
 plan(video_size):
   if video_size > MAX_FILE: reject VALIDATION_ERROR

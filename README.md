@@ -403,11 +403,14 @@ active profile (`TT_ACTIVE_PROFILE`, or `--profile <name>`).
 ## Develop
 
 ```bash
-npm run check       # full gate: typecheck, lint, format check, build, tests
+npm run check       # full gate: typecheck, lint, format, build, tests, coverage, sync
 npm test            # unit tests only (node:test; needs a prior npm run build)
 npm run typecheck   # tsc --noEmit
 npm run lint        # ESLint (flat config + typescript-eslint)
 npm run format      # format with Prettier
+npm run coverage    # tests under c8 + the per-area floors in scripts/coverage-floors.json
+npm run sync        # verify the generated artifacts (README table, .env.example, …)
+npm run sync:write  # regenerate them after changing a tool, a setting or `files`
 ```
 
 The layered architecture (`core ← api ← mcp ← tools`) is enforced at lint time:
@@ -422,23 +425,32 @@ tests ship with the change, the generated README tools table).
 <!-- GENERATED:TOOLS:BEGIN (npm run docs:readme) -->
 
 _This table is generated from the tool registrations — edit the tool
-definitions in `src/tools/`, then run `npm run docs:readme`._
+definitions in `src/tools/`, then run `npm run docs:readme`. Descriptions are
+summarized to their first sentence; the full text an agent sees is in
+[docs/tool-manifest.json](docs/tool-manifest.json)._
 
 | Package | Tool | Read-only | Description |
 | ------- | ---- | :-------: | ----------- |
-| `auth` | `tiktok_get_auth_status` | yes | Report which account profiles are authorized, their granted scopes, and token freshness — without exposing secrets. |
-| `user` | `tiktok_get_user_info` | yes | Fetch the authorized creator's public profile (display name, avatar, bio; optional profile and stats fields). |
-| `video` | `tiktok_list_videos` | yes | Page through the authorized user's own posted videos (cursor pagination). |
-| `video` | `tiktok_query_videos` | yes | Look up specific videos by id for the authorized user. |
-| `publish` | `tiktok_get_creator_info` | yes | Read the creator's current publishing context (privacy options, interaction toggles, limits) required before any post. |
-| `publish` | `tiktok_get_publish_status` | yes | Poll a publish/upload by `publish_id` until it reaches a terminal state (bounded wait). |
-| `publish` | `tiktok_list_publish_journal` | yes | Read the local append-only journal of every publish attempt this server has made. |
-| `publish-write` | `tiktok_post_video` | no | Publish a video directly to TikTok (plan-then-execute); returns a `publish_id`. |
-| `publish-write` | `tiktok_upload_video_draft` | no | Upload a video to the creator's TikTok inbox as a draft (plan-then-execute). |
-| `publish-write` | `tiktok_post_photos` | no | Publish a photo carousel post (plan-then-execute). |
-| `publish-write` | `tiktok_upload_photos_draft` | no | Upload a photo post to the inbox as a draft (plan-then-execute). |
+| `auth` | `tiktok_get_auth_status` | yes | Report authentication status for the configured TikTok profile(s): granted scopes, token expiry, and which tool packages are usable per profile. |
+| `user` | `tiktok_get_user_info` | yes | Fetch the authenticated TikTok user's profile: display name, avatar, bio, and counts (followers, following, likes, videos). |
+| `video` | `tiktok_list_videos` | yes | List the authenticated user's PUBLIC videos, newest first, up to 20 per page. |
+| `video` | `tiktok_query_videos` | yes | Fetch full details for up to 20 specific videos by id. |
+| `publish` | `tiktok_get_creator_info` | yes | Fetch the creator's live posting state: nickname, the privacy_level options currently available, whether comments/duets/stitch are disabled account-wide, and the maximum allowed video duration. |
+| `publish` | `tiktok_get_publish_status` | yes | Check — and by default briefly wait on — the status of a publish attempt by publish_id. |
+| `publish` | `tiktok_list_publish_journal` | yes | Read this server's local, append-only journal of publish attempts: timestamp, account, tool, title excerpt, publish_id, and outcome. |
+| `publish-write` | `tiktok_post_video` | no | Post a video DIRECTLY to the authenticated account's TikTok profile — it goes live without further user action once TikTok finishes processing. |
+| `publish-write` | `tiktok_upload_video_draft` | no | Upload a video to the user's TikTok INBOX as a draft — the user must open the TikTok app notification, edit, and publish it themselves; nothing goes live from this call. |
+| `publish-write` | `tiktok_post_photos` | no | Post a photo carousel DIRECTLY to the user's TikTok profile — it goes live once processing completes. |
+| `publish-write` | `tiktok_upload_photos_draft` | no | Send a photo carousel to the user's TikTok INBOX as a draft — the user finishes and publishes it in the TikTok app; nothing goes live from this call. |
 
 <!-- GENERATED:TOOLS:END -->
+
+The table lists what this version actually registers. The publishing tools —
+`tiktok_get_creator_info`, `tiktok_get_publish_status`,
+`tiktok_list_publish_journal` and the four `publish-write` tools — are designed
+and specified in [docs/TOOLS.md](docs/TOOLS.md) but are not registered yet; the
+table grows itself as they land, since it is generated from the registry rather
+than written by hand.
 
 All tools carry MCP annotations (`readOnlyHint`, `destructiveHint`,
 `idempotentHint`, `openWorldHint`) so clients can apply the right confirmation

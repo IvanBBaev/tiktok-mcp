@@ -324,9 +324,11 @@ this lock.
   file (streamed — RSS stays bounded, advisory).
 - Status polling: poll loop on the mock clock; **terminal-beats-deadline**
   (a terminal response in flight when the deadline fires still wins);
-  **timeout-is-not-error** — the timeout result is `ok:true` with
-  `status:"timeout"`, the last known status, and `publish_id` **always**
-  present, plus the exact follow-up hint (rationale: SYNTHESIS § 2.3).
+  **timeout-is-not-error** — the timeout result is `ok:true` carrying the
+  **last observed** status (never a synthetic `"timeout"` status: TOOLS.md
+  §§ 2.7/3.6 make the deadline a property of the call, not of the post) and
+  `publish_id` **always** present, plus the exact follow-up hint
+  (rationale: SYNTHESIS § 2.3).
 
 ### mcp/*
 
@@ -378,23 +380,50 @@ this lock.
 
 ### Sync gates and repo meta
 
+`npm run sync` runs every gate in check mode and reports all of them before
+failing, so one run lists everything to regenerate rather than one thing at a
+time; `npm run sync:write` regenerates instead of complaining. Each generator
+is also its own script (`npm run docs:readme`, `npm run docs:env`) for the
+common case of touching one thing.
+
 - `readme-sync`: the README tool table equals `describeAllTools()` output.
+  The table carries the *first sentence* of each description; the full,
+  model-facing text lives in `docs/tool-manifest.json`, because pasting whole
+  paragraphs into table cells produces a README nobody reads.
 - `env-docs-sync`: `.env.example` equals the CONFIGURATION.md variable
-  table equals the settings source.
-- Manifest snapshot (above) and, from Phase 3, `serverjson-sync`.
+  table equals the settings source. Split in two: the generator
+  (`scripts/gen-env-example.ts`) renders every shown default by calling
+  `loadSettings`, and asserts its hand-written prose spec covers exactly
+  `knownSettingVars()` — so a new `TT_` variable cannot land undocumented,
+  nor a deleted one linger. The CONFIGURATION.md half stays in
+  `test/settings.test.ts`.
+- Manifest snapshot: `docs/tool-manifest.json`, generated against a synthetic
+  fully-authorized profile so it describes the server rather than the machine
+  that ran it. From Phase 3, `serverjson-sync` joins it.
 - **Pack audit**: `npm pack --dry-run --json` file list equals the
   committed `pack-manifest.json` fixture; no install scripts in
-  `package.json`.
-- Build freshness: newest `src/` mtime ≤ `build/` mtime, else "run build".
+  `package.json`. Paths only — never sizes or integrity hashes, which change
+  on every build and would make the fixture noise.
+- Build freshness: newest `src/`, `test/` or `scripts/` mtime ≤ newest
+  `build/` mtime, else "run build" — the tests execute compiled output, so a
+  stale `build/` is a green run of the previous commit.
 - Hygiene sweep: tests use scratch dirs + injected ports only; every
   platform skip carries a named reason.
 
+Two invariants a byte comparison cannot check live in `test/manifest.test.ts`
+next to the generators' own unit tests: that a described tool never carries an
+`[UNAVAILABLE …]` marker or a diverging `outputSchema`, and the
+`PACKAGE_SCOPES` drift gate (every scope a registered tool declares is
+requested by its package; every requested scope is one this server knows).
+
 ## Coverage floors and ratchet
 
-`c8` has no per-directory thresholds, so a small gate script reads
-`coverage-final.json` and applies this table (stored as one JSON file
-consumed by both the gate and a self-test that asserts every floor ≥ the
-global minimum):
+`c8` has no per-directory thresholds, so a small gate script
+(`scripts/coverage-gate.ts`, run as `npm run coverage:gate`) reads
+`coverage/coverage-summary.json` — the `json-summary` reporter, whose
+per-file totals are the post-source-map numbers the text reporter prints —
+and applies this table (stored as `scripts/coverage-floors.json`, consumed by
+both the gate and its self-tests in `test/manifest.test.ts`):
 
 | Area | Lines | Branches | Functions |
 |---|---|---|---|
@@ -407,9 +436,16 @@ global minimum):
 | **global** | 90 | 80 | 95 |
 
 **Ratchet policy:** at each phase exit every floor rises to
-`max(floor, achieved − 2)`. Floors are never lowered except by a commit
+`max(floor, achieved − 2)` — `node build/scripts/coverage-gate.js --ratchet`
+rewrites the table in place. Floors are never lowered except by a commit
 whose message carries a review note; a raise lands in the same change that
 raised the coverage.
+
+Repo tooling under `scripts/` is excluded from the coverage report
+(`.c8rc.json`): its floors would be a quality signal about the build, not
+about the server. What that buys is a working alarm — a `src/` file matched
+by no rule is reported by name as "covered by the global floor only", which
+is otherwise indistinguishable from a file nobody thought about.
 
 ## CI matrix and gates
 
@@ -452,8 +488,10 @@ protocol stream. Three layers, cheapest first:
    `console.log` and friends cannot compile into the server). All
    diagnostics go to stderr through the redacting logger.
 2. **In-process:** instrument `process.stdout.write` during import,
-   registration, and a tool call → zero non-protocol writes; includes the
-   dotenv tip-line regression (dotenv loaded quiet).
+   registration, and a tool call → zero non-protocol writes. The `dotenv`
+   tip-line regression this originally guarded is now structurally impossible:
+   `core/config` parses the env file itself and the package ships no `dotenv`
+   dependency, so no library gets an import-time chance to print.
 3. **Spawned:** boot the compiled server on stdio as a child process, run
    `initialize` + `tools/list` + invoke a tool, and assert **every** stdout
    line parses as a JSON-RPC protocol frame — nothing else, including

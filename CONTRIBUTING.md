@@ -21,7 +21,7 @@ Tests use `node:test` and run against the compiled output in `build/`.
 Run the full gate before opening a pull request — it is exactly what CI runs:
 
 ```bash
-npm run check       # typecheck + lint + format:check + build + test
+npm run check       # typecheck + lint + format + build + test + coverage + sync
 ```
 
 Individual steps, if you want to iterate faster:
@@ -32,8 +32,15 @@ npm run lint           # ESLint (flat config + typescript-eslint)
 npm run format:check   # Prettier, verify only
 npm run format         # Prettier, write
 npm test               # node --test over build/test (needs a prior build)
-npm run coverage       # build + c8 coverage report
+npm run coverage       # build + c8 report + per-area floors
+npm run coverage:gate  # per-area floors only (needs a prior coverage:run)
+npm run sync           # every generated artifact vs the tree — reports, never writes
+npm run sync:write     # regenerate them instead of complaining
 ```
+
+`sync` covers the README tool table, `.env.example`, `docs/tool-manifest.json`
+and `pack-manifest.json`. It reports **all** stale artifacts before failing, so
+one run tells you everything to regenerate; `npm run sync:write` then does it.
 
 CI runs on every push and pull request across the supported Node versions and on
 Linux, macOS **and Windows** — the Windows leg matters because the env-file store
@@ -56,8 +63,14 @@ bar.
   `npm run docs:readme`. A drift check keeps the committed table in sync with the
   registrations — never hand-edit inside the generated markers.
 - **The manifest is a snapshot.** The in-code `PACKAGES` manifest (tool ⇄ package
-  ⇄ annotations) is asserted against a committed fixture; update the fixture in
-  the same change when you add or move a tool.
+  ⇄ annotations) is snapshotted to [docs/tool-manifest.json](docs/tool-manifest.json);
+  regenerate it with `npm run sync:write` in the same change when you add or move
+  a tool. It is generated against a synthetic fully-authorized profile, so it
+  describes the server and never the credentials on the machine that ran it.
+- **Scopes are gated in both directions.** A tool declaring a scope its package
+  does not request in `PACKAGE_SCOPES` (`src/cli/login.ts`) fails
+  `test/manifest.test.ts` — a login that cannot call the tool it authorized is a
+  failure only the end user would discover.
 - **Docs move with the code.** A change to behavior updates the matching design
   doc under `docs/` (architecture, tools, auth, configuration, security) and the
   user-facing [CHANGELOG.md](CHANGELOG.md) in the same commit.

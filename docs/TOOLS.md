@@ -129,7 +129,11 @@ budget, never mint a `plan_id`, and never touch the network.
 
 Oversized results are shaped by dropping trailing items, never fields
 mid-item. `data.meta.truncation = { truncated: true, reason: "char_budget" |
-"item_cap", returned, resume_cursor? }`, plus a cause-specific `note` hint.
+"item_cap" | "cursor_stuck", returned, resume_cursor? }`, plus a cause-specific
+`note` hint. The three reasons are three different instructions: `char_budget`
+and `item_cap` are resumable and say so with a `resume_cursor`; `cursor_stuck`
+means the upstream stopped paginating (CC-C3) and deliberately carries none,
+because handing the cursor back would only buy the same page again.
 Truncation runs after redaction, never splits a UTF-16 surrogate pair, and
 never removes `ok`/`error`/`hints` (CC-G7).
 
@@ -343,11 +347,19 @@ seven. Per-tool sections list only additions.
 | `media_root_not_configured` | no | "source \"file\" is disabled: the operator has not set TT_MEDIA_ROOT (the only directory this server may read media from). Ask the user to set TT_MEDIA_ROOT in the server configuration and restart, or host the media on a verified URL and use source \"url\"." |
 | `file_outside_media_root` | no | "file_path resolves to <resolved_abs_path>, which is outside the configured media root <TT_MEDIA_ROOT>. This server only reads media inside that directory (operator policy). Ask the user to move the file there or to change TT_MEDIA_ROOT. Do not attempt alternative paths." |
 | `file_not_found` | no | "file_path <resolved_abs_path> does not exist or is not a regular file. Ask the user for the correct path under <TT_MEDIA_ROOT>." |
+| `file_empty` | no | "file_path <resolved_abs_path> is an empty file (0 bytes). Ask the user for the correct path under <TT_MEDIA_ROOT>." |
 | `file_too_large` | no | "The file is <size> bytes; TikTok's maximum is <cap>. The user must shorten or re-encode the video." |
 | `url_prefix_unverified` | no | "<field> does not match any verified URL prefix configured in TT_VERIFIED_URL_PREFIXES. TikTok only pulls media from domains its developer verified in the TikTok developer portal — this is a platform rule, not a server setting. Use source \"file\" for local video files, or ask the user to host the media under a verified prefix. No request was sent." |
 | `upload_interrupted` | no | "Upload failed at chunk <i>/<n> after automatic retries (publish_id <publish_id>). The upload cannot be resumed; TikTok will expire this attempt on its own. Check tiktok_get_publish_status for <publish_id>; if the user still wants the post, generate a fresh preview and apply again — that creates a NEW publish attempt." |
 | `privacy_level_unavailable` | no | "privacy_level '<value>' is not available for this account right now. Available options: <comma-separated enum values from creator_info>. Re-preview with one of these. (Unaudited apps allow only SELF_ONLY.)" |
 | `branded_content_privacy_conflict` | no | "brand_content_toggle: true cannot be combined with privacy_level SELF_ONLY — TikTok rejects branded content on private-visibility posts. While this app is unaudited, only SELF_ONLY is available, so branded-content posting is not possible at all. Either drop the brand toggle or wait until the app passes TikTok's audit." |
+
+`url_prefix_unverified` has one sanctioned variant. The photo tools have no
+local-file source at all (§§ 3.10–3.11), so offering `source "file"` there would
+name a field their schema does not have. For those two tools the sentence
+*"Use source \"file\" for local video files, or ask the user to host the media
+under a verified prefix."* is replaced by *"Ask the user to host the media under
+a verified prefix."* — nothing else in the message changes.
 
 **Per-tool additions** (defined in their sections): `publish_not_found`
 (§ 3.6), `journal_unreadable` (§ 3.7).
@@ -640,14 +652,24 @@ Notes:
   > returns publish_id immediately; processing continues asynchronously —
   > follow the returned poll hint to tiktok_get_publish_status.
 
-- **Input schema** (zod `.strict()`, discriminated on `source`):
+- **Input schema** (zod `.strict()`, a single flat object keyed on `source`).
+  `source` selects which media field is required, but the shape is *not* a
+  `z.discriminatedUnion`: that emits a JSON Schema with no top-level object
+  shape, which both `mcp/define`'s strictness contract and every manifest
+  reader depend on. The union is therefore expressed as a flat strict object
+  (`source` enum + optional `file_path` + optional `video_url`) plus an
+  imperative mutual-exclusion check in the handler, which rejects a missing or
+  a mismatched media field with `invalid_params` before any network call. Same
+  contract, renderable schema. `plan_id` is validated the same way — its
+  `plan_` + 32-hex shape is asserted in the handler, because a zod `.refine()`
+  would wrap the schema in a `ZodEffects` and cost the same object shape.
 
   | Field | Type | Req | Constraints | `.describe()` |
   |---|---|---|---|---|
   | `account` | string | no | | (common) |
-  | `source` | `"file" \| "url"` | yes | discriminator | "Where the video bytes come from. \"file\": a local file under the operator-configured TT_MEDIA_ROOT, uploaded in chunks. \"url\": TikTok pulls from an HTTPS URL that must match a verified prefix in TT_VERIFIED_URL_PREFIXES." |
-  | `file_path` | string | iff `source: "file"` | resolves inside `TT_MEDIA_ROOT`; MP4/WebM/MOV | "Path to the video file (absolute, or relative to TT_MEDIA_ROOT). Must resolve inside TT_MEDIA_ROOT; checked at preview and re-checked at apply. Mutually exclusive with video_url." |
-  | `video_url` | string | iff `source: "url"` | https, matches a verified prefix | "HTTPS URL of the video. Must start with one of the verified URL prefixes; TikTok refuses pulls from unverified domains. Must serve the bytes without redirects and stay reachable for about 1 hour. Mutually exclusive with file_path." |
+  | `source` | `"file" \| "url"` | yes | selects the required media field | "Where the video bytes come from. \"file\": a local file under the operator-configured TT_MEDIA_ROOT, uploaded in chunks. \"url\": TikTok pulls from an HTTPS URL that must match a verified prefix in TT_VERIFIED_URL_PREFIXES." |
+  | `file_path` | string | iff `source: "file"` | optional in the zod shape, required (and only accepted) for `source: "file"` — handler check; resolves inside `TT_MEDIA_ROOT`; 1 byte … 4 GiB | "Path to the video file (absolute, or relative to TT_MEDIA_ROOT). Must resolve inside TT_MEDIA_ROOT; checked at preview and re-checked at apply. Mutually exclusive with video_url." |
+  | `video_url` | string | iff `source: "url"` | optional in the zod shape, required (and only accepted) for `source: "url"` — handler check; absolute https, no embedded credentials (CC-D10), matches a verified prefix | "HTTPS URL of the video. Must start with one of the verified URL prefixes; TikTok refuses pulls from unverified domains. Must serve the bytes without redirects and stay reachable for about 1 hour. Mutually exclusive with file_path." |
   | `title` | string | no | ≤ 2200 UTF-16 code units | "Caption. Up to 2200 UTF-16 code units (emoji count as 2, the way TikTok counts). #hashtags and @mentions are parsed by TikTok. Omit for an untitled post." |
   | `privacy_level` | enum `PUBLIC_TO_EVERYONE \| MUTUAL_FOLLOW_FRIENDS \| FOLLOWER_OF_CREATOR \| SELF_ONLY` | for execution | must be in the creator's live options | "Who can see the post. NO default — the user must choose from the options in the preview (they depend on account type and app audit status; unaudited apps allow only SELF_ONLY). A preview without this field returns the options and no plan_id." |
   | `disable_comment` | boolean | no | default `false` | "true disables comments on this post. Leave false unless the user asks." |
@@ -661,13 +683,24 @@ Notes:
   | `plan_id` | string | no | `plan_` + 32 lowercase hex characters | "Execution token from this tool's own preview. Present = execute the previewed post. Single-use, expires 10 minutes after the preview, bound to the exact previewed payload and this account. Never invent or reuse one." |
   | `force` | boolean | no | default `false` | "Override the duplicate guard. Set true only after verifying via tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical attempt did not create a post." |
 
+- **Container format is not validated locally.** The server does not sniff or
+  gate on the container: the file extension only selects the chunk PUT's
+  `Content-Type` (`.mp4`/`.m4v` → `video/mp4`, `.mov`/`.qt` →
+  `video/quicktime`, `.webm` → `video/webm`, anything else → `video/mp4`), and
+  TikTok is the authority on what it accepts. A rejected container surfaces as
+  a `FAILED` publish status with TikTok's own reason, not as a local error —
+  refusing a file by extension here would reject valid uploads on nothing more
+  than a filename.
 - **Preview output** (`mode: "plan"`): `{ mode, plan_id, expires_at, account:
   { profile, nickname, open_id_masked }, action: "DIRECT_POST video",
-  payload: { post_info: { ...exact fields to be sent... }, source: { type,
-  resolved_path?, url?, file_size?, chunk_summary?: { file_size, chunk_size,
-  chunks } } }, derived: [{ field, value, reason }], creator:
-  { privacy_level_options, max_video_post_duration_sec, ... },
-  audit_restrictions_active, consent_line }` + `approval_required` hint.
+  payload: { post_info: { ...exact fields to be sent... }, source }, derived:
+  [{ field, value, reason }], creator: { privacy_level_options,
+  comment_disabled, duet_disabled, stitch_disabled,
+  max_video_post_duration_sec? }, audit_restrictions_active, consent_line,
+  meta: { rate_bucket } }` + `approval_required` hint. The `source` block is
+  `{ type: "url", url }` or `{ type: "file", resolved_path, file_size,
+  chunk_summary: { file_size, chunk_size, chunks } }` — the chunk plan is
+  shown at preview so the user approves the actual upload, not an estimate.
   `mode: "plan_incomplete"` when `privacy_level` is absent: same shape minus
   `plan_id`/`expires_at`, plus `missing: ["privacy_level"]` (§ 2.6.1).
 - **Apply output** (`mode: "applied"`): `{ mode, publish_id, status:
@@ -708,16 +741,23 @@ Notes:
   > post.
 
 - **Input schema:** `account`, `source`, `file_path`, `video_url` (rows as
-  § 3.8), `wait_for_completion` (default `false`; the terminal status here is
+  § 3.8, including the flat strict object and the handler-side mutual-exclusion
+  check), `wait_for_completion` (default `false`; the terminal status here is
   `SEND_TO_USER_INBOX`), `plan_id`, `force`. **No title/privacy/toggle
   fields** — the upstream inbox init accepts none, and offering dead fields
   teaches the model false affordances. The schema omission is itself the
   contract.
 - **Preview/apply output:** as § 3.8 with `action: "MEDIA_UPLOAD video
-  draft"`; **no `creator` block and no `consent_line`** (no `creator_info`
-  pre-flight — draft tools need only `video.upload`); apply success carries a
+  draft"`, with everything the absent fields imply removed: the preview is
+  always `mode: "plan"` (nothing can be missing, so `plan_incomplete` is
+  unreachable), `payload` carries **`source` only — no `post_info`**, and there
+  is **no `derived` array, no `creator` block and no `consent_line`** (no
+  `creator_info` pre-flight — draft tools need only `video.upload`, and a
+  draft-only grant may not carry the scope the pre-flight would need). The
+  `account` block is `{ profile, open_id_masked }`; `nickname` comes from
+  `creator_info` and is therefore absent here. Apply success carries a
   `user_action` hint: *"Tell the user: open the TikTok app notification to
-  edit and publish the draft. Unfinished drafts expire."*
+  edit and publish the draft. Unopened drafts expire."*
 - **Errors:** shared catalog; `pending_share_cap` is the signature error
   here. No `privacy_level_unavailable` / `branded_content_privacy_conflict`
   (the fields do not exist on this tool).
@@ -749,7 +789,7 @@ Notes:
   |---|---|---|---|---|
   | `account` | string | no | | (common) |
   | `photo_urls` | string[] | yes | 1–35 items; each https + verified prefix; JPEG/WebP ≤ 20 MB, ≤ 1080p (CC-E9) | "HTTPS URLs of the photos, in carousel order (1–35). Every URL must start with a verified prefix from TT_VERIFIED_URL_PREFIXES — TikTok refuses unverified domains. JPEG or WebP, up to 20 MB and 1080p each." |
-  | `photo_cover_index` | integer | no | 0 ≤ i < `photo_urls.length`; default 0 | "Zero-based index of the cover photo. Must be a valid index into photo_urls." |
+  | `photo_cover_index` | integer | no | 0 ≤ i < `photo_urls.length`; default 0; the cross-field bound is a handler check (zod bounds the array, not the index against it) | "Zero-based index of the cover photo. Must be a valid index into photo_urls." |
   | `title` | string | no | ≤ 90 UTF-16 code units | "Photo post title — max 90 UTF-16 code units (NOT 2200; photos differ from videos). Longer text goes in description." |
   | `description` | string | no | ≤ 4000 UTF-16 code units | "Photo post description, up to 4000 UTF-16 code units. #hashtags and @mentions are parsed here." |
   | `privacy_level` | enum | for execution | as § 3.8 | (as § 3.8) |
@@ -762,11 +802,23 @@ Notes:
   | `plan_id` | string | no | `plan_` + 32 lowercase hex characters | (as § 3.8) |
   | `force` | boolean | no | default `false` | (as § 3.8) |
 
+- **Carousel validation happens before any network call.** Both cross-field
+  rules are enforced in the handler, on the preview call and again on the
+  apply call, ahead of `creator_info` and ahead of the publish init: a
+  `photo_cover_index` at or past `photo_urls.length` fails `invalid_params`,
+  and every entry of `photo_urls` is checked for absolute https, embedded
+  credentials (CC-D10) and a verified prefix. URLs are reported **one at a
+  time, by index** — the message names `photo_urls[<i>]`, because a model that
+  is told which entry is wrong fixes that entry, where a list of every
+  offender invites a blind re-send. There is no `source` field and no `"file"`
+  path: the photo API pulls from URLs only.
 - **Preview/apply output:** as § 3.8 with `action: "DIRECT_POST photos"`; the
-  source block lists the URLs and the cover index; the duplicate-guard title
-  hash uses title + description.
+  source block is `{ type: "url", urls, photo_cover_index }`; the
+  duplicate-guard title hash uses title + description.
 - **Errors:** shared catalog; `url_prefix_unverified` (checked per URL, the
-  message names the first offending URL), `privacy_level_unavailable`,
+  message names the first offending URL by index and does **not** offer the
+  `source: "file"` alternative — photos have none), `invalid_params` for an
+  out-of-range `photo_cover_index`, `privacy_level_unavailable`,
   `branded_content_privacy_conflict`, `daily_post_cap`, `active_user_cap`.
   **No duet/stitch fields exist for photos** — the schema omission is itself
   the contract.
@@ -789,16 +841,27 @@ Notes:
   > success, tell the user to open the TikTok app inbox notification.
 
 - **Input schema:** `account`, `photo_urls`, `photo_cover_index`, `title`,
-  `description` (rows as § 3.10 — title/description are accepted by the photo
-  draft endpoint and prefill the app editor; *(verify at implementation
-  time — probe P-13)*), `wait_for_completion` (default `false`), `plan_id`,
-  `force`. No privacy, toggle, or brand fields.
+  `description` (rows as § 3.10). Unlike the video draft, this tool therefore
+  **does** carry a `post_info` — the photo draft endpoint accepts the two text
+  fields and they prefill the app editor. Whether MEDIA_UPLOAD honours them
+  upstream is still *probe P-13* (TIKTOK-API.md § 4.4); the shipped schema is
+  the working assumption, and only the probe can retire the hedge. Plus
+  `wait_for_completion` (default `false`),
+  `plan_id`, `force`. No privacy, toggle, or brand fields. The same
+  before-any-network carousel validation as § 3.10 applies (cover index in
+  range, every `photo_urls[<i>]` https and verified-prefix).
 - **Preview/apply output:** as § 3.9 with `action: "MEDIA_UPLOAD photos
-  draft"`; no `creator` block, no `consent_line`; apply success carries the
-  same `user_action` hint as § 3.9.
-- **Errors:** shared catalog; `pending_share_cap`, `url_prefix_unverified`.
+  draft"` — always `mode: "plan"`, no `derived`, no `creator` block, no
+  `consent_line`, `account` without `nickname` — **except** that `payload`
+  carries `post_info` (the title and description limits of § 3.10, resolved
+  without a `creator_info` pre-flight) alongside `source`. Apply success
+  carries the same `user_action` hint as § 3.9.
+- **Errors:** shared catalog; `pending_share_cap`, `url_prefix_unverified`
+  (per URL, by index, with no `source: "file"` alternative), `invalid_params`
+  for an out-of-range `photo_cover_index` or an over-long title/description.
   No `creator_info` pre-flight (scope reality: draft authorizations lack
-  `video.publish`).
+  `video.publish`), hence no `privacy_level_unavailable` /
+  `branded_content_privacy_conflict`.
 
 ---
 
