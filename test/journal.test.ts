@@ -48,6 +48,16 @@ import { BASELINE_NOW_MS, fsSandbox, mockClock, withEnv } from './helpers.js';
 
 const POSIX = process.platform !== 'win32';
 
+/**
+ * The tail read opens a handle rather than slurping the file, and win32 hands
+ * out a handle for a directory and then reads it as zero bytes — an empty
+ * journal, not a failure. Only POSIX turns "a directory stands here" into the
+ * read error the warn-and-allow path is about.
+ */
+const canFailTailRead: { skip?: string } = POSIX
+  ? {}
+  : { skip: 'directory-as-file: win32 opens a directory handle and reads it as empty' };
+
 function intent(over: Partial<IntentRecord> = {}): IntentRecord {
   return {
     v: 1,
@@ -725,23 +735,27 @@ test('duplicate: a missing journal allows the publish', async () => {
   }
 });
 
-test('duplicate: an unreadable journal warns and allows the publish', async () => {
-  const { path, cleanup } = await sandbox();
-  try {
-    await mkdir(path);
-    const { logger, lines: logged } = recordingLogger();
-    assert.deepEqual(await checkDuplicate('d1', mockClock(), { path, logger }), {
-      duplicate: false,
-    });
-    assert.ok(
-      logged.some(
-        (line) => line.level === 'warn' && line.msg.includes('allowing the publish'),
-      ),
-    );
-  } finally {
-    await cleanup();
-  }
-});
+test(
+  'duplicate: an unreadable journal warns and allows the publish',
+  canFailTailRead,
+  async () => {
+    const { path, cleanup } = await sandbox();
+    try {
+      await mkdir(path);
+      const { logger, lines: logged } = recordingLogger();
+      assert.deepEqual(await checkDuplicate('d1', mockClock(), { path, logger }), {
+        duplicate: false,
+      });
+      assert.ok(
+        logged.some(
+          (line) => line.level === 'warn' && line.msg.includes('allowing the publish'),
+        ),
+      );
+    } finally {
+      await cleanup();
+    }
+  },
+);
 
 test('duplicate: only the tail of a large journal is read', async () => {
   const { path, cleanup } = await sandbox();

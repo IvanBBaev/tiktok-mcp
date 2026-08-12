@@ -228,11 +228,20 @@ function only(calls: readonly RecordedCall[]): RecordedCall {
  * and a fixed number of turns would make the wait a race on I/O latency.
  */
 async function waitUntil(predicate: () => boolean, label: string): Promise<void> {
-  for (let turn = 0; turn < 500; turn += 1) {
-    if (predicate()) return;
-    await flush(1);
+  // The budget is wall-clock, not a turn count: 500 turns of `setImmediate` are
+  // a few real milliseconds, which is less than a loaded CI runner needs to
+  // return one file read — the test would then fail for someone else's I/O
+  // contention. Past the first 500 turns the wait stops spinning hot and yields
+  // real time instead, so it does not compete with the work it is waiting for.
+  const giveUpAt = Date.now() + 10_000;
+  for (let turn = 0; !predicate(); turn += 1) {
+    if (Date.now() > giveUpAt) assert.fail(`timed out waiting for ${label}`);
+    await (turn < 500
+      ? flush(1)
+      : new Promise<void>((resolve) => {
+          setTimeout(resolve, 1);
+        }));
   }
-  assert.fail(`timed out waiting for ${label}`);
 }
 
 // ---------------------------------------------------------------------------
