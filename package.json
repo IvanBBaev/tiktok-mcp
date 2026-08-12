@@ -61,7 +61,7 @@
     "fast-check": "^3.23.2",
     "globals": "^15.15.0",
     "prettier": "^3.9.6",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "typescript-eslint": "^8.65.0"
   },
   "keywords": [
