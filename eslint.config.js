@@ -31,6 +31,25 @@ export default tseslint.config(
     },
   },
 
+  // Repo tooling (scripts/**): type-checked like the server source, but it is a
+  // CLI — stdout is its report channel, not a JSON-RPC stream, so console is
+  // allowed. Nothing under src/ may import from here; the build emits it beside
+  // the server only so the gates run on plain node with no extra toolchain.
+  {
+    files: ['scripts/**/*.ts'],
+    extends: [...tseslint.configs.recommendedTypeChecked],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+      globals: { ...globals.node },
+    },
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'error',
+    },
+  },
+
   // Time and timers must flow through the core/clock.ts seam so every
   // time-dependent behavior is testable under the mock clock (TESTING.md
   // determinism rule 1 / CC-H4). core/clock.ts itself is the seam and is

@@ -36,13 +36,19 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --test \"build/test/**/*.test.js\"",
-    "coverage": "npm run build && c8 node --test \"build/test/**/*.test.js\"",
-    "check": "npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test"
+    "coverage": "npm run build && npm run coverage:run && npm run coverage:gate",
+    "coverage:run": "c8 node --test \"build/test/**/*.test.js\"",
+    "coverage:gate": "node build/scripts/coverage-gate.js",
+    "docs:readme": "node build/scripts/gen-readme.js",
+    "docs:env": "node build/scripts/gen-env-example.js",
+    "sync": "node build/scripts/sync.js",
+    "sync:write": "node build/scripts/sync.js --write",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test && npm run coverage:run && npm run coverage:gate && npm run sync"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "dotenv": "^17.4.2",
-    "zod": "^3.25.76"
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
