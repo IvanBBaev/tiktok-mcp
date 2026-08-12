@@ -38,8 +38,13 @@ import type { FetchStub } from '../helpers.js';
 
 /** A failure to answer a PUT with, instead of accepting the chunk. */
 export type InjectedOutcome =
-  /** Answer with this bare HTTP status (500, 403, 416, 400 …). */
-  | { readonly status: number }
+  /**
+   * Answer with this bare HTTP status (500, 403, 416, 400 …). `headers` is for
+   * the one status that carries information the client acts on: a `416` whose
+   * `Content-Range: bytes 0-{UPLOADED}/{TOTAL}` tells the client where TikTok
+   * actually is, which is the only input a resync has.
+   */
+  | { readonly status: number; readonly headers?: Readonly<Record<string, string>> }
   /** Never answer, so the client's own timeout has to fire. */
   | { readonly hang: true };
 
@@ -118,23 +123,42 @@ function headerLookup(init: RequestInit | undefined, name: string): string | und
   return undefined;
 }
 
-function toBytes(body: unknown): Uint8Array {
+/**
+ * The bytes of a request body, draining a stream if that is what it is.
+ *
+ * A streamed body is the production shape, not an exotic one: a chunk can be
+ * 128 MB, so the client reads it off the disk rather than into a buffer. The
+ * simulator drains it — including on the `hang` path, where an undrained
+ * `fs.createReadStream` would keep its file descriptor (and the test runner's
+ * event loop) alive.
+ */
+async function toBytes(body: unknown): Promise<Uint8Array> {
   if (body === undefined || body === null) return new Uint8Array(0);
   if (typeof body === 'string') return new TextEncoder().encode(body);
   if (body instanceof Uint8Array) return body;
   if (body instanceof ArrayBuffer) return new Uint8Array(body);
+  if (body instanceof ReadableStream) {
+    const parts: Uint8Array[] = [];
+    const reader = (body as ReadableStream<Uint8Array>).getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value !== undefined) parts.push(value);
+    }
+    return new Uint8Array(Buffer.concat(parts.map((part) => Buffer.from(part))));
+  }
   if (ArrayBuffer.isView(body)) {
     return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
   }
   throw new TypeError(
-    'uploadSimulator: a chunk body must be bytes or a string, got ' +
+    'uploadSimulator: a chunk body must be bytes, a string or a ReadableStream, got ' +
       Object.prototype.toString.call(body),
   );
 }
 
-function bare(status: number): Response {
+function bare(status: number, headers?: Readonly<Record<string, string>>): Response {
   // The real endpoint answers chunk PUTs with a status and no JSON body.
-  return new Response(null, { status });
+  return new Response(null, headers === undefined ? { status } : { status, headers });
 }
 
 /**
@@ -158,13 +182,13 @@ export function uploadSimulator(opts: UploadSimulatorOptions): UploadSimulator {
   let acceptedBytes = 0;
   let finalStatusSeen = false;
 
-  const stub: FetchStub = (input, init) => {
+  const stub: FetchStub = async (input, init) => {
     const ordinal = puts.length + 1;
     const url = typeof input === 'string' ? input : input.toString();
     const method = (init?.method ?? 'GET').toUpperCase();
     const contentRange = headerLookup(init, 'content-range');
     const range = parseRange(contentRange);
-    const body = toBytes(init?.body);
+    const body = await toBytes(init?.body);
 
     const answer = (answered: number | 'hang'): void => {
       puts.push({
@@ -192,7 +216,7 @@ export function uploadSimulator(opts: UploadSimulatorOptions): UploadSimulator {
     if (finalStatusSeen) {
       problems.push(`put #${String(ordinal)}: arrived after the final 201`);
       answer(400);
-      return Promise.resolve(bare(400));
+      return bare(400);
     }
 
     const injected = inject[ordinal];
@@ -220,7 +244,7 @@ export function uploadSimulator(opts: UploadSimulatorOptions): UploadSimulator {
         });
       }
       answer(injected.status);
-      return Promise.resolve(bare(injected.status));
+      return bare(injected.status, injected.headers);
     }
 
     // The one rule that makes the upload sequential, contiguous and gap-free.
@@ -241,7 +265,14 @@ export function uploadSimulator(opts: UploadSimulatorOptions): UploadSimulator {
             `but ${String(acceptedBytes)} bytes have been accepted`,
         );
         answer(416);
-        return Promise.resolve(bare(416));
+        return bare(416, {
+          // TikTok documents this as `bytes 0-{UPLOADED_BYTES}/{TOTAL}`, so the
+          // literal byte COUNT goes where a last-byte index would normally sit.
+          // That off-by-one ambiguity is real and unresolved (probe P-11), and
+          // reproducing it verbatim is the point: a client that assumes one
+          // reading must be caught here rather than in production.
+          'content-range': `bytes 0-${String(acceptedBytes)}/${String(source.length)}`,
+        });
       }
       if (range.last !== range.first + body.length - 1) {
         problems.push(
@@ -256,7 +287,7 @@ export function uploadSimulator(opts: UploadSimulatorOptions): UploadSimulator {
     const status = acceptedBytes >= source.length ? 201 : 206;
     if (status === 201) finalStatusSeen = true;
     answer(status);
-    return Promise.resolve(bare(status));
+    return bare(status);
   };
 
   return {

@@ -333,6 +333,53 @@ test('a declared total that disagrees with the source is reported', async () => 
   assert.throws(() => sim.assertComplete(), /declared total 9, source is 8 bytes/);
 });
 
+test('a streamed chunk body is drained and accepted like a byte array', async () => {
+  // The production client streams each chunk off the disk rather than buffering
+  // it, so a simulator that only understood `Uint8Array` would reject the one
+  // body shape that actually ships.
+  const source = makeRng(15).bytes(12);
+  const sim = uploadSimulator({ source, uploadUrl: UPLOAD_URL });
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(source.subarray(0, 5));
+      controller.enqueue(source.subarray(5));
+      controller.close();
+    },
+  });
+
+  const response = await sim.fetch(UPLOAD_URL, {
+    method: 'PUT',
+    headers: { 'content-range': 'bytes 0-11/12' },
+    body: stream,
+  });
+
+  assert.equal(response.status, 201);
+  assert.equal(sim.puts[0]?.bodyBytes, 12);
+  sim.assertComplete();
+});
+
+test('an injected 416 can carry the resync Content-Range the client reads', async () => {
+  const source = makeRng(16).bytes(20);
+  const sim = uploadSimulator({
+    source,
+    uploadUrl: UPLOAD_URL,
+    inject: { 1: { status: 416, headers: { 'content-range': 'bytes 0-9/20' } } },
+  });
+
+  const response = await chunkPut(sim, source, 0, 10);
+  assert.equal(response.status, 416);
+  assert.equal(response.headers.get('content-range'), 'bytes 0-9/20');
+});
+
+test("an out-of-order chunk's own 416 reports the accepted-byte progress", async () => {
+  const source = makeRng(17).bytes(30);
+  const sim = uploadSimulator({ source, uploadUrl: UPLOAD_URL });
+  await chunkPut(sim, source, 0, 10);
+  const response = await chunkPut(sim, source, 20, 10);
+  assert.equal(response.status, 416);
+  assert.equal(response.headers.get('content-range'), 'bytes 0-10/30');
+});
+
 test('a hung PUT never answers and rejects with the abort reason', async () => {
   const source = makeRng(13).bytes(10);
   const sim = uploadSimulator({
