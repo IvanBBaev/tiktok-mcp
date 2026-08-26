@@ -135,7 +135,9 @@ export function defineTool<In, Out>(spec: ToolSpec<In, Out>): ToolSpec<In, Out>;
 
 The registration wrapper adds structured start/done/error logs, uniform error
 mapping (`TikTokError` → readable message + upstream `error.code` + `log_id`), and
-an `AsyncLocalStorage` context carrying the per-request **account profile** (§ 7).
+the per-request **account profile** (§ 7), resolved from the tool's own `account`
+argument and handed to the handler inside that call's context — an explicit
+parameter, never ambient state.
 Log fields are allowlist-only and never carry secrets; `core/redact` is the backstop.
 
 ## 5. Manifest & registration (`src/tools/index.ts` + `src/mcp/server.ts`)
@@ -252,8 +254,9 @@ non-envelope 206/201 responses).
   `TT_ACCESS_TOKEN` / `TT_REFRESH_TOKEN` / `TT_OPEN_ID` / `TT_SCOPES` /
   `TT_TOKEN_EXPIRES_AT`; additional accounts under
   `TT_PROFILE_<NAME>_ACCESS_TOKEN` etc. `TT_ACTIVE_PROFILE` selects the default;
-  the auto-injected `account` tool argument selects per request via
-  `AsyncLocalStorage`.
+  the auto-injected `account` tool argument selects per request, and the
+  resolved name is passed explicitly into that call's `ApiContext`
+  (`src/api/context.ts`) rather than kept in ambient per-request state.
 - In-memory credential snapshot swapped atomically (single assignment) so a torn
   read across refresh is impossible. There is **one snapshot-reload path** with
   three triggers — env-file mtime change, a `tiktok_get_auth_status` call, any

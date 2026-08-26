@@ -13,6 +13,11 @@ build/
 # Coverage output (c8)
 coverage/
 
+# Raw sandbox captures (`npm run fixtures:record`). These hold live access
+# tokens, real `open_id`s and a usable `upload_url` — they are the input to
+# `npm run fixtures:sanitize`, never the thing that gets committed.
+.fixtures-raw/
+
 # Credentials & environment
 .env
 .env.*

@@ -45,16 +45,25 @@ test/
   helpers.ts              # the frozen cross-task harness contract (CONTRACTS.md)
   harness.test.ts         # self-tests for the extended harness
   harness/                # extended harness (not contract): upload simulator,
-                          # seeded RNG, deferreds, OAuth token stub, and the
-                          # multi-process runner for the lock race
+                          # seeded RNG, deferreds, OAuth token stub, the
+                          # multi-process runner for the lock race, and the
+                          # recorded-fixture replay harness
     workers/              # worker modules the runner forks (never *.test.ts)
   fixtures/
-    tools-manifest.json   # snapshot of the full tool surface
-    pack-manifest.json    # npm-pack file-list snapshot (pack-audit gate)
-    recorded/<area>/      # sanitized recorded sandbox interactions
-    videos/tiny.mp4       # 64 KB valid MP4 for upload-path tests
+    recorded/<area>/      # sanitized sandbox interactions, written only by
+                          # `npm run fixtures:sanitize` (absent until the first
+                          # sandbox pass — see § Recorded sandbox fixtures)
   *.test.ts               # one file per module/area (compiled with the build)
 ```
+
+Two things this tree deliberately does **not** hold. The generated snapshots
+live where the artifacts they describe do — [docs/tool-manifest.json](tool-manifest.json)
+for the tool surface and `pack-manifest.json` in the repo root for the
+`pack-audit` gate — because `npm run sync` compares them against the tree, not
+against the suite. And there is no committed media: the upload tests write the
+bytes they need into `fsSandbox()` at run time, which is what lets one helper
+produce a single-chunk file, a multi-chunk file and a zero-byte file without
+committing any of them.
 
 ## Harness — `test/helpers.ts`
 
@@ -185,23 +194,167 @@ proves stability.
 
 ### Recorded sandbox fixtures
 
-`test/fixtures/recorded/<area>/<name>.json`, one interaction per file:
-`recordedAt`, `endpoint`, `request` (headers + body), `response` (status +
-body). Contract tests replay `response.body` through the `api/` parsers and
-run our client against the fetch stub asserting the produced request matches
-the fixture's `request` shape — catching "TikTok's envelope drifted" and
-"our payload drifted" symmetrically.
+Every API-shape assertion elsewhere in this suite is written by hand against the
+fetch stub, and that caps what the suite can prove: a hand-written envelope
+shows that our parser accepts what we *believe* TikTok sends, never what TikTok
+actually sent. A recorded fixture is the missing half — real bytes, captured
+once, replayed on every run — so "TikTok's envelope drifted" becomes a red test
+instead of a support thread, and "our payload drifted" is caught by the same
+file from the other side.
 
-**Refresh procedure** (for sandbox runs): `npm run fixtures:record` (local
-only — the script refuses to run in CI) writes raw captures to a gitignored
-directory; `npm run fixtures:sanitize` mechanically produces the committed
-files (tokens → placeholders, `open_id`/`union_id` → stable HMAC pseudonyms,
-`log_id` → shape-preserving fake, `upload_url` → synthetic with
-`upload_token=REDACTED`); the diff is human-reviewed like code. Re-record
-on: a TikTok API version bump, each Phase-2 sandbox pass, or when a probe
-resolves a spec marker. A meta test asserts no fixture matches
-secret-shaped regexes; `recordedAt` feeds an advisory staleness warning
-(> 180 days).
+**The machinery is built; the tree is empty.** `test/fixtures/recorded/` does
+not exist until someone with sandbox credentials runs the recorder, and an
+empty tree is the expected state until then. What that costs is stated
+explicitly below, because a suite whose only evidence is "zero fixtures, zero
+failures" is a suite that cannot fail.
+
+#### The format
+
+`test/fixtures/recorded/<area>/<name>.json`, one interaction per file, one
+`<area>` per API surface (`auth`, `user`, `video`, `publish`, `upload` — a
+closed set, so a typo is a validation failure rather than a silently unreplayed
+directory). `scripts/lib/fixtures.ts` owns the shape, the sanitizer and the
+discovery, and it is the one module the recorder, the sanitizer and the replay
+test all read, so the three cannot drift apart:
+
+```jsonc
+{
+  "schema": "tiktok-mcp/fixture@1",
+  "recordedAt": "2026-08-22T16:06:13.888Z", // ISO-8601 UTC; feeds staleness
+  "area": "user",
+  "name": "user-info-basic",
+  "endpoint": { "method": "GET", "host": "…", "path": "/v2/user/info/" },
+  "request": { "url": "…", "headers": { … }, "body": null },
+  "response": { "status": 200, "headers": { … }, "body": { … } }
+}
+```
+
+Two additions to the sketch this section used to carry. `response.headers` is
+part of the format because the chunked-upload path answers with a bare status,
+a `Content-Range` and *no body at all* — a body-only fixture cannot express the
+one interaction most worth recording, and `Retry-After` is the same story on the
+retry path. And `endpoint` is redundant with `request.url` by construction: it
+exists so a reader can see what was called without parsing a query string, and
+the parser enforces that the two agree.
+
+Raw and sanitized files share one shape. The only difference is which directory
+they live in.
+
+#### Recording — `npm run fixtures:record`
+
+Local-only, and it **refuses to run in CI** before it reads a credential or
+opens a socket: a recorder that ran on a runner would either fail for want of an
+account or, far worse, succeed against one. It taps `globalThis.fetch`, drives
+the real `api/` functions against a real profile, and writes every observed call
+to `.fixtures-raw/<area>/<name>.json` at mode `0600`.
+
+The capture catalog is **read-only by construction** — `--list` prints it with
+the reason each entry earns a fixture. Nothing in it posts, uploads or deletes,
+because the script is run by a human against a real account, usually more than
+once while getting the captures right, and a catalog that could post would
+eventually post twice. The consequence is that the `upload/` fixtures and the
+publish ones beyond `creator_info` land the other way: a supervised sandbox
+publish is captured by hand, edited into this same format, and put through the
+sanitizer like everything else.
+
+`.fixtures-raw/` is gitignored and stays that way. It holds live access tokens,
+real `open_id`s and a usable `upload_url`; nothing in it is ever committed.
+
+#### Sanitizing — `npm run fixtures:sanitize`
+
+The committed tree is *defined* as the output of one pure function over the raw
+captures. That is the whole point: hand-redacting a capture is how a token
+ships, because the diff looks plausible either way and nothing distinguishes a
+field that was cleaned from one that merely looked clean.
+
+| In a raw capture | In the committed file |
+| --- | --- |
+| access / refresh token, client key & secret, PKCE verifier | `<ACCESS_TOKEN>`-style placeholder (JSON position) or bare `REDACTED` (query/form position) |
+| `open_id`, `union_id`, display name | stable, shape-preserving HMAC pseudonym |
+| `log_id` | shape-preserving fake |
+| `upload_url` | synthetic host, `upload_token=REDACTED` |
+| everything else — including TikTok's `error.code` | verbatim |
+
+That last row is load-bearing. In JSON position `code` is TikTok's own error
+code (`spam_risk_too_many_posts`), which is the single field the replay contract
+exists to assert on; only the OAuth authorization `code`, which appears solely
+as a query or form parameter, is a credential. `src/core/redact.ts` allowlists
+the same name for the same reason, and runs as the sanitizer's last pass — a
+safety net under the explicit transforms, not a replacement for them.
+
+Two properties worth stating, because they look like one property and are not.
+The sanitizer is **stable**: the same raw capture always renders to the same
+bytes, which is what keeps a fixture diff reviewable. It is deliberately **not
+idempotent**: a pseudonym is by construction indistinguishable from a real
+value, so a second pass re-pseudonymizes it. Nothing needs it to be — the
+sanitizer only ever reads `.fixtures-raw/`.
+
+The script refuses to write a file that still matches a secret shape, in either
+mode, and reports every problem in one pass rather than stopping at the first.
+The fix for a refusal is a new rule in `scripts/lib/fixtures.ts` — never a
+hand-edit of the output, which would put the committed tree back outside the
+transform. `--check` writes nothing and answers the other question: is the
+committed tree still exactly what the raw captures sanitize to? That is what
+catches a fixture edited by hand after it was generated. `--only=<name>` narrows
+either mode. Nothing is ever deleted; an orphaned committed fixture is reported
+and left alone.
+
+#### The replay contract — `test/fixtures-replay.test.ts`
+
+`test/harness/fixtures.ts` turns a fixture back into a real round trip through
+the production code. Both directions come out of a *single* call, which is not a
+coincidence: `core/http.ts` reads `globalThis.fetch` off the global at call time
+and `src/api/*` exports no standalone response parser, so driving the api
+function against a scripted stub is the only seam there is — and it is the seam
+that makes the request assertion available in the same breath. (The section
+previously described replaying `response.body` "through the `api/` parsers" as
+though a standalone parser seam existed. It does not.)
+
+The response half asserts the api function reaches a verdict rather than
+crashing on shape — a fixture that records an upstream rejection is legitimate
+and valuable, so a `TikTokError` is a pass. The request half compares what our
+client produced against the recording: method, origin and path exactly; the
+query as a set, since parameter order is contract on neither side; `accept` and
+`content-type` exactly, `authorization` by shape (the fixture holds a
+placeholder — comparing values would compare the sanitizer against the harness),
+and the *absence* of `authorization` where it must be absent. Bodies compare
+structurally, with **booleans and numbers keeping their values** (a flipped
+`disable_comment` is exactly the silent drift this exists for) while strings
+collapse to their type, because a sanitized fixture holds pseudonyms and
+reporting those as drift would report the sanitizer's own work.
+
+An endpoint no route covers is a **loud failure**, not a skip: a recorded
+interaction nobody replays looks exactly like a verified one. The two exemptions
+are named, with reasons, in `NON_REPLAYABLE_AREAS` — `auth/` (form-encoded,
+outside the `{data,error}` envelope, owned by `test/oauth.test.ts`) and
+`upload/` (a pre-signed PUT on another origin, owned by
+`test/api-upload.test.ts`). Both are still recorded, sanitized, round-tripped
+through the format and scanned for secrets; only the replay assertion skips
+them.
+
+#### What holds while the tree is empty
+
+- The harness proves itself on synthetic fixtures: a clean round trip, and one
+  test per drift it must detect (a dropped field, a changed number, a flipped
+  flag, a changed method, a changed path, a recorded error envelope, an
+  unrouted endpoint, a non-replayable area).
+- The tree-wide test counts those self-tests and **fails if they did not all
+  run**, so "zero fixtures" can never be mistaken for "verified". It also warns,
+  by name, that nothing is being replayed.
+- The secret-shape meta test scans **every file** under the tree — at any depth,
+  whatever its extension — not just the `<area>/*.json` the loader reads. A
+  `.bak` from a hand-edit or an editor swapfile is committed like any other
+  file, and a leak does not have to be well-formed. A non-vacuity test proves
+  the scanner still fires on a hand-written token and stays quiet on the
+  sanitized spellings.
+
+#### Refreshing
+
+Re-record on a TikTok API version bump, on each sandbox pass, or when a probe
+resolves a spec marker. `recordedAt` feeds an advisory staleness warning after
+180 days — a warning, never a failure: a fixture going stale is a prompt to book
+sandbox time, and a red suite on a date arithmetic helps nobody. Run
+`fixtures:record`, then `fixtures:sanitize`, then review the diff like code.
 
 ## What must be covered (per area)
 
@@ -399,7 +552,19 @@ common case of touching one thing.
   `test/settings.test.ts`.
 - Manifest snapshot: `docs/tool-manifest.json`, generated against a synthetic
   fully-authorized profile so it describes the server rather than the machine
-  that ran it. From Phase 3, `serverjson-sync` joins it.
+  that ran it.
+- `serverjson-sync`: the MCP-registry manifest is **checked, never written** —
+  `server.json` is hand-curated and `npm run sync:write` deliberately leaves it
+  alone, so this gate reports in both modes. It compares only the facts
+  `server.json` restates from a live source: name ⇄ `mcpName`, version ⇄
+  `package.json`, repository URL, the "N tools" claim ⇄ `allTools().length`,
+  the single npm package entry (registry type, identifier, version, transport
+  ⇄ the default `TT_TRANSPORT`), and the declared environment — every variable
+  must be one `knownSettingVars()` returns, the two credential variables must
+  be `isRequired` + `isSecret`, and nothing else may be required. What it does
+  *not* check is written into the gate's own failure text: JSON-schema
+  validity, whether the variable list is *complete*, the wording of the
+  description, and whether a non-credential variable ought to be secret.
 - **Pack audit**: `npm pack --dry-run --json` file list equals the
   committed `pack-manifest.json` fixture; no install scripts in
   `package.json`. Paths only — never sizes or integrity hashes, which change
@@ -479,10 +644,47 @@ Blocking/advisory split:
 - `npm audit` is **not** part of the blocking gate — blocking gates must be
   deterministic functions of the repo state, and a live advisory DB is not.
 
+**Packed-artifact smoke — the `smoke-pack` job, on ubuntu + macOS + Windows.**
+`npm run check` proves the repository, and the `pack-audit` gate proves *what*
+the tarball contains (`pack-manifest.json`); neither one proves the published
+artifact runs. `scripts/smoke-pack.ts` (`npm run smoke:pack`) packs the tree
+into a temp directory, installs that tarball into a second temp prefix outside
+the repo (`--omit=dev --ignore-scripts`) and then drives the *installed*
+binary: `--version` prints the packaged version, `--help` prints the usage,
+an unknown subcommand exits `2`, and a real JSON-RPC handshake over stdio —
+`initialize` → `notifications/initialized` → `tools/list` — has to answer with
+the server identity read back out of the packed `package.json` and a non-empty
+tool list. The child is spawned with a synthetic `HOME` and a `TT_ENV_FILE`
+pointing at an empty env file, never the ambient environment, so what it
+proves is the zero-credential boot a first-time `npx` user gets: nothing
+configured, the server still starts and still lists its tools, every unmet
+scope carrying the `[UNAVAILABLE]` marker (§ TOOLS.md 6.1). All three OSes,
+because the failures it catches — a file missing from `files`, a path that
+only resolves in the repo layout, a win32 shim difference — are
+platform-shaped. It is deliberately **not** part of `npm run check`: it
+installs from the network, and `check` stays offline-safe and fast.
+
+**On a tag only** — `npm run release:guard` in `publish.yml`, before anything
+is published: the pushed tag, `package.json`, `server.json` (top level *and*
+the npm package entry), `.claude-plugin/plugin.json`, `extension/package.json`
+and the topmost `CHANGELOG.md` heading must all name the same version, and
+that heading must not be `Unreleased`. It is deliberately **not** part of
+`npm run check`: as an always-on gate it would be red on every commit between
+releases, which is the state a healthy repo spends its life in. `npm run sync`
+therefore lists it under "checked elsewhere". Its logic is
+plain functions over parsed inputs, so `test/release.test.ts` exercises the
+failure messages directly rather than shelling out to CI.
+
+`npm run smoke:pack` runs on a tag as well — the same script, the last step
+before `npm publish`, ubuntu only because the three-OS spread already ran on
+the commit being tagged. It needs no registry credentials, so it adds no
+second authentication surface to a workflow whose whole point is that it
+carries no token.
+
 ## stdout purity (CC-G3)
 
 The MCP stdio transport owns stdout; one stray `console.log` corrupts the
-protocol stream. Three layers, cheapest first:
+protocol stream. Four layers, cheapest first:
 
 1. **Static:** ESLint `no-console` ban across `src/` (the static half —
    `console.log` and friends cannot compile into the server). All
@@ -497,11 +699,18 @@ protocol stream. Three layers, cheapest first:
    line parses as a JSON-RPC protocol frame — nothing else, including
    transitive-dependency writes at import time. (Blocking on ubuntu,
    advisory elsewhere until Phase 3.)
+4. **Packed:** the `smoke-pack` job repeats that assertion against the
+   *installed tarball* instead of the repo build — `initialize` +
+   `tools/list`, every stdout line has to parse as a JSON-RPC frame — on all
+   three OSes and blocking on each. Layer 3 can only see what the repo layout
+   imports; this one sees what a user's `node_modules` actually loads.
 
 ## Sandbox probes and the probe log
 
 CI never talks to TikTok — all network is mocked, and the MCP Inspector
-(`npm run inspector`) is the manual smoke-test harness. Questions the spec
+(`npx @modelcontextprotocol/inspector node build/src/index.js`, see
+[CLIENTS.md](CLIENTS.md#mcp-inspector)) is the manual smoke-test harness.
+Questions the spec
 cannot answer from documentation are settled empirically by the
 **sandbox probes P-1..P-14** (enumerated in SYNTHESIS § 6 and referenced
 from the spec docs), executed in **Phase 2 (task TD-7 / WP-2.6)** against a

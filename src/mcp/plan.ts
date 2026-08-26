@@ -13,7 +13,7 @@
 
 import type { Clock } from '../core/clock.js';
 import { canonicalJson, sha256Hex } from '../core/json.js';
-import type { WriteMode } from '../core/settings.js';
+import type { Settings, WriteMode } from '../core/settings.js';
 import type { Hint, ToolError } from './result.js';
 import type { ConsumeFailure } from './plan-store.js';
 
@@ -118,11 +118,77 @@ export function resolveWriteStep(
 // Local publish rate bucket (TOOLS.md § 2.8)
 // ---------------------------------------------------------------------------
 
-/** Capacity of the per-profile publish bucket: 6 inits per minute. */
-export const PUBLISH_BUCKET_CAPACITY = 6;
+/**
+ * The one setting the bucket obeys. Passed in rather than read from the
+ * environment so the bucket stays pure and clock-driven — the same seam
+ * `PlanLimits` gives the plan store.
+ */
+export interface PublishRateLimits {
+  /** `TT_PUBLISH_RPM` — publish inits allowed per profile per minute. */
+  publishRpm: number;
+}
 
-/** Continuous refill: one token per 10 s (= the capacity per minute). */
-export const PUBLISH_BUCKET_REFILL_MS = 10_000;
+/**
+ * Additive optional argument on the frozen CONTRACTS.md signatures, exactly as
+ * `PlanStoreOptions` is for the store: the contract names `settings.publishRpm`
+ * as governing the bucket but gave the functions no way to receive it. Omitting
+ * it falls back to {@link DEFAULT_PUBLISH_RPM}.
+ */
+export interface RateBucketOptions {
+  limits?: PublishRateLimits;
+}
+
+/**
+ * `TT_PUBLISH_RPM` default (CONFIGURATION.md); a test asserts it equals
+ * `loadSettings(baselineEnv()).publishRpm`.
+ */
+export const DEFAULT_PUBLISH_RPM = 6;
+
+const DEFAULT_LIMITS: PublishRateLimits = Object.freeze({
+  publishRpm: DEFAULT_PUBLISH_RPM,
+});
+
+/** One minute — the window `TT_PUBLISH_RPM` is expressed over. */
+const MINUTE_MS = 60_000;
+
+/** What one rate resolves to; the two numbers are only ever derived together. */
+export interface PublishBucketRate {
+  /** Burst size: a full bucket is the whole minute's budget, spendable at once. */
+  capacity: number;
+  /** Milliseconds one token takes to come back. */
+  refillMs: number;
+}
+
+/**
+ * `capacity = rpm`, `refillMs = 60_000 / rpm` — the default 6 resolves to the
+ * capacity 6 and the one-token-per-10-s refill this bucket has always had.
+ *
+ * The interval is rounded to whole milliseconds because {@link refill} banks the
+ * remainder *in* `updatedAt`: a fractional interval would put that timestamp —
+ * and with it the `retry_at` / `next_token_at` instants computed from it — on
+ * values `Date` silently truncates, and repeated float multiples of it would
+ * drift over a long session. Rounding is **up** so a rate that does not divide
+ * 60 000 evenly lands just under what the operator allowed rather than just
+ * over: 7/min refills every 8572 ms (6.999/min), never every 8571 (7.001/min).
+ * The bucket exists to protect the account from TikTok's spam systems (§ 2.8),
+ * so the leftover millisecond belongs on the conservative side.
+ *
+ * A rate below 1 is clamped instead of trusted — `TT_PUBLISH_RPM` is validated
+ * as an integer ≥ 1, and a zero reaching here would be a division by zero.
+ */
+export function resolvePublishBucket(options: RateBucketOptions = {}): PublishBucketRate {
+  const rpm = Math.max(1, Math.floor((options.limits ?? DEFAULT_LIMITS).publishRpm));
+  return { capacity: rpm, refillMs: Math.ceil(MINUTE_MS / rpm) };
+}
+
+/**
+ * The bucket's half of a loaded settings snapshot. Lives here rather than in
+ * `tools/` because all four write tools and the `creator_info` wait need it, and
+ * they do not all import from one another.
+ */
+export function publishRateLimits(settings: Settings): RateBucketOptions {
+  return { limits: { publishRpm: settings.publishRpm } };
+}
 
 /** `data.meta.rate_bucket` on a preview (TOOLS.md § 2.6.1). */
 export interface RateBucketSnapshot {
@@ -149,44 +215,46 @@ interface BucketState {
 /** Per-profile, in-process, bounded by the number of configured profiles. */
 const buckets = new Map<string, BucketState>();
 
-function bucketFor(profile: string, now: number): BucketState {
+function bucketFor(profile: string, now: number, rate: PublishBucketRate): BucketState {
   const existing = buckets.get(profile);
   if (existing !== undefined) return existing;
-  const created: BucketState = { tokens: PUBLISH_BUCKET_CAPACITY, updatedAt: now };
+  const created: BucketState = { tokens: rate.capacity, updatedAt: now };
   buckets.set(profile, created);
   return created;
 }
 
 /**
  * Accrues whole tokens for the elapsed time. Integer arithmetic only: the
- * remainder stays banked in `updatedAt`, so 15 s of idling grants one token and
- * carries 5 s into the next interval — no float drift, no lost time.
+ * remainder stays banked in `updatedAt`, so 15 s of idling at 6/min grants one
+ * token and carries 5 s into the next interval — no float drift, no lost time.
  *
  * A full bucket does not bank progress (`updatedAt` jumps to now), and a clock
  * that stepped backwards accrues nothing rather than going negative.
+ *
+ * The `Map` outlives any single rate: settings are loaded once per process, so
+ * only a test hands the same profile two capacities, but a bucket that was
+ * filled under a larger one must not go on reporting tokens the current one
+ * cannot hold.
  */
-function refill(state: BucketState, now: number): void {
+function refill(state: BucketState, now: number, rate: PublishBucketRate): void {
+  if (state.tokens > rate.capacity) state.tokens = rate.capacity;
   if (now <= state.updatedAt) return;
-  if (state.tokens >= PUBLISH_BUCKET_CAPACITY) {
+  if (state.tokens >= rate.capacity) {
     state.updatedAt = now;
     return;
   }
-  const gained = Math.floor((now - state.updatedAt) / PUBLISH_BUCKET_REFILL_MS);
+  const gained = Math.floor((now - state.updatedAt) / rate.refillMs);
   if (gained <= 0) return;
-  state.tokens = Math.min(PUBLISH_BUCKET_CAPACITY, state.tokens + gained);
+  state.tokens = Math.min(rate.capacity, state.tokens + gained);
   state.updatedAt =
-    state.tokens >= PUBLISH_BUCKET_CAPACITY
-      ? now
-      : state.updatedAt + gained * PUBLISH_BUCKET_REFILL_MS;
+    state.tokens >= rate.capacity ? now : state.updatedAt + gained * rate.refillMs;
 }
 
-function snapshot(state: BucketState): RateBucketSnapshot {
-  const full = state.tokens >= PUBLISH_BUCKET_CAPACITY;
+function snapshot(state: BucketState, rate: PublishBucketRate): RateBucketSnapshot {
+  const full = state.tokens >= rate.capacity;
   return {
     tokens_available: state.tokens,
-    ...(full
-      ? {}
-      : { next_token_at: isoUtc(state.updatedAt + PUBLISH_BUCKET_REFILL_MS) }),
+    ...(full ? {} : { next_token_at: isoUtc(state.updatedAt + rate.refillMs) }),
   };
 }
 
@@ -194,15 +262,21 @@ function snapshot(state: BucketState): RateBucketSnapshot {
  * Current occupancy without consuming anything — a preview always succeeds
  * regardless of the bucket and just reports what it sees (TOOLS.md § 2.6.1).
  */
-export function peekPublishBucket(profile: string, clock: Clock): RateBucketSnapshot {
+export function peekPublishBucket(
+  profile: string,
+  clock: Clock,
+  options: RateBucketOptions = {},
+): RateBucketSnapshot {
+  const rate = resolvePublishBucket(options);
   const now = clock.now();
-  const state = bucketFor(profile, now);
-  refill(state, now);
-  return snapshot(state);
+  const state = bucketFor(profile, now, rate);
+  refill(state, now, rate);
+  return snapshot(state, rate);
 }
 
 /**
- * Takes one publish token, or refuses.
+ * The refusal an empty bucket owes a caller, or `undefined` while it holds a
+ * token. Refilled state only — never spends.
  *
  * The refusal is immediate and absolute-timed: the server never sleeps a write
  * call (TOOLS.md § 2.8) and never hands a model relative arithmetic to do
@@ -210,22 +284,56 @@ export function peekPublishBucket(profile: string, clock: Clock): RateBucketSnap
  * had gone a full refill interval without a token would have refilled instead
  * of refusing.
  */
-export function takePublishToken(profile: string, clock: Clock): RateBucketTake {
+function refusalFor(
+  state: BucketState,
+  now: number,
+  rate: PublishBucketRate,
+): RateLimitRefusal | undefined {
+  if (state.tokens > 0) return undefined;
+  const retryAtMs = state.updatedAt + rate.refillMs;
+  return {
+    retry_after_s: Math.ceil((retryAtMs - now) / 1000),
+    retry_at: isoUtc(retryAtMs),
+  };
+}
+
+/**
+ * Would a take succeed right now? Same refusal as {@link takePublishToken},
+ * nothing spent.
+ *
+ * This is what lets the execute pipeline refuse an empty bucket before any
+ * network call (§ 2.6.3 step 2) while spending the token only once an init is
+ * actually about to go out (step 7): a rejected `plan_id` costs nothing.
+ * Two reads rather than a take plus a give-back on purpose — `refill` banks the
+ * sub-interval remainder in `updatedAt`, so a returned token would also return
+ * whatever time had accrued since it was taken.
+ */
+export function peekPublishToken(
+  profile: string,
+  clock: Clock,
+  options: RateBucketOptions = {},
+): RateLimitRefusal | undefined {
+  const rate = resolvePublishBucket(options);
   const now = clock.now();
-  const state = bucketFor(profile, now);
-  refill(state, now);
-  if (state.tokens <= 0) {
-    const retryAtMs = state.updatedAt + PUBLISH_BUCKET_REFILL_MS;
-    return {
-      ok: false,
-      refusal: {
-        retry_after_s: Math.ceil((retryAtMs - now) / 1000),
-        retry_at: isoUtc(retryAtMs),
-      },
-    };
-  }
+  const state = bucketFor(profile, now, rate);
+  refill(state, now, rate);
+  return refusalFor(state, now, rate);
+}
+
+/** Takes one publish token, or refuses with {@link refusalFor}'s verdict. */
+export function takePublishToken(
+  profile: string,
+  clock: Clock,
+  options: RateBucketOptions = {},
+): RateBucketTake {
+  const rate = resolvePublishBucket(options);
+  const now = clock.now();
+  const state = bucketFor(profile, now, rate);
+  refill(state, now, rate);
+  const refusal = refusalFor(state, now, rate);
+  if (refusal !== undefined) return { ok: false, refusal };
   state.tokens -= 1;
-  return { ok: true, bucket: snapshot(state) };
+  return { ok: true, bucket: snapshot(state, rate) };
 }
 
 /** Test seam — the buckets are process-wide state, like the plan store. */
@@ -280,12 +388,19 @@ export function planFailureError(reason: ConsumeFailure, ttlS: number): ToolErro
  * nothing was consumed, and the plan itself is untouched; only the clock stands
  * in the way. The wait is stated as an absolute instant in the text and as
  * seconds in the structured fields.
+ *
+ * The rate in the text is the configured one: a model told "6/min" by a server
+ * running at 20 would pace its retries against a limit that does not exist.
  */
-export function localRateLimitedError(refusal: RateLimitRefusal): ToolError {
+export function localRateLimitedError(
+  refusal: RateLimitRefusal,
+  options: RateBucketOptions = {},
+): ToolError {
+  const { capacity } = resolvePublishBucket(options);
   return {
     code: 'local_rate_limited',
     message:
-      `This server's publish limiter (${String(PUBLISH_BUCKET_CAPACITY)}/min) rejected the call ` +
+      `This server's publish limiter (${String(capacity)}/min) rejected the call ` +
       `to protect the account from TikTok's spam systems. Wait until ${refusal.retry_at} ` +
       `(${String(refusal.retry_after_s)} s), then apply again with a fresh preview.`,
     retryable: true,

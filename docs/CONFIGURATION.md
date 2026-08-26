@@ -300,7 +300,7 @@ be set in a real deployment.
 
 | Variable | Default | Description |
 |---|---|---|
-| `TT_OAUTH_BASE_URL` | — | Overrides the OAuth authorize/token origin. Internal, unsupported. Ignored unless the process is running under the test harness. |
+| `TT_OAUTH_BASE_URL` | — | Overrides the OAuth authorize/token origin. Internal, unsupported. Honoured **only** when it parses as a loopback origin (`127.0.0.0/8` or `[::1]`); any other value is discarded and the pinned origin is used, so it can never redirect a token exchange to someone else's host. There is no test-harness detection — the guard is the loopback check (`src/core/oauth.ts`). |
 
 Secrets (`TT_CLIENT_SECRET`, `TT_ACCESS_TOKEN`, `TT_REFRESH_TOKEN`,
 `TT_HTTP_TOKEN`, and the per-profile token keys) are flagged

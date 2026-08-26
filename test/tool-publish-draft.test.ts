@@ -745,6 +745,11 @@ test('§ 2.6.5: a second identical apply is refused, and the same plan_id still 
       const refused = errorOf(await run(ctx, { ...args, plan_id: second.plan_id }));
       assert.equal(refused.code, 'possible_duplicate');
       assert.match(refused.message, /force: true/);
+      // The guard matches the payload digest, and this tool has no title at
+      // all — a message claiming one would send the caller off to edit a
+      // caption that does not exist.
+      assert.match(refused.message, /identical payload/);
+      assert.doesNotMatch(refused.message, /title/);
       assert.equal(countPath(stub, INBOX_INIT_PATH), 1);
 
       const forced = appliedOf(

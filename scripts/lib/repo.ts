@@ -64,6 +64,31 @@ export async function syncFile(
   return { file: rel, drifted: true };
 }
 
+/**
+ * Narrowing helpers for hand-edited JSON (`server.json`, the manifests).
+ *
+ * A gate that read those files through a cast would report `undefined` where
+ * the real answer is "the field is a number now" — the cast believes the file,
+ * and the file is exactly what is under suspicion.
+ */
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+export function asString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** A repo JSON object, or `undefined` when the file is absent or not an object. */
+export async function readRepoJson(
+  rel: string,
+): Promise<Record<string, unknown> | undefined> {
+  const text = await readRepoText(rel).catch(() => undefined);
+  return text === undefined ? undefined : asRecord(JSON.parse(text));
+}
+
 /** The first differing line, rendered for a gate failure message. */
 export function firstDifference(expected: string, actual: string): string {
   const want = expected.split('\n');

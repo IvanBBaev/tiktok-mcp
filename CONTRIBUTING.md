@@ -4,6 +4,51 @@ Thanks for your interest in `tiktok-mcp-ai`. This is an unofficial,
 community-built MCP server for TikTok; contributions of all sizes are welcome —
 bug reports, docs fixes, tests, and features.
 
+## Reporting a bug
+
+Start with the doctor output — it answers most of the questions a maintainer
+would ask you anyway:
+
+```bash
+npx tiktok-mcp-ai doctor
+```
+
+**Paste that output into the issue.** It is designed to be shareable: only a
+masked `open_id`, scope names, expiry timestamps and file paths ever reach a row,
+and `cliIo` runs the same allowlist redaction over everything it prints. The
+guarantee is written down in [docs/SECURITY.md](docs/SECURITY.md) § Redaction —
+no secret enters stdout, stderr, the log mirror, tool results, error messages,
+the publish journal, or `doctor` output. If you want to double-check before
+pasting, read it: paths are the only thing in there you might consider private.
+
+Include, on top of that:
+
+- **Versions** — `npx tiktok-mcp-ai --version`, `node --version`, your OS.
+- **The MCP client** and its version (Claude Code, Claude Desktop, VS Code,
+  Cursor, the Inspector…), and how it launches the server.
+- **What you did** — the tool that was called and, with any personal content
+  removed, the arguments it was called with.
+- **The exact error** — the `code` from the error envelope (`auth_expired`,
+  `plan_mismatch`, `rate_limited`, …) and the message verbatim. TikTok's
+  `log_id`, when the message carries one, is what lets a platform-side problem be
+  traced.
+- **What you expected instead**, if it is not obvious.
+
+Never paste:
+
+- the env file, or any part of it;
+- `TT_CLIENT_SECRET`, access tokens, refresh tokens, or an authorization code —
+  a full redirect URL contains one;
+- an `upload_url` — its query string carries the `upload_token`, which is the
+  upload-session credential.
+
+If you believe you have found a **security** vulnerability, do not open a public
+issue: [SECURITY.md](SECURITY.md) has the private reporting channel.
+
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) maps the common failure modes
+to fixes — worth a look first, since many reports turn out to be a missing scope
+or an expired refresh token.
+
 ## Development setup
 
 ```bash
@@ -13,7 +58,10 @@ npm run build    # clean + tsc -> build/
 ```
 
 Everything runs on Node's built-ins plus three runtime dependencies
-(`@modelcontextprotocol/sdk`, `zod`, `dotenv`) — no test framework, no bundler.
+(`@modelcontextprotocol/sdk`, `zod`, `zod-to-json-schema`) — no test framework,
+no bundler. There is deliberately no `dotenv`: the env file is read by
+`core/config`'s own parser, because importing `dotenv/config` would let a
+dependency print to stdout before the transport connects (CC-G3).
 Tests use `node:test` and run against the compiled output in `build/`.
 
 ## Quality gates
@@ -36,7 +84,26 @@ npm run coverage       # build + c8 report + per-area floors
 npm run coverage:gate  # per-area floors only (needs a prior coverage:run)
 npm run sync           # every generated artifact vs the tree — reports, never writes
 npm run sync:write     # regenerate them instead of complaining
+npm run smoke:pack     # pack, install the tarball elsewhere, run the installed binary
 ```
+
+`smoke:pack` is deliberately outside `check`: it installs from the network,
+while `check` stays offline-safe. CI runs it on ubuntu, macOS and Windows, and
+`publish.yml` runs it once more before publishing.
+
+Two more are local-only and need a real sandbox account, so they are outside
+`check` too — and `fixtures:record` refuses to run in CI at all:
+
+```bash
+npm run fixtures:record    # capture live read-only interactions to .fixtures-raw/
+npm run fixtures:sanitize  # raw captures → the committed test/fixtures/recorded/ tree
+```
+
+Nothing from `.fixtures-raw/` is ever committed: it holds live tokens and a
+usable `upload_url`. The sanitizer is the only thing that writes into
+`test/fixtures/recorded/`, and it refuses to write a file that still matches a
+secret shape — see [docs/TESTING.md](docs/TESTING.md) § Recorded sandbox
+fixtures.
 
 `sync` covers the README tool table, `.env.example`, `docs/tool-manifest.json`
 and `pack-manifest.json`. It reports **all** stale artifacts before failing, so

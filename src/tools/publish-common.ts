@@ -9,13 +9,15 @@
  * which is a safety property rather than a convenience:
  *
  *   1. validate locally           — nothing sent, nothing consumed
- *   2. take the local rate token  — before any network (§ 2.8)
+ *   2. check the local rate bucket — refuses before any network (§ 2.8); the
+ *                                   token itself is only taken at step 7
  *   3. re-resolve through the preview's own code path
  *   4. recompute the payload digest
  *   5. verify the plan            — two codes only, § 2.6.3
  *   6. duplicate guard            — BEFORE consumption, so a refusal leaves the
  *                                   same plan_id appliable with force: true
- *   7. consume the plan           — atomic, before the init dispatch (CC-E7)
+ *   7. take the rate token, then consume the plan — atomic, before the init
+ *                                   dispatch (CC-E7)
  *   8. journal the intent         — fsync'd, before the request leaves
  *   9. dispatch, then journal the outcome
  *
@@ -47,10 +49,13 @@ import {
   approvalRequiredHint,
   localRateLimitedError,
   localRateLimitedHint,
+  peekPublishToken,
   planExpiresAt,
   planFailureError,
+  publishRateLimits,
   takePublishToken,
   type RateBucketSnapshot,
+  type RateLimitRefusal,
 } from '../mcp/plan.js';
 import {
   consumePlan,
@@ -259,6 +264,12 @@ export function uploadInterruptedError(
  * `possible_duplicate` (§ 2.6.5). The persisted `send_ambiguous` is presented as
  * `unknown`, the same read-side vocabulary `tiktok_list_publish_journal` uses —
  * the advice is identical either way.
+ *
+ * The message names the whole payload as the discriminator because that is what
+ * the guard matches (`payload_digest`, § 2.6.5). Naming the title instead was
+ * wrong for all four tools — the drafts have no title — and it pointed at the
+ * wrong recovery: a caption edit already makes this a different attempt, so a
+ * caller who "fixed" the title would post twice.
  */
 export function possibleDuplicateError(
   profile: string,
@@ -270,8 +281,10 @@ export function possibleDuplicateError(
   return {
     code: 'possible_duplicate',
     message:
-      `A publish attempt with this title on account '${profile}' was journaled at ${matched.ts} ` +
-      `with outcome '${outcome}'${publishId}. Verify with tiktok_get_publish_status and ` +
+      `A publish attempt with an identical payload (same media, text and settings — the guard ` +
+      `matches the whole resolved request, not any single field) on account '${profile}' was ` +
+      `journaled at ${matched.ts} with outcome '${outcome}'${publishId}. ` +
+      `Verify with tiktok_get_publish_status and ` +
       'tiktok_list_publish_journal that no post was created. Only if confirmed, re-preview and ' +
       'apply with force: true.',
     retryable: false,
@@ -301,19 +314,29 @@ export function pollHint(publishId: string, pollAfter: string): Hint {
   };
 }
 
-/** A `wait_for_completion` poll that ran out of time — success, not failure. */
+/**
+ * A `wait_for_completion` poll that ran out of time — success, not failure.
+ *
+ * A `poll` hint carries an absolute `poll_after` (§ 2.7), and this one is no
+ * exception: without it the model is told to poll again with nothing to say
+ * when, which on a post that just failed to settle within the whole budget is
+ * an invitation to hammer the status endpoint.
+ */
 export function stillProcessingAfterApplyHint(
   publishId: string,
   status: string,
   timeoutS: number,
+  pollAfter: string,
 ): Hint {
   return {
     type: 'poll',
     tool: 'tiktok_get_publish_status',
     publish_id: publishId,
+    poll_after: pollAfter,
     text:
       `Still ${status} after ${String(timeoutS)} s — normal for large videos. Call ` +
-      `tiktok_get_publish_status with publish_id "${publishId}"; do not re-post.`,
+      `tiktok_get_publish_status with publish_id "${publishId}" after ${pollAfter}; ` +
+      'do not re-post.',
   };
 }
 
@@ -462,15 +485,33 @@ export function checkMediaUrl(
 // Plan lifecycle (TOOLS.md § 2.6)
 // ---------------------------------------------------------------------------
 
-/** Step 2 of § 2.6.3, as a result rather than a throw. */
-export function takeWriteToken(ctx: ToolCtx): ToolResult<never> | undefined {
-  const take = takePublishToken(ctx.api.profile, ctx.api.clock);
-  if (take.ok) return undefined;
+/** A refusal in the shape § 2.8 owes the caller: the error plus its `wait` hint. */
+function rateRefused(ctx: ToolCtx, refusal: RateLimitRefusal): ToolResult<never> {
+  const limits = publishRateLimits(ctx.api.settings);
   return {
     ok: false,
-    error: localRateLimitedError(take.refusal),
-    hints: [localRateLimitedHint(take.refusal)],
+    error: localRateLimitedError(refusal, limits),
+    hints: [localRateLimitedHint(refusal)],
   };
+}
+
+/**
+ * Step 2 of § 2.6.3: an empty bucket refuses here, before any network call.
+ *
+ * A check rather than a take, because the token belongs to an init that is
+ * about to happen. Taking it this early charged the account's publish budget
+ * for calls that never reached TikTok at all — a mistyped `plan_id`, an expired
+ * one, a duplicate — and the caller's only way to get it back was to wait out a
+ * refill interval for a request that was never sent. {@link runPlanGuards}
+ * takes it at step 7 instead.
+ */
+export function checkWriteBucket(ctx: ToolCtx): ToolResult<never> | undefined {
+  const refusal = peekPublishToken(
+    ctx.api.profile,
+    ctx.api.clock,
+    publishRateLimits(ctx.api.settings),
+  );
+  return refusal === undefined ? undefined : rateRefused(ctx, refusal);
 }
 
 /** Mint and store the preview's token. Returns what the preview must echo. */
@@ -505,18 +546,27 @@ export function mintPlan(
  * read sits between the two calls so a refusal leaves the same `plan_id`
  * appliable with `force: true`, and `consumePlan` re-checks under the same
  * expectation because that file read gave a concurrent apply a window to win.
+ *
+ * The rate token is taken here too, last of the three refusals and immediately
+ * before the plan is spent. Everything that can still say no has said it by
+ * then, so the token is charged only for a call that goes on to dispatch an
+ * init; and if a concurrent apply emptied the bucket since step 2, the plan is
+ * still unspent and the same `plan_id` applies after the wait.
  */
 export async function runPlanGuards(
   ctx: ToolCtx,
   planId: string | undefined,
   expectation: PlanExpectation,
   force: boolean,
-): Promise<ToolError | undefined> {
+): Promise<ToolResult<never> | undefined> {
   const { api } = ctx;
+  const failed = (error: ToolError): ToolResult<never> => ({ ok: false, error });
 
   if (planId !== undefined) {
     const verdict = verifyPlan(planId, expectation, api.clock, planLimits(ctx));
-    if (!verdict.ok) return planFailureError(verdict.reason, api.settings.planTtlS);
+    if (!verdict.ok) {
+      return failed(planFailureError(verdict.reason, api.settings.planTtlS));
+    }
   }
 
   if (!force) {
@@ -526,13 +576,18 @@ export async function runPlanGuards(
       journalOptions(ctx),
     );
     if (duplicate.duplicate && duplicate.matched !== undefined) {
-      return possibleDuplicateError(api.profile, duplicate.matched);
+      return failed(possibleDuplicateError(api.profile, duplicate.matched));
     }
   }
 
+  const take = takePublishToken(api.profile, api.clock, publishRateLimits(api.settings));
+  if (!take.ok) return rateRefused(ctx, take.refusal);
+
   if (planId !== undefined) {
     const consumed = consumePlan(planId, expectation, api.clock, planLimits(ctx));
-    if (!consumed.ok) return planFailureError(consumed.reason, api.settings.planTtlS);
+    if (!consumed.ok) {
+      return failed(planFailureError(consumed.reason, api.settings.planTtlS));
+    }
   }
 
   return undefined;
@@ -553,7 +608,11 @@ export interface DispatchOptions {
   /** Journalled `mode` — the resolved upstream `post_mode` (§ 2.6.2). */
   mode: string;
   source: IntentSource;
-  /** Text the duplicate guard excerpts; `''` for the tools that carry no title. */
+  /**
+   * What the journal line's `title_excerpt` is cut from — a human reading the
+   * journal, not the duplicate guard, which matches on `digest`. `''` for the
+   * two draft tools, which carry no title at all.
+   */
   title: string;
   digest: string;
   /** `''` only under `TT_WRITE_MODE=apply` with no token — an honest record. */
@@ -685,10 +744,22 @@ function classifyDispatch(
         },
       };
     }
+    // Everything else that can fail after the init — the re-stat, the upload
+    // host's own refusals, an unexpected throw — left the same trace: TikTok
+    // minted the `publish_id`, so the attempt exists and only the bytes are
+    // missing. `error` is the journal's word for "nothing was created", and a
+    // reader who believes it posts a second time.
     const error = publishToolError(cause);
     return {
       error,
-      outcome: { result: 'error', publish_id: initialised, error_code: error.code },
+      outcome: {
+        result: 'upload_failed',
+        publish_id: initialised,
+        error_code: error.code,
+        // A tool with no chunks to count (`source: "url"`) has no honest
+        // number to put here, and 0 would read as "the first one".
+        ...(opts.position === undefined ? {} : { chunk: at.chunk }),
+      },
     };
   }
 
@@ -727,11 +798,11 @@ export async function waitIfAsked(
   if (data === undefined) return result;
 
   const hints = result.hints ?? [];
-  const laterPoll = (): Hint =>
-    pollHint(
-      data.publish_id,
-      new Date(api.clock.now() + api.settings.statusPollIntervalMs).toISOString(),
-    );
+  // One source for both poll hints: the status tool's own polling interval, so
+  // a re-ask lands on the schedule `tiktok_get_publish_status` already keeps.
+  const nextPollAt = (): string =>
+    new Date(api.clock.now() + api.settings.statusPollIntervalMs).toISOString();
+  const laterPoll = (): Hint => pollHint(data.publish_id, nextPollAt());
 
   if (!waitForCompletion) {
     hints.unshift(laterPoll());
@@ -753,6 +824,7 @@ export async function waitIfAsked(
           data.publish_id,
           data.status,
           Math.round(api.settings.statusPollTimeoutMs / 1000),
+          nextPollAt(),
         ),
       );
     }

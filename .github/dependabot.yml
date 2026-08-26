@@ -1,25 +1,120 @@
-# Automated dependency updates (npm root, npm extension, GitHub Actions).
-# Weekly cadence, minor+patch grouped to keep PR noise low; majors stay separate
-# so breaking bumps get individual review.
+# Automated dependency updates for everything this repository actually installs
+# or runs: the root npm package, the VS Code extension's own package, and the
+# GitHub Actions used by the workflows.
+#
+# The `github-actions` entry is load-bearing, not decoration. Every `uses:` in
+# .github/workflows is pinned to a full commit SHA (supply-chain hardening — a
+# tag can be moved, a commit cannot), and a SHA pin does not float. Dependabot
+# is what keeps those pins from silently rotting: it rewrites both the SHA and
+# the trailing `# vX.Y.Z` comment, so pinning and automation compose instead of
+# fighting.
+#
+# Grouping keeps a week's updates to a handful of reviewable PRs rather than one
+# per package. Majors stay out of the broad groups so a breaking bump arrives on
+# its own — with two deliberate exceptions, called out where they are declared.
 version: 2
 updates:
+  # ---------------------------------------------------------------- npm (root)
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope # -> `chore(deps):` / `chore(deps-dev):`
     groups:
-      minor-and-patch:
+      # The lint toolchain is declared first (a dependency joins the first
+      # group it matches), and `dev-dependencies` below repeats these patterns
+      # under `exclude-patterns` so the split holds regardless of ordering.
+      #
+      # eslint, @eslint/js and typescript-eslint are one toolchain with pinned
+      # peer ranges — eslint 10 needs @eslint/js 10, and typescript-eslint
+      # declares which eslint majors it supports. Split across three PRs they
+      # each fail `npm run lint` on their own and none of them can merge, which
+      # is exactly what happened before this group existed. Majors are included
+      # here on purpose: for this family, moving together *is* the safe move.
+      eslint:
+        applies-to: version-updates
+        patterns:
+          - eslint
+          - '@eslint/*'
+          - 'eslint-*'
+          - typescript-eslint
+          - '@typescript-eslint/*'
+        update-types: ['major', 'minor', 'patch']
+      # Everything else that only affects the build/test toolchain. Minor and
+      # patch only — a dev-dependency major (c8, prettier, @types/node) changes
+      # gate behaviour and gets its own PR.
+      dev-dependencies:
+        applies-to: version-updates
+        dependency-type: development
+        exclude-patterns:
+          - eslint
+          - '@eslint/*'
+          - 'eslint-*'
+          - typescript-eslint
+          - '@typescript-eslint/*'
         update-types: ['minor', 'patch']
+      # Runtime dependencies ship to users, so they are reviewed apart from the
+      # toolchain even at minor/patch.
+      production-dependencies:
+        applies-to: version-updates
+        dependency-type: production
+        update-types: ['minor', 'patch']
+    ignore:
+      # A TypeScript major (5.9 -> 7.x) is a toolchain migration, not a bump:
+      # new compiler behaviour, a re-typecheck of the whole tree, and matching
+      # typescript-eslint / @types support. It gets taken deliberately, in its
+      # own branch, when someone is ready to fix the fallout — not opened by a
+      # bot every week and left to rot. Minor and patch updates still flow.
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major']
 
+  # ----------------------------------------------------- npm (VS Code extension)
+  # extension/ carries its own package.json and is built and shipped by
+  # publish-vscode.yml, so it needs its own entry — the root manifest does not
+  # cover it. extension/package-lock.json is committed, so these updates are
+  # lockfile-accurate; it is also what `npm ci` in publish-vscode.yml installs
+  # from, and that job cannot run without it.
   - package-ecosystem: npm
     directory: /extension
     schedule:
       interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+      include: scope
     groups:
-      minor-and-patch:
+      extension-dev-dependencies:
+        applies-to: version-updates
+        dependency-type: development
         update-types: ['minor', 'patch']
+    ignore:
+      # Same reasoning as the root package; the extension's TypeScript major
+      # moves with the root one, in the same deliberate migration.
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major']
 
+  # --------------------------------------------------------------- GitHub Actions
   - package-ecosystem: github-actions
-    directory: /
+    directory: / # covers every file under .github/workflows
     schedule:
       interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      # One PR for the whole week's action updates, majors included. Action
+      # majors are almost always a runner-runtime bump (node20 -> node24) with
+      # no input changes, and when one is not, CI fails on the group PR and the
+      # failing step names the action — which is a faster signal than five
+      # separate PRs each waiting their turn through the same queue.
+      github-actions:
+        applies-to: version-updates
+        patterns: ['*']
+        update-types: ['major', 'minor', 'patch']

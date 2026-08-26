@@ -22,6 +22,7 @@ import { syncManifest } from './gen-manifest.js';
 import { syncPackManifest } from './gen-pack-manifest.js';
 import { syncReadme } from './gen-readme.js';
 import { repoPath } from './lib/repo.js';
+import { syncServerJson } from './serverjson-sync.js';
 
 interface Gate {
   name: string;
@@ -78,6 +79,8 @@ const GATES: readonly Gate[] = [
   { name: 'readme-sync', run: syncReadme },
   { name: 'env-docs-sync', run: syncEnvExample },
   { name: 'pack-audit', run: syncPackManifest },
+  // Check-only: server.json is hand-curated, so this gate reports in both modes.
+  { name: 'serverjson-sync', run: () => syncServerJson() },
   { name: 'build-freshness', run: () => buildFreshness() },
 ];
 
@@ -86,7 +89,7 @@ const ELSEWHERE: readonly string[] = [
   'env-docs-sync (CONFIGURATION.md ⇄ Settings) — test/settings.test.ts',
   'package-scopes-drift — test/manifest.test.ts',
   'coverage floors — npm run coverage:gate',
-  'serverjson-sync — not yet implemented (Phase 3, docs/TESTING.md)',
+  'release identity (tag ⇄ versions ⇄ CHANGELOG) — npm run release:guard, on a tag',
 ];
 
 export async function runSync(write: boolean): Promise<boolean> {

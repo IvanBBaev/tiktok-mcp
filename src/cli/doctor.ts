@@ -18,6 +18,9 @@
  *   command is the *complete* picture, especially when something is broken.
  * - **Findings print as each check finishes**, so the CC-F3 "fix it now?"
  *   prompt appears under the row that motivated it rather than after the report.
+ * - **`--json` prints one document and nothing else** — the rows, the header and
+ *   the summary are only the human rendering of the same report, so a consumer
+ *   parses stdout whole instead of scraping lines.
  * - **Nothing secret is printed.** Only a masked `open_id`, scope names,
  *   expiries and paths ever reach a row — and `cliIo` redacts on top of that.
  * - **The scope matrix is derived from the live manifest** (`allTools()` and the
@@ -29,6 +32,7 @@
 import { chmod, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import { fileURLToPath } from 'node:url';
 
 import { createApiContext, maskOpenId } from '../api/context.js';
 import { getUserInfo } from '../api/user.js';
@@ -119,6 +123,12 @@ export interface DoctorContext {
   readonly deps: CliDeps;
   readonly io: CliIo;
   readonly platform: NodeJS.Platform;
+  /**
+   * Where this build is loaded from. A seam for the same reason
+   * {@link platform} is one: the install check must be assertable on both
+   * platforms from one test run, and `import.meta.url` is not overridable.
+   */
+  readonly modulePath: string;
   readonly clock: Clock;
   readonly logger: Logger;
   /** The resolved env-file path — the read source and the write target. */
@@ -674,20 +684,78 @@ const transportCheck: Check = {
   id: 'transport',
   title: 'transport',
   run: async (ctx) => {
-    const transport = ctx.settings?.transport;
-    if (transport === undefined) return [];
-    if (transport !== 'stdio') {
-      // The bootstrap refuses to start on it (`src/index.ts`), so a report that
-      // said nothing here would be a report that missed the actual problem.
-      return [
-        fail(
-          `TT_TRANSPORT=${transport} is not implemented in this build, so the server would ` +
-            'refuse to start',
-          'Unset TT_TRANSPORT, or set it to stdio.',
+    const settings = ctx.settings;
+    if (settings === undefined) return [];
+    if (settings.transport !== 'http') return await Promise.resolve([ok('stdio')]);
+
+    // Getting this far means the schema check passed, and `core/settings`
+    // refuses an http transport with no `TT_HTTP_TOKEN`, or a bind past
+    // loopback without the `TT_HTTP_INSECURE=1` acknowledgement (CC-G6). So the
+    // work left here is not validation — it is telling the operator what this
+    // configuration actually exposes, which is the one thing `doctor` can say
+    // that a startup log line said only once, hours ago.
+    // The path is written out rather than imported from `mcp/http.ts`: pulling
+    // that module in would load the whole Streamable HTTP stack on every
+    // `doctor` run, for one string that is also documented literally.
+    //
+    // Neither sentence says "bearer <word>": `core/redact` masks that shape
+    // wherever it appears, so a report that used the phrase would render its own
+    // prose as `bearer ***` (ARCHITECTURE § 10).
+    const findings: Finding[] = [
+      ok(
+        `http on ${settings.httpHost}:${String(settings.port)}/mcp, ` +
+          'TT_HTTP_TOKEN required on every request',
+      ),
+    ];
+    if (settings.httpInsecure) {
+      findings.push(
+        warn(
+          `TT_HTTP_INSECURE=1: this bind is reachable off-box, and this server speaks ` +
+            'plaintext http — TT_HTTP_TOKEN is only as private as whatever fronts it',
+          'Terminate TLS in front of the server, or bind TT_HTTP_HOST to 127.0.0.1.',
         ),
-      ];
+      );
     }
-    return await Promise.resolve([ok('stdio')]);
+    return await Promise.resolve(findings);
+  },
+};
+
+/**
+ * `npx tiktok-mcp-ai` re-runs a *cached* copy, and `npm cache clean` does not
+ * touch that cache — so an operator can spend an afternoon on a bug the
+ * published version fixed weeks ago (devops-deep-review § 5.3). Doctor cannot
+ * know which version the cache holds without going online, so it reports the
+ * situation rather than a verdict: a `warn`, because the install works today and
+ * has quietly stopped tracking releases.
+ *
+ * The match is on a path *segment*, not a substring: a project directory named
+ * `my_npx_tools` is nobody's npx cache.
+ */
+const installCheck: Check = {
+  id: 'install',
+  title: 'install',
+  run: async (ctx) => {
+    const segments = ctx.modulePath.split(/[/\\]+/);
+    if (!segments.includes('_npx')) {
+      // An `ok` row rather than silence: silence in this file means a check with
+      // no subject (no env file, so no permissions row), and "where is this
+      // running from" is the first thing a stale-install report has to answer.
+      return await Promise.resolve([ok('not running from the npx cache')]);
+    }
+    // Spelled out per platform because the paths are not derivable from each
+    // other and `npm cache clean --force` leaves both untouched.
+    const clear =
+      ctx.platform === 'win32'
+        ? 'rd /s /q "%LOCALAPPDATA%\\npm-cache\\_npx"'
+        : 'rm -rf ~/.npm/_npx';
+    return await Promise.resolve([
+      warn(
+        'running from the npx cache — npx keeps its own copy of this package and ' +
+          'will not fetch a newer release while that copy is there',
+        `Clear it before reporting a bug: ${clear} — then re-run with ` +
+          `npx ${CLI_NAME}@latest.`,
+      ),
+    ]);
   },
 };
 
@@ -711,6 +779,7 @@ export const DOCTOR_CHECKS: readonly Check[] = Object.freeze([
   mediaRootCheck,
   journalCheck,
   transportCheck,
+  installCheck,
 ]);
 
 // ---------------------------------------------------------------------------
@@ -720,6 +789,8 @@ export const DOCTOR_CHECKS: readonly Check[] = Object.freeze([
 interface DoctorFlags {
   profile?: string;
   offline: boolean;
+  /** Print one {@link DoctorReport} instead of rows — and nothing else. */
+  json: boolean;
   help: boolean;
 }
 
@@ -734,6 +805,7 @@ export function doctorUsage(): string {
     'Options:',
     '  --profile <name>   profile to check (default: TT_ACTIVE_PROFILE, else DEFAULT)',
     '  --offline          skip the live TikTok probe and run the local checks only',
+    '  --json             print the report as one JSON document, nothing else',
     '  -h, --help         show this help',
     '',
     'Exit codes: 0 = healthy (warnings allowed), 1 = a check failed, 2 = usage error.',
@@ -743,7 +815,7 @@ export function doctorUsage(): string {
 
 /** Same grammar as `login`: `--flag value` and `--flag=value`; unknown is an error. */
 export function parseDoctorArgs(argv: readonly string[]): ParseResult {
-  const flags: DoctorFlags = { offline: false, help: false };
+  const flags: DoctorFlags = { offline: false, json: false, help: false };
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -772,6 +844,9 @@ export function parseDoctorArgs(argv: readonly string[]): ParseResult {
         break;
       case '--offline':
         flags.offline = true;
+        break;
+      case '--json':
+        flags.json = true;
         break;
       case '-h':
       case '--help':
@@ -806,7 +881,7 @@ export function renderFinding(check: Check, found: Finding): string {
     : `${head}${INDENT}→ ${found.remediation}\n`;
 }
 
-type Tally = Record<Severity, number>;
+export type Tally = Record<Severity, number>;
 
 export function renderSummary(tally: Tally): string {
   return (
@@ -815,6 +890,102 @@ export function renderSummary(tally: Tally): string {
     `${unit(tally.warn, 'warning', 'warnings')}, ` +
     `${unit(tally.fail, 'failure', 'failures')}\n`
   );
+}
+
+// ---------------------------------------------------------------------------
+// the --json report
+// ---------------------------------------------------------------------------
+
+/** One check's contribution to a {@link DoctorReport}. */
+export interface DoctorReportCheck {
+  /** The stable {@link Check.id} — what a consumer keys on. */
+  readonly id: string;
+  readonly title: string;
+  /** Empty when the check had nothing to report (see {@link DoctorReport}). */
+  readonly findings: readonly Finding[];
+}
+
+/**
+ * The document `--json` prints — the same report the rows carry, in one object:
+ *
+ * ```json
+ * {
+ *   "schema": "tiktok-mcp-ai/doctor-report",
+ *   "version": 1,
+ *   "profile": "DEFAULT",
+ *   "offline": true,
+ *   "checks": [
+ *     {
+ *       "id": "env-file",
+ *       "title": "env file",
+ *       "findings": [
+ *         { "severity": "warn", "text": "…", "remediation": "…" }
+ *       ]
+ *     }
+ *   ],
+ *   "tally": { "ok": 12, "info": 2, "warn": 1, "fail": 0 },
+ *   "exit_code": 0
+ * }
+ * ```
+ *
+ * `checks` is in {@link DOCTOR_CHECKS} order and holds an entry for every check
+ * that ran, including the ones that answered with no finding — so "the check had
+ * nothing to say" stays distinguishable from "the check never ran". `severity`
+ * is a {@link Severity}; `remediation` appears only when the finding carries one.
+ *
+ * `version` rises when a field changes meaning or disappears. A *new* field is
+ * not a version bump, so a consumer must ignore what it does not recognize.
+ *
+ * Every run that reaches stdout prints exactly one of these and nothing else —
+ * including the run whose configuration was unreadable, which reports the reason
+ * as the single finding of a synthetic `configuration` check, so a consumer never
+ * has to read an empty stdout to learn what happened. The two exceptions are a
+ * usage error (stderr, exit 2) and `--help`, which still prints the usage text.
+ *
+ * Nothing in here is timed or hashed: two runs of the same configuration produce
+ * byte-identical documents, which is what makes this diffable in CI.
+ */
+export interface DoctorReport {
+  readonly schema: 'tiktok-mcp-ai/doctor-report';
+  readonly version: 1;
+  /** The profile reported on; `null` when the run never resolved one. */
+  readonly profile: string | null;
+  readonly offline: boolean;
+  readonly checks: readonly DoctorReportCheck[];
+  readonly tally: Tally;
+  /** The process exit code this document belongs to. */
+  readonly exit_code: number;
+}
+
+/** The single place a tally becomes an exit code, so the two cannot disagree. */
+function exitCodeFor(tally: Tally): number {
+  return tally.fail > 0 ? EXIT_FAILURE : EXIT_OK;
+}
+
+function doctorReport(
+  profile: string | null,
+  offline: boolean,
+  checks: readonly DoctorReportCheck[],
+  tally: Tally,
+): DoctorReport {
+  return {
+    schema: 'tiktok-mcp-ai/doctor-report',
+    version: 1,
+    profile,
+    offline,
+    checks,
+    tally,
+    exit_code: exitCodeFor(tally),
+  };
+}
+
+/**
+ * Indented, because the first reader of a `--json` run is a human checking what
+ * the flag prints; every parser is indifferent. The trailing newline is for the
+ * same reason — a shell prompt should not land on the closing brace.
+ */
+export function renderJsonReport(report: DoctorReport): string {
+  return `${JSON.stringify(report, null, 2)}\n`;
 }
 
 // ---------------------------------------------------------------------------
@@ -836,12 +1007,27 @@ async function ask(deps: CliDeps, question: string): Promise<string> {
 }
 
 /**
+ * The default for {@link DoctorContext.modulePath}.
+ *
+ * A module URL that is not a `file:` one (never true of a published install, but
+ * possible under an experimental loader) leaves the install check without a
+ * subject instead of failing the whole run over a diagnostic.
+ */
+function resolveModulePath(): string {
+  try {
+    return fileURLToPath(import.meta.url);
+  } catch {
+    return '';
+  }
+}
+
+/**
  * Resolve everything the checks share.
  *
  * Only the env-file read may fail the whole command: without a snapshot there is
  * no configuration to check. A rejected *settings* environment and an unreadable
  * *profile* are carried into the context instead, because those are findings —
- * and reporting the other twelve checks around them is the entire point.
+ * and reporting the other thirteen checks around them is the entire point.
  */
 async function createContext(
   deps: CliDeps,
@@ -881,6 +1067,7 @@ async function createContext(
     deps,
     io,
     platform,
+    modulePath: deps.modulePath ?? resolveModulePath(),
     clock,
     logger,
     envFilePath,
@@ -900,7 +1087,9 @@ async function createContext(
  *
  * @returns The exit code the process should adopt: 0 when nothing failed
  *   (warnings are allowed — README documents this as a readiness gate), 2 for a
- *   usage error, 1 when a check failed or the configuration was unreadable.
+ *   usage error, 1 when a check failed or the configuration was unreadable. The
+ *   code does not depend on `--json`: the flag changes the rendering, not the
+ *   verdict.
  */
 export async function runDoctor(deps: CliDeps = {}): Promise<number> {
   const io = cliIo(deps);
@@ -909,24 +1098,52 @@ export async function runDoctor(deps: CliDeps = {}): Promise<number> {
     io.err(`${parsed.message}\n\n${doctorUsage()}`);
     return EXIT_USAGE;
   }
-  if (parsed.flags.help) {
+  const flags = parsed.flags;
+  if (flags.help) {
     io.out(doctorUsage());
     return EXIT_OK;
   }
 
   let ctx: DoctorContext;
   try {
-    ctx = await createContext(deps, io, parsed.flags);
+    // `--json` is a machine mode, and the CC-F3 "fix it now?" prompt would block
+    // a consumer that has no way to answer it — so it is closed off exactly the
+    // way a non-terminal run closes it, at the seam the check reads.
+    const ctxIo: CliIo = flags.json ? { ...io, isTTY: false } : io;
+    ctx = await createContext(deps, ctxIo, flags);
   } catch (err) {
-    // A run that produced no report says so on stderr, so a failed run is
-    // distinguishable from a report by more than its exit code.
-    io.err(`${describeError(err)}\n`);
+    // A run that produced no report says so: on stderr for a human, and as a
+    // document of the ordinary shape for `--json` — one report, one channel,
+    // never both.
+    if (flags.json) {
+      io.out(
+        renderJsonReport(
+          // `profile` is null because resolving it is one of the steps that just
+          // failed (an invalid `--profile` is thrown by `normalizeProfileName`).
+          doctorReport(
+            null,
+            flags.offline,
+            [
+              {
+                id: 'configuration',
+                title: 'configuration',
+                findings: [findingFromError(err)],
+              },
+            ],
+            { ok: 0, info: 0, warn: 0, fail: 1 },
+          ),
+        ),
+      );
+    } else {
+      io.err(`${describeError(err)}\n`);
+    }
     return EXIT_FAILURE;
   }
 
-  io.out(`${CLI_NAME} doctor — profile ${ctx.profile}\n\n`);
+  if (!flags.json) io.out(`${CLI_NAME} doctor — profile ${ctx.profile}\n\n`);
 
   const tally: Tally = { ok: 0, info: 0, warn: 0, fail: 0 };
+  const checks: DoctorReportCheck[] = [];
   for (const check of DOCTOR_CHECKS) {
     let findings: readonly Finding[];
     try {
@@ -938,10 +1155,15 @@ export async function runDoctor(deps: CliDeps = {}): Promise<number> {
     }
     for (const found of findings) {
       tally[found.severity] += 1;
-      io.out(renderFinding(check, found));
+      if (!flags.json) io.out(renderFinding(check, found));
     }
+    checks.push({ id: check.id, title: check.title, findings });
   }
 
-  io.out(`\n${renderSummary(tally)}`);
-  return tally.fail > 0 ? EXIT_FAILURE : EXIT_OK;
+  if (flags.json) {
+    io.out(renderJsonReport(doctorReport(ctx.profile, ctx.offline, checks, tally)));
+  } else {
+    io.out(`\n${renderSummary(tally)}`);
+  }
+  return exitCodeFor(tally);
 }

@@ -97,6 +97,12 @@ from every sink):
   `upload_token` are registered as exact values (`registerSecret`) and
   scrubbed out of free text (`redactText`) — this catches secrets embedded in
   query strings and form bodies that key-based rules miss.
+- **One sink redacts *after* serialization**: `cliIo` wraps stdout/stderr, so
+  `doctor --json` is scrubbed as a whole document. `redactText` therefore
+  matches each registered secret in its JSON-escaped rendering as well as its
+  raw one — a secret containing a quote or a backslash would otherwise survive
+  in escaped form, and a raw match landing mid-escape would leave a document a
+  consumer cannot parse.
 - The OAuth subsystem uses **allowlist logging**: `core/oauth` never
   serializes a raw token request or response body; it logs only
   `{grant_type, scope, truncated open_id, expires_in, http_status, log_id}`.
@@ -107,7 +113,13 @@ from every sink):
 ### Egress control (SSRF posture)
 
 - Data calls: hard-coded origin `https://open.tiktokapis.com`, no env
-  override. OAuth authorize: `https://www.tiktok.com` (browser-side only).
+  override. OAuth authorize: `https://www.tiktok.com` (browser-side only);
+  the token/refresh/revoke endpoints are pinned to `open.tiktokapis.com`.
+  The one override that exists anywhere in the egress surface is the internal,
+  unsupported `TT_OAUTH_BASE_URL`, which moves the OAuth origin **only** when it
+  parses as a loopback origin (`127.0.0.0/8` or `[::1]`) — `originFor` in
+  `core/oauth` discards anything else and falls back to the pin, so it can point
+  the flow at a local test stub and at no other host.
 - **Upload egress allowlist** (normative; rationale: SYNTHESIS § 2.5).
   Upload PUTs go only to the TikTok-returned `upload_url`, validated by
   `assertAllowedUrl` in `core/http` before any request is sent:
@@ -286,12 +298,50 @@ publishing requires an explicit re-login opting into `video.publish` /
 
 ### Supply chain / code
 
-- Minimal runtime dependency set, lockfile committed, `npm audit` in the
-  `check` script and CI.
-- `prepublishOnly` runs the full gate; publish allowlist ships only `build/`
-  + `bin/` (no maps, no source, no env files); no install scripts.
-- npm trusted publishing (OIDC) + provenance; CodeQL + dependabot in CI from
-  the first release; workflows SHA-pinned.
+Every claim below is a statement about a file in this repository, and each one
+names the file so it can be checked rather than believed.
+
+- **Minimal runtime dependency set** (three direct runtime dependencies), root
+  `package-lock.json` committed. `npm audit --omit=dev --audit-level=high` runs
+  in CI (`.github/workflows/ci.yml`, the ubuntu/Node 22 leg) and fails the
+  build on a high or critical advisory in a *runtime* dependency. It is
+  deliberately **not** part of `npm run check`: the local gate must not turn
+  red because a registry-side advisory was published overnight, on a machine
+  that may be offline.
+- **Every third-party GitHub Action is pinned to a full 40-character commit
+  SHA**, with the human-readable version in a trailing comment — across all of
+  `ci.yml`, `codeql.yml`, `pages.yml`, `publish.yml`, `publish-mcp.yml` and
+  `publish-vscode.yml`. A tag is a movable pointer and an action runs with
+  access to the workflow's token and secrets; a commit SHA is the only
+  reference an upstream account compromise cannot repoint. There are no
+  floating `@v4`-style references left.
+- **Dependabot keeps those pins from rotting** (`.github/dependabot.yml`): the
+  `github-actions` ecosystem at `/`, plus npm at `/` and at `/extension`, all
+  weekly and grouped. Dependabot rewrites both the SHA and the version comment,
+  so pinning and automation compose rather than fight. `typescript` majors are
+  explicitly ignored there — a compiler major is a migration taken
+  deliberately, not a bot PR.
+- **CodeQL** (`.github/workflows/codeql.yml`) runs the
+  `javascript-typescript` extractor with the `security-and-quality` query suite
+  on every push to `main`, every pull request, and weekly on a cron, so an
+  advisory in code nobody has touched still surfaces. `build-mode: none` —
+  source-only analysis, no `autobuild`, no competition with `tsc`.
+- Publishing happens **only from CI on a version tag**, never from a laptop:
+  `.github/workflows/publish.yml` runs `npm run release:guard` and the full
+  `npm run check` before `npm publish`. The publish allowlist ships only
+  `build/src` + `bin/` (no maps, no tests, no source, no env files); no install
+  scripts.
+- npm **trusted publishing** (OIDC): the workflow holds no npm token at all —
+  `id-token: write` plus a registry-side trusted publisher is the whole
+  credential, and `--provenance` is attested from that same identity. The MCP
+  Registry publish (`publish-mcp.yml`) is likewise GitHub OIDC with no stored
+  secret.
+- **The one long-lived secret is `VSCE_PAT`** (`publish-vscode.yml`), the Azure
+  DevOps token for the Visual Studio Marketplace, which offers no OIDC
+  equivalent. It is scoped to *Marketplace → Manage*, lives only as a repository
+  secret, and is used in exactly one step. Naming it here rather than claiming
+  "no long-lived tokens" is the point: the npm path has none, the Marketplace
+  path has one, and that is the residual.
 
 ## Platform-compliance posture (TikTok ToS)
 
@@ -308,7 +358,56 @@ publishing requires an explicit re-login opting into `video.publish` /
 - Data minimization: default field sets are minimal; the server keeps no
   database — the env file and the publish journal are the only state.
 
+## Compatibility and deprecation policy
+
+The published surface is the **tool set, their inputs, the `TT_*` environment
+variables and the CLI** — not the module layout, not the shape of an internal
+type. Everything on that surface follows SemVer, and every change to it lands
+in [CHANGELOG.md](../CHANGELOG.md) under `Added`, `Changed`, `Deprecated`,
+`Removed`, `Fixed` or `Security` (G-10).
+
+**Breaking** — major only: removing a tool, removing or renaming a tool input,
+narrowing what an input accepts, removing a `TT_*` variable, or changing a
+default in a way that changes *what gets posted* (for example the AIGC label
+default). Adding a tool, adding an optional input, or widening an accepted set
+is a minor.
+
+**Grace period.** Nothing on that surface is removed without first being
+deprecated in a release, and a deprecated thing keeps working for **at least
+one minor release and 90 days** before the major that removes it. During the
+grace period:
+
+- the tool's description and `docs/TOOLS.md` entry say `Deprecated:` and name
+  the replacement — the model reads the description, so that is the channel
+  that actually reaches the caller;
+- a deprecated tool's result carries the same notice as a `hint`, because a
+  client that never re-reads `tools/list` still sees the result;
+- a deprecated environment variable keeps being honored and logs a warning
+  **once at startup** (stderr — never stdout, see *Transport*), and
+  `tiktok-mcp-ai doctor` lists it under its configuration report;
+- the replacement ships in the *same* release as the deprecation, so there is
+  never a window where the old way is discouraged and the new way is absent.
+
+**Exception — security.** A control that has to change to close a
+vulnerability changes immediately, in a patch if need be, and the changelog
+entry says so under `Security`. Safety is not deprecated on a timer.
+
+**Before 1.0.0** the surface is explicitly unstable: SemVer allows a `0.x`
+minor to break, and while the tool set is still settling it will. The
+deprecation ritual above still applies to *removals* — a `0.x` release also
+announces what it is taking away — but the 90-day floor starts at `1.0.0`.
+
+**Upstream churn is not our deprecation.** When TikTok removes a field or a
+scope, the tool it belongs to is affected the day TikTok says so; the server
+surfaces that as a structured error naming the platform, and the changelog
+records it under `Changed` with the date. Pretending we can hold a grace period
+over an API we do not control would be a lie in the policy.
+
 ## Reporting
 
-`SECURITY.md` at repo root (once published) will carry a private-disclosure
-contact and a 90-day coordinated-disclosure policy, mirroring servicenow-mcp.
+The disclosure policy — supported versions, the private reporting channel, the
+response commitment, and what is in and out of scope — is
+[`SECURITY.md` at the repository root](../SECURITY.md), which is also the file
+GitHub surfaces in its *Report a vulnerability* UI. This document stays the
+design-security reference; that one stays the process. Neither repeats the
+other.

@@ -184,7 +184,7 @@ scheduled as a concrete task in `docs/TASK-BREAKDOWN.md` ("Lands in").
 | G-9 | `CONTRIBUTING.md` — how to file bugs with redacted `doctor` output | TE-4 |
 | G-10 | CHANGELOG policy (keep-a-changelog) wired into the release guard from the first release | TE-1 |
 | G-11 | Deprecation policy for tools and env vars (grace period + hints channel) | TE-1 |
-| G-12 | RC checklist: `npx tiktok-mcp-ai` install smoke on ubuntu/macos/windows before tagging | TE-5 |
+| G-12 | RC checklist: `npx tiktok-mcp-ai` install smoke on ubuntu/macos/windows before tagging — **closed**, and automated rather than a checklist item: `scripts/smoke-pack.ts` (`npm run smoke:pack`) packs, installs the tarball into a temp prefix and drives the installed binary through a real MCP handshake; it runs as the `smoke-pack` CI job on all three OSes and again in `publish.yml` before `npm publish` (TESTING.md § CI matrix and gates) | TE-5 |
 | G-13 | Spec-doc reconciliation (SYNTHESIS § 4 backlog items 1–9) — the docs must state the synthesis outcomes directly so implementation agents build from a consistent spec, not review archaeology | Wave A (TA-1..TA-8) |
 
 ## Risk register

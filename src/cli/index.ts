@@ -92,6 +92,12 @@ export interface CliDeps {
    * that only one CI leg can reach is a branch that only one CI leg tests.
    */
   platform?: NodeJS.Platform;
+  /**
+   * Overrides where this build reports being loaded from — `doctor`'s install
+   * check reads it to recognize an npx-cached copy, and `import.meta.url` is not
+   * something a test can move.
+   */
+  modulePath?: string;
   stdout?: (chunk: string) => void;
   stderr?: (chunk: string) => void;
   /** Whether an interactive prompt is possible (stdin *and* stdout a TTY). */

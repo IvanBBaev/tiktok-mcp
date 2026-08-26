@@ -4,7 +4,7 @@
  * Doctor is the command people run when nothing works, so what is asserted here
  * is that it keeps reporting when things are broken: a rejected settings
  * environment, an unreadable profile or a check that throws must each become one
- * row and leave the other twelve checks running. The exit code is decided by
+ * row and leave the other thirteen checks running. The exit code is decided by
  * `fail` alone — a readiness gate that trips on "TT_MEDIA_ROOT is not set" is a
  * gate nobody keeps (README § "Verify your setup").
  *
@@ -24,10 +24,12 @@ import {
   doctorUsage,
   parseDoctorArgs,
   renderFinding,
+  renderJsonReport,
   renderSummary,
   runDoctor,
   type Check,
   type DoctorContext,
+  type DoctorReport,
   type Finding,
 } from '../src/cli/doctor.js';
 import {
@@ -39,6 +41,7 @@ import {
 } from '../src/cli/index.js';
 import { createLogger } from '../src/core/log.js';
 import { resetTokenCache } from '../src/core/oauth.js';
+import { registerSecret } from '../src/core/redact.js';
 import {
   BASELINE_NOW_MS,
   BASELINE_REFRESH_EXPIRES_AT,
@@ -151,6 +154,7 @@ function doctorContext(over: Partial<DoctorContext> = {}): DoctorContext {
     deps: {},
     io: cliIo({ stdout: () => undefined, stderr: () => undefined, isTTY: false }),
     platform: 'linux',
+    modulePath: '/opt/app/node_modules/tiktok-mcp-ai/build/src/cli/doctor.js',
     clock: mockClock(),
     logger: NOOP_LOGGER,
     envFilePath: '/nowhere/.env',
@@ -203,19 +207,23 @@ test('an unknown option is a usage error and leaves stdout empty', async () => {
 test('parseDoctorArgs accepts both spellings and rejects the malformed ones', () => {
   assert.deepEqual(parseDoctorArgs(['--profile', 'WORK']), {
     ok: true,
-    flags: { offline: false, help: false, profile: 'WORK' },
+    flags: { offline: false, json: false, help: false, profile: 'WORK' },
   });
   assert.deepEqual(parseDoctorArgs(['--profile=WORK']), {
     ok: true,
-    flags: { offline: false, help: false, profile: 'WORK' },
+    flags: { offline: false, json: false, help: false, profile: 'WORK' },
   });
   assert.deepEqual(parseDoctorArgs(['--offline', '-h']), {
     ok: true,
-    flags: { offline: true, help: true },
+    flags: { offline: true, json: false, help: true },
+  });
+  assert.deepEqual(parseDoctorArgs(['--json', '--offline']), {
+    ok: true,
+    flags: { offline: true, json: true, help: false },
   });
   assert.deepEqual(parseDoctorArgs([]), {
     ok: true,
-    flags: { offline: false, help: false },
+    flags: { offline: false, json: false, help: false },
   });
 
   assert.deepEqual(parseDoctorArgs(['--profile']), {
@@ -229,6 +237,10 @@ test('parseDoctorArgs accepts both spellings and rejects the malformed ones', ()
   assert.deepEqual(parseDoctorArgs(['--offline=1']), {
     ok: false,
     message: '--offline does not take a value.',
+  });
+  assert.deepEqual(parseDoctorArgs(['--json=1']), {
+    ok: false,
+    message: '--json does not take a value.',
   });
 });
 
@@ -309,6 +321,7 @@ test('the report keeps its order — infrastructure, identity, probe, runtime', 
       'media-root',
       'publish-journal',
       'transport',
+      'install',
     ],
   );
   assert.ok(Object.isFrozen(DOCTOR_CHECKS));
@@ -891,7 +904,7 @@ test('an existing journal is reported by size until TD-3 can reconcile it', asyn
   }
 });
 
-test('a transport this build cannot serve fails the report', async () => {
+test('cc-g6: the http transport reports its bind and its bearer', async () => {
   const f = await fixture();
   try {
     await writeEnvFile(f, authorizedLines());
@@ -899,15 +912,81 @@ test('a transport this build cannot serve fails the report', async () => {
       f,
       ['--offline'],
       {},
-      { TT_TRANSPORT: 'http', TT_HTTP_TOKEN: 'doctor-test-http-token-0123456789' },
+      {
+        TT_TRANSPORT: 'http',
+        TT_PORT: '8931',
+        TT_HTTP_TOKEN: 'doctor-test-http-token-0123456789',
+      },
     );
 
-    assert.equal(r.code, EXIT_FAILURE);
+    assert.equal(r.code, EXIT_OK);
     assert.match(
       r.out,
-      /\[FAIL\] transport: TT_TRANSPORT=http is not implemented in this build, so the server would refuse to start\n/,
+      /\[ ok \] transport: http on 127\.0\.0\.1:8931\/mcp, TT_HTTP_TOKEN required on every request\n/,
     );
-    assert.match(r.out, /→ Unset TT_TRANSPORT, or set it to stdio\.\n/);
+    // The token is a registered secret: it may not appear anywhere, and no row
+    // may hint at its length either.
+    assert.ok(!r.out.includes('doctor-test-http-token-0123456789'));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cc-g6: a bind past loopback warns that the bearer travels in plaintext', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    const r = await run(
+      f,
+      ['--offline'],
+      {},
+      {
+        TT_TRANSPORT: 'http',
+        TT_HTTP_HOST: '0.0.0.0',
+        TT_HTTP_INSECURE: '1',
+        TT_HTTP_TOKEN: 'doctor-test-http-token-0123456789',
+      },
+    );
+
+    // A warning, not a failure: the operator acknowledged the bind, and doctor
+    // is documented as a readiness gate that only a `fail` may trip.
+    assert.equal(r.code, EXIT_OK);
+    assert.match(
+      r.out,
+      /\[ ok \] transport: http on 0\.0\.0\.0:3000\/mcp, TT_HTTP_TOKEN required on every request\n/,
+    );
+    // Written as `TT_HTTP_TOKEN`, never as "the bearer is …": `core/redact`
+    // masks `bearer <word>` on sight and would blank out doctor's own prose.
+    assert.match(
+      r.out,
+      /\[warn\] transport: TT_HTTP_INSECURE=1: this bind is reachable off-box, and this server speaks plaintext http — TT_HTTP_TOKEN is only as private as whatever fronts it\n/,
+    );
+    assert.match(
+      r.out,
+      /→ Terminate TLS in front of the server, or bind TT_HTTP_HOST to 127\.0\.0\.1\.\n/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cc-g6: an http transport with no bearer fails the schema check', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    const r = await run(f, ['--offline'], {}, { TT_TRANSPORT: 'http' });
+
+    // `core/settings` refuses the combination outright (SYN-31), so the report
+    // stops at the settings row instead of describing a server that cannot
+    // start — and the transport row falls silent rather than guessing.
+    assert.equal(r.code, EXIT_FAILURE);
+    const settings = row(r.out, 'settings');
+    assert.ok(settings !== undefined && settings.startsWith('[FAIL]'), r.out);
+    assert.match(
+      r.out,
+      /TT_HTTP_TOKEN: required whenever TT_TRANSPORT=http, including a loopback bind/,
+    );
+    assert.equal(row(r.out, 'transport'), undefined);
   } finally {
     await f.cleanup();
   }
@@ -1138,4 +1217,230 @@ test('an unreadable env file ends the run before any check', async () => {
   } finally {
     await f.cleanup();
   }
+});
+
+// ---------------------------------------------------------------------------
+// --json
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the document `--json` owes stdout, and prove it was the *only* thing on
+ * it: re-serializing what was parsed reproduces the captured stream byte for
+ * byte only if no header, row or summary shared the stream with it.
+ */
+function parseReport(out: string): DoctorReport {
+  const report = JSON.parse(out) as DoctorReport;
+  assert.equal(renderJsonReport(report), out);
+  return report;
+}
+
+test('--json prints one document and none of the human rendering', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    const r = await run(f, ['--offline', '--json']);
+
+    assert.equal(r.code, EXIT_OK);
+    assert.equal(r.err, '');
+    const report = parseReport(r.out);
+
+    assert.equal(report.schema, 'tiktok-mcp-ai/doctor-report');
+    assert.equal(report.version, 1);
+    assert.equal(report.profile, 'DEFAULT');
+    assert.equal(report.offline, true);
+    assert.equal(report.exit_code, EXIT_OK);
+    // Every check that ran is in the document, in registry order — including the
+    // ones that had nothing to say.
+    assert.deepEqual(
+      report.checks.map((check) => check.id),
+      DOCTOR_CHECKS.map((check) => check.id),
+    );
+    const severities = report.checks.flatMap((check) =>
+      check.findings.map((found) => found.severity),
+    );
+    assert.equal(report.tally.ok, severities.filter((s) => s === 'ok').length);
+    assert.equal(report.tally.info, severities.filter((s) => s === 'info').length);
+    assert.equal(report.tally.warn, 0);
+    assert.equal(report.tally.fail, 0);
+    // A remediation rides with its finding instead of on an indented line.
+    const probe = report.checks.find((check) => check.id === 'api-probe');
+    assert.equal(probe?.findings[0]?.text, 'skipped (--offline)');
+    assert.equal(probe?.findings[0]?.remediation, undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('--json reports an unreadable configuration as a document, not as silence', async () => {
+  const f = await fixture();
+  try {
+    await mkdir(f.envFile);
+    const r = await run(f, ['--offline', '--json']);
+
+    assert.equal(r.code, EXIT_FAILURE);
+    // The reason is in the document; stderr would be a second copy of it.
+    assert.equal(r.err, '');
+    const report = parseReport(r.out);
+
+    assert.equal(report.profile, null);
+    assert.equal(report.offline, true);
+    assert.equal(report.exit_code, EXIT_FAILURE);
+    assert.deepEqual(
+      report.checks.map((check) => check.id),
+      ['configuration'],
+    );
+    const found = report.checks[0]?.findings[0];
+    assert.equal(found?.severity, 'fail');
+    assert.match(found?.text ?? '', /cannot be read \(EISDIR\)/);
+    assert.match(found?.remediation ?? '', /Check TT_ENV_FILE/);
+    assert.deepEqual(report.tally, { ok: 0, info: 0, warn: 0, fail: 1 });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a failing check still leaves stdout parseable under --json', async () => {
+  const f = await fixture();
+  try {
+    // Nothing configured: the app-credentials check fails the run.
+    const r = await run(f, ['--offline', '--json']);
+
+    assert.equal(r.code, EXIT_FAILURE);
+    const report = parseReport(r.out);
+    assert.equal(report.exit_code, EXIT_FAILURE);
+    assert.ok(report.tally.fail > 0);
+    const credentials = report.checks.find((check) => check.id === 'app-credentials');
+    assert.equal(credentials?.findings[0]?.severity, 'fail');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('--json takes no value, and the usage error keeps stdout empty', async () => {
+  const f = await fixture();
+  try {
+    const r = await run(f, ['--json=1']);
+    assert.equal(r.code, EXIT_USAGE);
+    // cc-g3: a usage error is a diagnostic, so stdout stays empty rather than
+    // carrying a document nobody can act on.
+    assert.equal(r.out, '');
+    assert.match(r.err, /--json does not take a value\./);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('--help wins over --json and still prints the usage text', async () => {
+  const f = await fixture();
+  try {
+    const r = await run(f, ['--json', '--help']);
+    assert.equal(r.code, EXIT_OK);
+    assert.equal(r.out, doctorUsage());
+    assert.match(r.out, /--json {13}print the report as one JSON document/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('--json output passes through redaction and is still a valid document', async () => {
+  const f = await fixture();
+  try {
+    // A value doctor does print — the profile name — registered as a secret, so
+    // the redacting sink has something to catch. Nothing else in the report can
+    // carry a credential today, which is exactly what makes this the seam test.
+    registerSecret('DOCTORJSONSECRET');
+    await writeEnvFile(f, authorizedLines());
+    const r = await run(f, ['--offline', '--json', '--profile', 'DOCTORJSONSECRET']);
+
+    assert.ok(!r.out.includes('DOCTORJSONSECRET'), r.out);
+    // Redaction rewrote a value inside the document without breaking it.
+    const report = parseReport(r.out);
+    assert.equal(report.profile, '[REDACTED]');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('--json never prompts, even on a terminal', { skip: POSIX_ONLY }, async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    await chmod(f.envFile, 0o644);
+
+    const asked: string[] = [];
+    const r = await run(f, ['--offline', '--json'], {
+      isTTY: true,
+      prompt: (question) => {
+        asked.push(question);
+        return Promise.resolve('y');
+      },
+    });
+
+    // A consumer of the document has no way to answer a question, so CC-F3
+    // reports the mode instead of offering to fix it.
+    assert.deepEqual(asked, []);
+    assert.equal((await stat(f.envFile)).mode & 0o777, 0o644);
+    const report = parseReport(r.out);
+    const permissions = report.checks.find((check) => check.id === 'permissions');
+    assert.equal(permissions?.findings[0]?.severity, 'warn');
+    assert.match(permissions?.findings[0]?.text ?? '', /mode 0644/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// the install check
+// ---------------------------------------------------------------------------
+
+test('the install check warns on an npx-cached copy, with the POSIX command', async () => {
+  const findings = await checkById('install').run(
+    doctorContext({
+      modulePath:
+        '/home/dev/.npm/_npx/2f9c1b/node_modules/tiktok-mcp-ai/build/src/cli/doctor.js',
+    }),
+  );
+
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.severity, 'warn');
+  assert.match(findings[0]?.text ?? '', /running from the npx cache/);
+  assert.match(findings[0]?.remediation ?? '', /rm -rf ~\/\.npm\/_npx/);
+});
+
+test('the install check gives the Windows cache path on win32', async () => {
+  const findings = await checkById('install').run(
+    doctorContext({
+      platform: 'win32',
+      modulePath:
+        'C:\\Users\\dev\\AppData\\Local\\npm-cache\\_npx\\2f9c1b\\node_modules\\' +
+        'tiktok-mcp-ai\\build\\src\\cli\\doctor.js',
+    }),
+  );
+
+  assert.equal(findings[0]?.severity, 'warn');
+  assert.match(findings[0]?.remediation ?? '', /%LOCALAPPDATA%\\npm-cache\\_npx/);
+  assert.ok(!(findings[0]?.remediation ?? '').includes('rm -rf'), 'POSIX command leaked');
+});
+
+test('the install check is quiet about an ordinary node_modules install', async () => {
+  const findings = await checkById('install').run(
+    doctorContext({
+      modulePath: '/srv/app/node_modules/tiktok-mcp-ai/build/src/cli/doctor.js',
+    }),
+  );
+
+  assert.deepEqual(findings, [
+    { severity: 'ok', text: 'not running from the npx cache' },
+  ]);
+});
+
+test('the install check matches a path segment, not a substring', async () => {
+  // `_npx` inside a longer directory name is somebody's project, not the cache.
+  const findings = await checkById('install').run(
+    doctorContext({
+      modulePath: '/home/dev/my_npx_tools/node_modules/tiktok-mcp-ai/build/cli.js',
+    }),
+  );
+
+  assert.equal(findings[0]?.severity, 'ok');
 });

@@ -18,22 +18,26 @@ import { test } from 'node:test';
 
 import {
   CONTROL_FIELDS,
-  PUBLISH_BUCKET_CAPACITY,
-  PUBLISH_BUCKET_REFILL_MS,
+  DEFAULT_PUBLISH_RPM,
   approvalRequiredHint,
   localRateLimitedError,
   localRateLimitedHint,
   payloadDigest,
   peekPublishBucket,
+  peekPublishToken,
   planExpiresAt,
   planFailureError,
+  publishRateLimits,
   resetRateBuckets,
+  resolvePublishBucket,
   resolveWriteStep,
   takePublishToken,
+  type RateBucketOptions,
   type RateLimitRefusal,
 } from '../src/mcp/plan.js';
 import type { ConsumeFailure } from '../src/mcp/plan-store.js';
-import { BASELINE_NOW_MS, mockClock } from './helpers.js';
+import { loadSettings } from '../src/core/settings.js';
+import { BASELINE_NOW_MS, baselineEnv, mockClock } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // payload digest
@@ -134,10 +138,26 @@ test('deny never reaches the resolver — arriving there is raised, not written'
 // the publish bucket
 // ---------------------------------------------------------------------------
 
+/**
+ * The rate every case below runs at unless it names its own: whatever
+ * `TT_PUBLISH_RPM` defaults to. The fence a few cases down pins that default to
+ * the capacity 6 and the 10 s interval this bucket has always had, so deriving
+ * the numbers here keeps the rest of the suite about behaviour rather than
+ * arithmetic.
+ */
+const { capacity: DEFAULT_CAPACITY, refillMs: DEFAULT_REFILL_MS } =
+  resolvePublishBucket();
+
+test('the bucket defaults are the TT_PUBLISH_RPM default — six inits, one per 10 s', () => {
+  assert.equal(DEFAULT_PUBLISH_RPM, loadSettings(baselineEnv()).publishRpm);
+  assert.deepEqual(resolvePublishBucket(), { capacity: 6, refillMs: 10_000 });
+  assert.deepEqual(resolvePublishBucket({}), resolvePublishBucket());
+});
+
 test('a fresh bucket is full and has nothing to wait for', () => {
   resetRateBuckets();
   assert.deepEqual(peekPublishBucket('DEFAULT', mockClock()), {
-    tokens_available: PUBLISH_BUCKET_CAPACITY,
+    tokens_available: DEFAULT_CAPACITY,
   });
 });
 
@@ -145,16 +165,35 @@ test('peeking never consumes — a preview costs no publish budget', () => {
   resetRateBuckets();
   const clock = mockClock();
   for (let i = 0; i < 10; i += 1) peekPublishBucket('DEFAULT', clock);
-  assert.equal(
-    peekPublishBucket('DEFAULT', clock).tokens_available,
-    PUBLISH_BUCKET_CAPACITY,
-  );
+  assert.equal(peekPublishBucket('DEFAULT', clock).tokens_available, DEFAULT_CAPACITY);
+});
+
+test('peeking a token gives the take verdict and spends nothing', () => {
+  resetRateBuckets();
+  const clock = mockClock();
+  for (let i = 0; i < 10; i += 1) {
+    assert.equal(peekPublishToken('DEFAULT', clock), undefined);
+  }
+  // The budget is still whole after ten asks: this is what lets the execute
+  // pipeline refuse an empty bucket before any network (§ 2.6.3 step 2) and
+  // still charge the token only once an init is about to go out (step 7).
+  assert.equal(peekPublishBucket('DEFAULT', clock).tokens_available, DEFAULT_CAPACITY);
+
+  for (let i = 0; i < DEFAULT_CAPACITY; i += 1) takePublishToken('DEFAULT', clock);
+  const peeked = peekPublishToken('DEFAULT', clock);
+  const refused = takePublishToken('DEFAULT', clock);
+  assert.equal(refused.ok, false);
+  if (refused.ok) return;
+  // One verdict, not two: a peek that refused on different terms than the take
+  // would make step 2 and step 7 disagree about the same bucket.
+  assert.deepEqual(peeked, refused.refusal);
+  assert.equal(clock.pending(), 0);
 });
 
 test('the bucket allows six inits, then refuses the seventh', () => {
   resetRateBuckets();
   const clock = mockClock();
-  for (let i = PUBLISH_BUCKET_CAPACITY - 1; i >= 0; i -= 1) {
+  for (let i = DEFAULT_CAPACITY - 1; i >= 0; i -= 1) {
     const take = takePublishToken('DEFAULT', clock);
     assert.ok(take.ok);
     assert.equal(take.bucket.tokens_available, i);
@@ -166,16 +205,13 @@ test('the bucket allows six inits, then refuses the seventh', () => {
 test('the refusal is immediate and says when to come back, absolutely', () => {
   resetRateBuckets();
   const clock = mockClock();
-  for (let i = 0; i < PUBLISH_BUCKET_CAPACITY; i += 1) takePublishToken('DEFAULT', clock);
+  for (let i = 0; i < DEFAULT_CAPACITY; i += 1) takePublishToken('DEFAULT', clock);
 
   const refused = takePublishToken('DEFAULT', clock);
   assert.equal(refused.ok, false);
   if (refused.ok) return;
-  assert.equal(refused.refusal.retry_after_s, PUBLISH_BUCKET_REFILL_MS / 1000);
-  assert.equal(
-    Date.parse(refused.refusal.retry_at),
-    BASELINE_NOW_MS + PUBLISH_BUCKET_REFILL_MS,
-  );
+  assert.equal(refused.refusal.retry_after_s, DEFAULT_REFILL_MS / 1000);
+  assert.equal(Date.parse(refused.refusal.retry_at), BASELINE_NOW_MS + DEFAULT_REFILL_MS);
   // Nothing slept: the clock has no pending waiter.
   assert.equal(clock.pending(), 0);
 });
@@ -183,7 +219,7 @@ test('the refusal is immediate and says when to come back, absolutely', () => {
 test('one token returns per refill interval, and the remainder is banked', () => {
   resetRateBuckets();
   const clock = mockClock();
-  for (let i = 0; i < PUBLISH_BUCKET_CAPACITY; i += 1) takePublishToken('DEFAULT', clock);
+  for (let i = 0; i < DEFAULT_CAPACITY; i += 1) takePublishToken('DEFAULT', clock);
 
   // 15 s grants one token and carries 5 s forward.
   clock.setNow(BASELINE_NOW_MS + 15_000);
@@ -197,12 +233,29 @@ test('one token returns per refill interval, and the remainder is banked', () =>
   assert.ok(second.ok);
 });
 
+test('a drained bucket refills to the brim and no further', () => {
+  resetRateBuckets();
+  const clock = mockClock();
+  for (let i = 0; i < DEFAULT_CAPACITY; i += 1) takePublishToken('DEFAULT', clock);
+
+  // An hour is many times the minute the whole budget takes to come back, and
+  // the bucket returns full — not with an hour of intervals owed behind it.
+  clock.setNow(BASELINE_NOW_MS + 3_600_000);
+  assert.deepEqual(peekPublishBucket('DEFAULT', clock), {
+    tokens_available: DEFAULT_CAPACITY,
+  });
+  for (let i = 0; i < DEFAULT_CAPACITY; i += 1) {
+    assert.equal(takePublishToken('DEFAULT', clock).ok, true);
+  }
+  assert.equal(takePublishToken('DEFAULT', clock).ok, false);
+});
+
 test('a full bucket does not bank idle time into a burst', () => {
   resetRateBuckets();
   const clock = mockClock();
   peekPublishBucket('DEFAULT', clock);
   clock.setNow(BASELINE_NOW_MS + 3_600_000);
-  for (let i = 0; i < PUBLISH_BUCKET_CAPACITY; i += 1) {
+  for (let i = 0; i < DEFAULT_CAPACITY; i += 1) {
     assert.equal(takePublishToken('DEFAULT', clock).ok, true);
   }
   assert.equal(takePublishToken('DEFAULT', clock).ok, false);
@@ -211,7 +264,7 @@ test('a full bucket does not bank idle time into a burst', () => {
 test('cc-h1: a clock that steps backwards accrues nothing rather than going negative', () => {
   resetRateBuckets();
   const clock = mockClock();
-  for (let i = 0; i < PUBLISH_BUCKET_CAPACITY; i += 1) takePublishToken('DEFAULT', clock);
+  for (let i = 0; i < DEFAULT_CAPACITY; i += 1) takePublishToken('DEFAULT', clock);
   clock.setNow(BASELINE_NOW_MS - 3_600_000);
 
   const refused = takePublishToken('DEFAULT', clock);
@@ -221,10 +274,7 @@ test('cc-h1: a clock that steps backwards accrues nothing rather than going nega
   // from a clock that just lied, so `retry_at` and `retry_after_s` still agree
   // with each other — the caller waits out the step instead of getting a
   // deadline in its own past and retrying in a loop.
-  assert.equal(
-    Date.parse(refused.refusal.retry_at),
-    BASELINE_NOW_MS + PUBLISH_BUCKET_REFILL_MS,
-  );
+  assert.equal(Date.parse(refused.refusal.retry_at), BASELINE_NOW_MS + DEFAULT_REFILL_MS);
   assert.equal(refused.refusal.retry_after_s, 3_610);
 });
 
@@ -233,19 +283,113 @@ test('a drained bucket reports the instant its next token lands', () => {
   const clock = mockClock();
   takePublishToken('DEFAULT', clock);
   const snapshot = peekPublishBucket('DEFAULT', clock);
-  assert.equal(snapshot.tokens_available, PUBLISH_BUCKET_CAPACITY - 1);
+  assert.equal(snapshot.tokens_available, DEFAULT_CAPACITY - 1);
   assert.equal(
     Date.parse(snapshot.next_token_at ?? ''),
-    BASELINE_NOW_MS + PUBLISH_BUCKET_REFILL_MS,
+    BASELINE_NOW_MS + DEFAULT_REFILL_MS,
   );
 });
 
 test('the bucket is per profile — one account cannot spend another one out', () => {
   resetRateBuckets();
   const clock = mockClock();
-  for (let i = 0; i < PUBLISH_BUCKET_CAPACITY; i += 1) takePublishToken('DEFAULT', clock);
+  for (let i = 0; i < DEFAULT_CAPACITY; i += 1) takePublishToken('DEFAULT', clock);
   assert.equal(takePublishToken('DEFAULT', clock).ok, false);
   assert.equal(takePublishToken('WORK', clock).ok, true);
+});
+
+// ---------------------------------------------------------------------------
+// TT_PUBLISH_RPM
+// ---------------------------------------------------------------------------
+
+test('TT_PUBLISH_RPM sets the burst size and the refill interval together', () => {
+  resetRateBuckets();
+  const limits: RateBucketOptions = { limits: { publishRpm: 20 } };
+  const clock = mockClock();
+
+  // Twenty in the burst where the default allows six, and the twenty-first is
+  // refused three seconds out rather than ten.
+  assert.deepEqual(peekPublishBucket('DEFAULT', clock, limits), { tokens_available: 20 });
+  for (let i = 0; i < 20; i += 1) {
+    assert.equal(takePublishToken('DEFAULT', clock, limits).ok, true);
+  }
+  const refused = takePublishToken('DEFAULT', clock, limits);
+  assert.equal(refused.ok, false);
+  if (refused.ok) return;
+  assert.equal(refused.refusal.retry_after_s, 3);
+  assert.equal(Date.parse(refused.refusal.retry_at), BASELINE_NOW_MS + 3_000);
+});
+
+test('publishRateLimits carries TT_PUBLISH_RPM off a loaded settings snapshot', () => {
+  const settings = loadSettings({ ...baselineEnv(), TT_PUBLISH_RPM: '12' });
+  assert.deepEqual(publishRateLimits(settings), { limits: { publishRpm: 12 } });
+  assert.deepEqual(resolvePublishBucket(publishRateLimits(settings)), {
+    capacity: 12,
+    refillMs: 5_000,
+  });
+});
+
+test('a rate that does not divide 60 000 rounds the interval up, never down', () => {
+  // 60 000 / 7 is 8571.43: 8571 ms would refill at 7.001/min — over what the
+  // operator allowed — so the leftover fraction is spent, not dropped.
+  assert.deepEqual(resolvePublishBucket({ limits: { publishRpm: 7 } }), {
+    capacity: 7,
+    refillMs: 8_572,
+  });
+
+  for (let rpm = 1; rpm <= 120; rpm += 1) {
+    const rate = resolvePublishBucket({ limits: { publishRpm: rpm } });
+    assert.equal(rate.capacity, rpm, `capacity for ${String(rpm)}/min`);
+    // Whole milliseconds, because the bucket banks the remainder in a timestamp.
+    assert.ok(Number.isInteger(rate.refillMs), `${String(rpm)}/min is fractional`);
+    assert.ok(rate.refillMs * rpm >= 60_000, `${String(rpm)}/min refills too fast`);
+  }
+});
+
+test('a non-divisible rate keeps whole-millisecond accounting over many refills', () => {
+  resetRateBuckets();
+  const limits: RateBucketOptions = { limits: { publishRpm: 7 } };
+  const { capacity, refillMs } = resolvePublishBucket(limits);
+  const clock = mockClock();
+  for (let i = 0; i < capacity; i += 1) takePublishToken('DEFAULT', clock, limits);
+
+  // Ten intervals, each one still exactly `refillMs` after the last: the bucket
+  // advances its own timestamp by whole intervals, so the rounded fraction
+  // cannot accumulate into an early token over a long session.
+  for (let i = 1; i <= 10; i += 1) {
+    clock.setNow(BASELINE_NOW_MS + i * refillMs - 1);
+    assert.equal(
+      takePublishToken('DEFAULT', clock, limits).ok,
+      false,
+      `token arrived a millisecond early at interval ${String(i)}`,
+    );
+    clock.setNow(BASELINE_NOW_MS + i * refillMs);
+    assert.equal(
+      takePublishToken('DEFAULT', clock, limits).ok,
+      true,
+      `token missing at interval ${String(i)}`,
+    );
+  }
+});
+
+test('a rate below one is clamped rather than dividing by zero', () => {
+  // Settings validate `TT_PUBLISH_RPM` as an integer >= 1; this is the guard for
+  // a caller that constructs the limits itself.
+  assert.deepEqual(resolvePublishBucket({ limits: { publishRpm: 0 } }), {
+    capacity: 1,
+    refillMs: 60_000,
+  });
+});
+
+test('a bucket filled at one rate cannot outlive it holding more than the next allows', () => {
+  // The bucket map is process-wide while the rate arrives per call, so a peek at
+  // a smaller rate must not report tokens that rate could never have granted.
+  resetRateBuckets();
+  const clock = mockClock();
+  assert.equal(peekPublishBucket('DEFAULT', clock).tokens_available, DEFAULT_CAPACITY);
+  assert.deepEqual(peekPublishBucket('DEFAULT', clock, { limits: { publishRpm: 2 } }), {
+    tokens_available: 2,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -307,6 +451,18 @@ test('local_rate_limited is retryable and carries the wait in both forms', () =>
   assert.equal(hint.type, 'wait');
   assert.equal(hint.retry_after_s, 10);
   assert.equal(hint.retry_at, refusal.retry_at);
+});
+
+test('the refusal text quotes the configured rate, not the default one', () => {
+  const refusal: RateLimitRefusal = {
+    retry_after_s: 3,
+    retry_at: '2026-01-01T00:00:03.000Z',
+  };
+  assert.match(localRateLimitedError(refusal).message, /limiter \(6\/min\)/);
+  assert.match(
+    localRateLimitedError(refusal, { limits: { publishRpm: 20 } }).message,
+    /limiter \(20\/min\)/,
+  );
 });
 
 test('the approval hint carries the plan id and its deadline in the text as well', () => {

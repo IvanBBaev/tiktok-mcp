@@ -3,8 +3,9 @@ name: Publish to MCP Registry
 # Register the server in the official MCP Registry (registry.modelcontextprotocol.io)
 # from server.json. Runs after the npm "Publish" workflow succeeds (so the registry
 # can verify the published tarball's mcpName), and can be re-run on demand via
-# workflow_dispatch without re-publishing to npm. server.json carries the version
-# (kept in sync with package.json), so this always registers the current release.
+# workflow_dispatch without re-publishing to npm. server.json carries the version;
+# `npm run release:guard` in the "Publish" workflow is what guarantees it equals
+# the tag that was published, so this job can register it without re-checking.
 on:
   workflow_run:
     workflows: ['Publish']
@@ -20,7 +21,14 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - uses: actions/checkout@v4
+      # A workflow_run checkout defaults to the default branch's HEAD, not the
+      # commit that triggered it — without this the registry would be handed
+      # whatever server.json main happens to carry, which after a release bump
+      # is the *next* version. Empty on workflow_dispatch, where the dispatched
+      # ref is already the right one.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher

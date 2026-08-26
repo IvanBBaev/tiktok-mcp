@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.IvanBBaev/tiktok-mcp-ai",
-  "description": "Unofficial TikTok MCP server — 11 tools over the Display API and Content Posting API, with OAuth 2.0 (PKCE) and plan-then-execute write safety.",
+  "description": "Unofficial TikTok MCP server: 11 tools over the Display and Content Posting APIs, OAuth 2.0 (PKCE).",
   "repository": {
     "url": "https://github.com/IvanBBaev/tiktok-mcp",
     "source": "github"
   },
-  "version": "0.0.0",
+  "version": "0.7.0",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "tiktok-mcp-ai",
-      "version": "0.0.0",
+      "version": "0.7.0",
       "transport": {
         "type": "stdio"
       },

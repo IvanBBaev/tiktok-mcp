@@ -28,8 +28,8 @@ jobs:
             node: 26
             advisory: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
           check-latest: ${{ matrix.advisory == true }}
@@ -45,7 +45,7 @@ jobs:
       # a Codecov outage must not fail CI. Runs once, on the same ubuntu/Node 22 leg.
       - if: matrix.node == 22 && matrix.os == 'ubuntu-latest'
         continue-on-error: true
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: ./coverage/lcov.info
           fail_ci_if_error: false
@@ -59,24 +59,50 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run check
 
+  # What the pack-audit gate cannot prove: that the tarball *runs*. This packs the
+  # repo, installs the tarball into a temp prefix outside it, and drives the
+  # installed binary — --version/--help/usage exit code, then a real JSON-RPC
+  # handshake (initialize, initialized, tools/list) over stdio with stdout purity
+  # asserted (CC-G3). All three OSes, because the failures it catches — a missing
+  # file in `files`, a path that only resolves from the repo layout, a win32 shim
+  # difference — are platform-shaped. Not in `npm run check`: it installs from the
+  # network, and `check` stays offline-safe.
+  smoke-pack:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One red platform must not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # The tarball ships `build/src`, so the build has to precede the pack.
+      - run: npm run build
+      - run: npm run smoke:pack
+
   # The bin launcher must print a human message (not a SyntaxError) under ancient
   # Node and exit non-zero.
   launcher-node12:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No container: checkout runs under the runner's modern Node; setup-node
       # then installs the old runtime so only the launcher probe runs on it.
-      # (A node:12 container cannot run the Node 20 that powers checkout@v4.)
-      - uses: actions/setup-node@v4
+      # (A node:12 container cannot run the Node 24 that powers checkout.)
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 12
       - run: |

@@ -39,7 +39,12 @@ import { createApiContext, type ApiContext } from '../src/api/context.js';
 import { createLogger } from '../src/core/log.js';
 import { loadSettings } from '../src/core/settings.js';
 import type { ToolCtx } from '../src/mcp/define.js';
-import { resetRateBuckets, takePublishToken } from '../src/mcp/plan.js';
+import {
+  publishRateLimits,
+  resetRateBuckets,
+  resolvePublishBucket,
+  takePublishToken,
+} from '../src/mcp/plan.js';
 import { PLAN_ID_PATTERN, resetPlanStore } from '../src/mcp/plan-store.js';
 import type { Hint, ToolError, ToolResult } from '../src/mcp/result.js';
 import type {
@@ -278,6 +283,14 @@ async function withCtx<T>(
     resetPlanStore();
     resetRateBuckets();
     await sandbox.cleanup();
+  }
+}
+
+/** Spend the whole publish budget the way a minute of applies would. */
+function drainPublishBucket(ctx: ToolCtx): void {
+  const limits = publishRateLimits(ctx.api.settings);
+  for (let i = resolvePublishBucket(limits).capacity; i > 0; i -= 1) {
+    takePublishToken(ctx.api.profile, ctx.api.clock, limits);
   }
 }
 
@@ -765,7 +778,7 @@ test('§ 2.8 the local rate limit refuses a photo apply before any network call'
     const stub = fakeApi();
     await withFetch(stub, async () => {
       const preview = previewOf(await run(ctx, previewArgs()));
-      for (let i = 0; i < 6; i += 1) takePublishToken('DEFAULT', ctx.api.clock);
+      drainPublishBucket(ctx);
 
       const refusedPost = await run(ctx, previewArgs({ plan_id: preview.plan_id }));
       assert.equal(errorOf(refusedPost).code, 'local_rate_limited');

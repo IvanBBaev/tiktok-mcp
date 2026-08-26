@@ -70,7 +70,7 @@ test('retryable defaults to false so no write is replayed by accident', () => {
   const err = new TikTokError({
     kind: 'policy',
     code: 'possible_duplicate',
-    message: 'A publish attempt with this title was already journaled.',
+    message: 'A publish attempt with an identical payload was already journaled.',
   });
 
   assert.equal(err.retryable, false);

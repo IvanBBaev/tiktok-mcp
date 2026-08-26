@@ -44,9 +44,15 @@ const MIN_SECRET_LENGTH = 4;
  * `state`, `code` and `code_verifier` are login-flow secrets (SECURITY.md
  * secrets inventory); `upload_token` is the upload-session bearer carried in
  * the `upload_url` query string.
+ *
+ * The prefix class holds `"` and `'` as well as the URL delimiters because a
+ * form body reaches a log line quoted far more often than bare — as a JSON
+ * string, or interpolated into a message. Without them the first parameter is
+ * the one position this rule cannot see, and `client_key=` and `code=` are
+ * exactly what a serialized OAuth body puts there.
  */
 const SENSITIVE_PARAM_RE =
-  /(^|[?&\s;])(upload_token|access_token|refresh_token|client_secret|client_key|code_verifier|code_challenge|state|code)=([^&\s"'#]*)/gi;
+  /(^|[?&\s;"'])(upload_token|access_token|refresh_token|client_secret|client_key|code_verifier|code_challenge|state|code)=([^&\s"'#]*)/gi;
 
 /** `Authorization: Bearer <token>` renders as `Bearer ***` (ARCHITECTURE § 10). */
 const BEARER_RE = /\b(bearer\s+)[\w.~+/=-]+/gi;
@@ -224,6 +230,22 @@ export function registerSecret(secret: string): void {
 }
 
 /**
+ * The JSON-escaped body of `secret` — what `JSON.stringify` would put between
+ * the quotes — or `undefined` when escaping changes nothing.
+ *
+ * This exists because one sink hands `redactText` a document rather than a
+ * value: `cliIo` wraps stdout/stderr, so `doctor --json` is redacted *after*
+ * serialization. A secret containing a quote or a backslash appears there in
+ * escaped form, which the raw `replaceAll` below cannot see — the secret would
+ * survive in a form still trivially readable. Replacing the escaped rendering
+ * too keeps the document valid, because `[REDACTED]` needs no escaping.
+ */
+function jsonEscaped(secret: string): string | undefined {
+  const escaped = JSON.stringify(secret).slice(1, -1);
+  return escaped === secret ? undefined : escaped;
+}
+
+/**
  * Scrub every registered secret out of free text (error messages, body
  * snippets), then mask the credential shapes that survive registration gaps:
  * sensitive query/form parameters by name and `Bearer` tokens. Idempotent.
@@ -231,6 +253,10 @@ export function registerSecret(secret: string): void {
 export function redactText(text: string): string {
   let out = text;
   for (const secret of registeredSecrets) {
+    // The escaped form first: it is the more specific of the two, and a raw
+    // pass that happened to land mid-escape would leave the tail behind.
+    const escaped = jsonEscaped(secret);
+    if (escaped !== undefined) out = out.replaceAll(escaped, REDACTED);
     out = out.replaceAll(secret, REDACTED);
   }
   out = out.replace(

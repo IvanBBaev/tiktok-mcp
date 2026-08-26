@@ -158,6 +158,20 @@ test('redactText and registerSecret ignore trivially short values', () => {
   assert.equal(redactText('ok, everything is ok'), 'ok, everything is ok');
 });
 
+test('redactText scrubs a secret that reaches it JSON-escaped', () => {
+  // `cliIo` redacts an already-serialized document (doctor --json), so a secret
+  // carrying a quote or a backslash arrives escaped, not raw.
+  const token = 'act.quote"and\\backslash-7f31c0';
+  registerSecret(token);
+  const document = JSON.stringify({ profile: token });
+  const redacted = redactText(document);
+  assert.ok(!redacted.includes('quote'), `secret survived escaping: ${redacted}`);
+  assert.ok(!redacted.includes('backslash'), `secret survived escaping: ${redacted}`);
+  // Still one parseable document — the whole point of scrubbing the escaped
+  // form rather than letting a raw pass land mid-escape.
+  assert.deepEqual(JSON.parse(redacted), { profile: REDACTED });
+});
+
 test('redactText is idempotent', () => {
   const refreshToken = 'rft.tb4-idempotent-8d21ca50';
   registerSecret(refreshToken);

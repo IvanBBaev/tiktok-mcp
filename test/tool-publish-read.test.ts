@@ -40,9 +40,9 @@ import { createLogger } from '../src/core/log.js';
 import { loadSettings } from '../src/core/settings.js';
 import type { ToolCtx } from '../src/mcp/define.js';
 import {
-  PUBLISH_BUCKET_CAPACITY,
-  PUBLISH_BUCKET_REFILL_MS,
+  publishRateLimits,
   resetRateBuckets,
+  resolvePublishBucket,
   takePublishToken,
 } from '../src/mcp/plan.js';
 import type { Hint, ToolError, ToolResult } from '../src/mcp/result.js';
@@ -209,10 +209,14 @@ async function withCtx<T>(
 
 /** Spend the whole publish bucket, so the next taker has to wait for a refill. */
 function drainPublishBucket(ctx: ToolCtx): void {
-  for (let i = 0; i < PUBLISH_BUCKET_CAPACITY; i += 1) {
-    takePublishToken(ctx.api.profile, ctx.api.clock);
+  const limits = publishRateLimits(ctx.api.settings);
+  for (let i = resolvePublishBucket(limits).capacity; i > 0; i -= 1) {
+    takePublishToken(ctx.api.profile, ctx.api.clock, limits);
   }
 }
+
+/** What one token costs in time at the default `TT_PUBLISH_RPM`. */
+const DEFAULT_REFILL_MS = resolvePublishBucket().refillMs;
 
 /** One `sleepBounded` slice — the granularity every wait in publish.ts uses. */
 const STEP_MS = 1_000;
@@ -358,8 +362,22 @@ test('awaitPublishToken waits the refill out on a drained bucket', async () => {
 
     assert.equal(refused, undefined, 'the wait ends in a token, not a refusal');
     const waited = clock.now() - startedAt;
-    assert.ok(waited >= PUBLISH_BUCKET_REFILL_MS, `waited only ${String(waited)} ms`);
+    assert.ok(waited >= DEFAULT_REFILL_MS, `waited only ${String(waited)} ms`);
     assert.equal(clock.pending(), 0, 'the sleep chain finished, it did not leak');
+  });
+});
+
+test('awaitPublishToken waits out the interval TT_PUBLISH_RPM asks for', async () => {
+  await withCtx({ TT_PUBLISH_RPM: '20' }, async (ctx, clock) => {
+    drainPublishBucket(ctx);
+    const startedAt = clock.now();
+    const refused = await drive(clock, awaitPublishToken(ctx.api));
+
+    assert.equal(refused, undefined);
+    // 20/min is a token every 3 s: the read side waits that, not the default 10.
+    const waited = clock.now() - startedAt;
+    assert.ok(waited >= 3_000, `waited only ${String(waited)} ms`);
+    assert.ok(waited < DEFAULT_REFILL_MS, `waited ${String(waited)} ms, the old rate`);
   });
 });
 
@@ -463,7 +481,7 @@ test('a creator info read delays on a drained bucket instead of refusing', async
     dataOf(result);
     assert.deepEqual(paths(stub), [CREATOR_PATH], 'the read still happened');
     const waited = clock.now() - startedAt;
-    assert.ok(waited >= PUBLISH_BUCKET_REFILL_MS, `waited only ${String(waited)} ms`);
+    assert.ok(waited >= DEFAULT_REFILL_MS, `waited only ${String(waited)} ms`);
   });
 });
 

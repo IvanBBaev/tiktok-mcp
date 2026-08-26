@@ -62,7 +62,10 @@ windows × 24, advisory 26) — this phase is release engineering only.
 - MCP resources (e.g. `tiktok://videos/recent` snapshot) and prompts
   (guided "post a video" flow).
 - Webhooks ingestion (portability events) if a use case appears.
-- VS Code extension / desktop packaging only if usage justifies it.
+- Desktop packaging only if usage justifies it. (The VS Code extension was
+  pulled forward and shipped in Phase 3 — `extension/`, published by
+  `.github/workflows/publish-vscode.yml` on the same `v*` tag as the npm
+  release. What is still demand-driven is anything beyond that listing.)
 
 ## Explicit non-goals
 - No ads/Business API, no comment management (no public API), no scraping or

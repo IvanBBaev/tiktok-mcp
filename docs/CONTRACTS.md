@@ -29,11 +29,12 @@ every module in `src/`. A module is absent on purpose when nothing another
 task depends on crosses its boundary — it exports only into its own layer's
 composition root, so its owner designs the surface when the task runs.
 `src/mcp/lifecycle.ts` (TE-6 / WP-3.5 — credential-store watch and
-`tools/list_changed`) is the deliberate case: it lands in Wave E, consumes
-contracts already frozen here, and exports nothing a Wave B–D task compiles
-against. Freezing a speculative signature for it now would pin a design that
-has not been done. Its absence is not an oversight, and adding it later is an
-addition, not a contract change.
+`tools/list_changed`) was the deliberate case: it lands in Wave E, consumes
+contracts already frozen here, and exported nothing a Wave B–D task compiled
+against, so freezing a speculative signature for it would have pinned a design
+that had not been done. Its § below was written when the task ran — an
+addition, not a contract change, which is exactly what such a module's arrival
+is meant to be.
 
 ---
 
@@ -1109,6 +1110,94 @@ Call-pipeline rules that are contract, not implementation detail:
   handler already set is never overwritten.
 - An unknown tool name is a protocol error (`McpError`), not an envelope.
 
+## mcp/http.ts
+
+The Streamable HTTP transport (CC-G6, SECURITY.md § Transport, CONFIGURATION.md
+§ Transport) — the second of the two transports `createServer` can be put on.
+stdio stays the default because it opens no listening socket; this module is for
+the deployments that need one, and almost all of it is about the two ways such a
+socket is abused: an unauthenticated caller, and a page in the operator's browser
+that found the port. It never learns which tools exist — the per-session
+`McpServerHandle` comes from an injected factory.
+
+```ts
+/** The single path served. Anything else is 404, with a valid token or not. */
+export const MCP_PATH = "/mcp";
+
+/** What the Host/Origin check compares against. `loopbackOnly` is true only
+ *  when the bind stays on the machine — past loopback the name in `Host`
+ *  belongs to the TLS terminator in front, not to us. */
+export interface OriginPolicy { loopbackOnly: boolean; port: number }
+
+/** Which header failed the DNS-rebinding check, or undefined when neither did.
+ *  Exported so the off-box policy is testable without binding off-box. */
+export function dnsRebindingRejection(
+  headers: { host?: string; origin?: string },
+  policy: OriginPolicy,
+): "Host" | "Origin" | undefined;
+
+export interface HttpTransportOptions {
+  settings: Settings;
+  log: Logger;
+  /** One runtime per session: an SDK `Server` binds exactly one transport. */
+  createHandle: (sessionId: string) => McpServerHandle | Promise<McpServerHandle>;
+  clock?: Clock;                       // default systemClock (CC-H4)
+}
+
+export interface HttpTransportHandle {
+  host: string;                        // as it goes into a URL (IPv6 bracketed)
+  port: number;                        // differs from TT_PORT only when it was 0
+  url: string;                         // where a client points its transport
+  sessions(): number;                  // a diagnostic, never a protocol input
+  close(): Promise<void>;              // ends every session; idempotent
+}
+
+/** Binds TT_HTTP_HOST:TT_PORT and serves MCP on it. Resolves once the socket is
+ *  listening, so the caller may log a URL that is already reachable; rejects
+ *  with the listen error (EADDRINUSE) rather than resolving on a socket it
+ *  never got. Throws TikTokError { kind: "config", code: "http_token_required" }
+ *  when settings carry no TT_HTTP_TOKEN. */
+export async function startHttpTransport(
+  opts: HttpTransportOptions,
+): Promise<HttpTransportHandle>;
+```
+
+Rules that are contract, not implementation detail:
+
+- **The bearer is mandatory, loopback included** (SYN-31). `core/settings`
+  refuses the configuration first; this module refuses again rather than trust
+  that its caller validated it. The comparison runs over fixed-length SHA-256
+  digests — `===` on the raw strings leaks the shared prefix through timing, and
+  `timingSafeEqual` on raw bytes throws `RangeError` on a length mismatch, which
+  is a length oracle with extra steps. A missing credential and a wrong one
+  produce **byte-identical** 401s (`WWW-Authenticate: Bearer`), so probing cannot
+  tell "no token" from "not that token". The token is passed to `registerSecret`
+  at startup and reports as `<redacted>`.
+- **Check order is part of the answer**: `Host`/`Origin` (403) → bearer (401) →
+  path (404) → method (405, with `Allow: GET, POST, DELETE`) → the session. An
+  unauthenticated prober therefore cannot map the surface — every path is 401
+  until it holds the credential — and a rebound name is refused before the
+  credential is even read.
+- **`Host` is mandatory and `Origin` is not.** A request that names no authority
+  cannot be checked against one; a request with no `Origin` is every non-browser
+  MCP client. When `Origin` *is* present a browser is speaking and it must name
+  this very server: a loopback bind pins the whole authority (hostname *and*
+  bound port), a proxied bind pins the hostname only, since the port a browser
+  sees is the proxy's.
+- **One session, one runtime.** `sessionIdGenerator` mints a `randomUUID`, and
+  `createHandle` is called once per accepted session: per-connection state
+  (initialization, pending requests, progress tokens) is exactly what must not
+  leak between callers. `DELETE` ends one session, `close()` ends all of them,
+  and a POST that never completes initialization leaves no session behind.
+- Session ids are **never logged as fields** — they are capability-bearing for
+  the life of the session, and `core/redact`'s default-deny allowlist has no
+  entry for them. The listening URL carries no credential and is safe to log.
+- Refusals answer in the SDK's own shape (`{"jsonrpc":"2.0","error":{…},"id":null}`,
+  code `-32000`, `-32001` for an unknown session), so a client needs no special
+  case for this server.
+- Nothing writes to stdout (CC-G3), and every time-dependent value (a session's
+  `duration_ms`) comes from the injected `Clock`.
+
 ## mcp/plan-store.ts
 
 ```ts
@@ -1210,11 +1299,18 @@ export type WriteStep = "preview" | "execute";
 export interface WriteStepDecision { step: WriteStep; planId?: string }
 export function resolveWriteStep(planId: string | undefined, mode: WriteMode): WriteStepDecision;
 
-/** Per-profile token bucket, 6 inits per minute, one token per 10 s. Integer
- *  arithmetic only — the remainder is banked in the bucket's own timestamp, a
- *  full bucket banks nothing, a backwards clock accrues nothing. */
-export const PUBLISH_BUCKET_CAPACITY: 6;
-export const PUBLISH_BUCKET_REFILL_MS: 10_000;
+/** Per-profile token bucket, `TT_PUBLISH_RPM` inits per minute (default 6),
+ *  one token per `60_000 / rpm` ms (default 10 s). Integer arithmetic only —
+ *  the interval is rounded UP to whole ms so a rate that does not divide
+ *  60 000 lands just under what was configured, the remainder is banked in the
+ *  bucket's own timestamp, a full bucket banks nothing, a backwards clock
+ *  accrues nothing. */
+export interface PublishRateLimits { publishRpm: number }
+export interface RateBucketOptions { limits?: PublishRateLimits }
+export const DEFAULT_PUBLISH_RPM: 6;
+export interface PublishBucketRate { capacity: number; refillMs: number }
+export function resolvePublishBucket(options?: RateBucketOptions): PublishBucketRate;
+export function publishRateLimits(settings: Settings): RateBucketOptions;
 export interface RateBucketSnapshot { tokens_available: number; next_token_at?: string }
 export interface RateLimitRefusal { retry_after_s: number; retry_at: string }
 export type RateBucketTake =
@@ -1222,9 +1318,13 @@ export type RateBucketTake =
   | { ok: false; refusal: RateLimitRefusal };
 
 /** A preview always succeeds regardless of the bucket and just reports it. */
-export function peekPublishBucket(profile: string, clock: Clock): RateBucketSnapshot;
+export function peekPublishBucket(
+  profile: string, clock: Clock, options?: RateBucketOptions,
+): RateBucketSnapshot;
 /** Immediate refusal — the server NEVER sleeps a write call (TOOLS.md § 2.8). */
-export function takePublishToken(profile: string, clock: Clock): RateBucketTake;
+export function takePublishToken(
+  profile: string, clock: Clock, options?: RateBucketOptions,
+): RateBucketTake;
 export function resetRateBuckets(): void;
 
 /** The catalog texts. planFailureError maps six internal reasons onto the two
@@ -1232,7 +1332,10 @@ export function resetRateBuckets(): void;
  *  `details`, since a model that can tell "expired" from "already used" is
  *  tempted to retry one of them and neither is retryable. */
 export function planFailureError(reason: ConsumeFailure, ttlS: number): ToolError;
-export function localRateLimitedError(refusal: RateLimitRefusal): ToolError;
+/** The rate in the text is the configured one, not the default. */
+export function localRateLimitedError(
+  refusal: RateLimitRefusal, options?: RateBucketOptions,
+): ToolError;
 export function localRateLimitedHint(refusal: RateLimitRefusal): Hint;
 export function approvalRequiredHint(planId: string, expiresAt: string): Hint;
 ```
@@ -1328,6 +1431,94 @@ export function readMerged(opts?: JournalOptions & { limit?: number }): Promise<
   records: JournalRecord[]; skippedLines: number;
 }>;
 ```
+
+## mcp/lifecycle.ts
+
+The credential-store watch behind `notifications/tools/list_changed` (CC-A7,
+TOOLS.md § 6.3). `tools/list` already rebuilds every description from the store
+on every request, so an `[UNAVAILABLE: …]` marker is never stale *when asked* —
+but nothing asks, so a `login` in a second terminal stays invisible to a running
+client. This module notices, and hands the verdict to a plain callback: it never
+touches a `Server`, and the composition root is what turns a change into
+`McpServerHandle.notifyToolListChanged()`.
+
+```ts
+/** TOOLS.md § 6.3's debounce floor, and the default poll period. */
+export const MIN_WATCH_INTERVAL_MS = 500;
+export const DEFAULT_WATCH_INTERVAL_MS = 2_000;
+
+/** Canonical fingerprint of everything the tool list reads out of the store:
+ *  every profile name with its sorted, de-duplicated scope set. Equal
+ *  signatures mean equal tool descriptions. */
+export function profileSignature(profiles: readonly ProfileInfo[]): string;
+
+/** Why the signature moved, by profile name. Sorted; never used to decide
+ *  whether to notify — the signature already did that. */
+export interface ProfileDiff {
+  added: readonly string[]; removed: readonly string[]; rescoped: readonly string[];
+}
+export function diffProfiles(
+  previous: readonly ProfileInfo[],
+  next: readonly ProfileInfo[],
+): ProfileDiff;
+
+export interface CredentialSource { envFilePath: string; env?: NodeJS.ProcessEnv }
+
+/** The picture `tools/list` is built from: every configured profile with the
+ *  scopes it currently holds (env file + presence-based process-env overlay,
+ *  CC-F2). One unreadable profile is scopeless; an unreadable *file* throws. */
+export function readCredentialProfiles(
+  source: CredentialSource,
+): Promise<readonly ProfileInfo[]>;
+
+export interface CredentialChange extends ProfileDiff {
+  profiles: readonly ProfileInfo[];   // as of this poll
+  previous: readonly ProfileInfo[];   // what the last notification was taken from
+}
+
+export interface CredentialWatchOptions {
+  envFilePath: string;
+  clock: Clock;
+  onChange: (change: CredentialChange) => void | Promise<void>;
+  profiles?: () => Promise<readonly ProfileInfo[]>;  // default: readCredentialProfiles
+  baseline?: readonly ProfileInfo[];
+  intervalMs?: number;                               // default DEFAULT_WATCH_INTERVAL_MS
+  logger?: Logger;
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface CredentialWatcher {
+  /** Reads once, now. `true` iff this poll notified. Concurrent calls share
+   *  one read, so a change can never be reported twice. */
+  poll(): Promise<boolean>;
+  /** Idempotent; awaits a poll already in flight and leaves no pending timer. */
+  stop(): Promise<void>;
+}
+
+export function startCredentialWatch(opts: CredentialWatchOptions): CredentialWatcher;
+```
+
+Rules that are contract, not implementation detail:
+
+- The signal is **derived and compared**, never raw file activity. A token
+  refresh rewrites the env file on its own schedule; a write that leaves the
+  profile/scope picture identical must not notify.
+- Availability is a **union across profiles** (§ 6.1), so the signature covers
+  every profile, not only the active one.
+- **Polling through the injected `Clock`** is the floor, not an optimisation:
+  `fs.watch` misses the rename-replacement `persistProfilePatch` writes with, is
+  unreliable on network homes (CC-H3) and cannot be driven by `mockClock`
+  (CC-H4). The interval is also the debounce, and an unusable one falls back to
+  the default with an `invalid_watch_interval` warning — same trade as
+  `core/env-lock`'s `invalid_env_lock_duration`.
+- **Nothing here throws into the server loop.** An unreadable or vanished store
+  is a warning (once per transition into the degraded state) plus "no profiles";
+  a rejecting `onChange` is a warning and the baseline still advances, so a lost
+  notification is never retried forever. Markers are advisory and the call-time
+  scope check remains authoritative.
+- Wiring order is part of the contract: start **after** `connectStdio`
+  (`sendToolListChanged()` throws `Not connected` without a transport) and stop
+  **before** `server.close()`.
 
 ## tools/publish-common.ts
 
@@ -1444,8 +1635,10 @@ export function possibleDuplicateError(profile: string, matched: JournalAttempt)
 // --- hints (TOOLS.md § 5) --------------------------------------------------
 
 export function pollHint(publishId: string, pollAfter: string): Hint;
+/** Carries `poll_after` like every other `poll` hint (§ 2.7): a caller told to
+ *  poll with no instant to poll at is a caller that will poll too soon. */
 export function stillProcessingAfterApplyHint(
-  publishId: string, status: string, timeoutS: number,
+  publishId: string, status: string, timeoutS: number, pollAfter: string,
 ): Hint;
 export function journalUnavailableNote(publishId: string | undefined): Hint;
 export function choosePrivacyHint(toolName: string, options: readonly string[]): Hint;
@@ -1475,16 +1668,20 @@ export function checkMediaUrl(
 
 // --- plan lifecycle (TOOLS.md § 2.6) ---------------------------------------
 
-/** Step 2 of § 2.6.3, as a result rather than a throw. */
-export function takeWriteToken(ctx: ToolCtx): ToolResult<never> | undefined;
+/** Step 2 of § 2.6.3, as a result rather than a throw. A *peek*: it reads the
+ *  bucket and refuses early, but spends nothing — the token is taken at step 7,
+ *  once the call is known to be a real publish. */
+export function checkWriteBucket(ctx: ToolCtx): ToolResult<never> | undefined;
 /** Mint and store the preview's token; returns what the preview must echo. */
 export function mintPlan(
   ctx: ToolCtx, toolName: string, digest: string, openId: string,
 ): { planId: string; expiresAt: string; hint: Hint };
-/** Steps 5, 6 and 7 of § 2.6.3, in the one order that is safe. */
+/** Steps 5, 6 and 7 of § 2.6.3, in the one order that is safe. Returns a whole
+ *  `ToolResult`, not a bare `ToolError`: taking the rate token lives here now,
+ *  and a rate refusal has to carry a hint. */
 export function runPlanGuards(
   ctx: ToolCtx, planId: string | undefined, expectation: PlanExpectation, force: boolean,
-): Promise<ToolError | undefined>;
+): Promise<ToolResult<never> | undefined>;
 
 // --- dispatch (TOOLS.md § 2.6.3 steps 8–9) ---------------------------------
 
@@ -1495,7 +1692,9 @@ export interface DispatchOptions {
   toolName: string;
   mode: string;                  // journalled `mode` = the upstream post_mode (§ 2.6.2)
   source: IntentSource;
-  title: string;                 // what the duplicate guard excerpts; "" when a tool has none
+  title: string;                 // what the journal's title_excerpt is cut from — a human
+                                 // reading it, not the guard, which matches on digest;
+                                 // "" for the two draft tools, which have no title
   digest: string;
   planId: string;                // "" only under TT_WRITE_MODE=apply with no token
   openId: string;
@@ -1526,10 +1725,18 @@ export function waitIfAsked(
 ```
 
 **The apply path's step order is contract, not implementation detail**
-(TOOLS.md § 2.6.3): validate locally → take the local rate token (before any
-network, § 2.8) → re-resolve through the preview's own code path against live
-`creator_info` → recompute the payload digest → `verifyPlan` → duplicate guard →
-`consumePlan` → journal the intent (fsync'd) → dispatch → journal the outcome.
+(TOOLS.md § 2.6.3): validate locally → **read** the local rate bucket without
+spending (before any network, § 2.8) → re-resolve through the preview's own code
+path against live `creator_info` → recompute the payload digest → `verifyPlan` →
+duplicate guard → **take** the rate token → `consumePlan` → journal the intent
+(fsync'd) → dispatch → journal the outcome. The bucket is read early and spent
+late on purpose: it exists to protect the *account* from too many real publishes,
+and a call refused for a stale `plan_id`, a changed payload or a suspected
+duplicate never reaches TikTok — burning a token on it would let a caller retrying
+a bad `plan_id` lock itself out of publishing. There is no give-back path, because
+`refill` banks the sub-interval remainder in `updatedAt` and returning a token
+would return accrued time with it. `peekPublishToken` and `takePublishToken` share
+one verdict function so the early read and the late take cannot disagree.
 Verification and consumption are two calls into `mcp/plan-store` on purpose: the
 duplicate guard's file read sits between them, so a `possible_duplicate` refusal
 leaves the same `plan_id` appliable with `force: true`, while the plan is still
@@ -1675,6 +1882,7 @@ export interface CliDeps {
   argv?: readonly string[];       // args AFTER the subcommand
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;     // overrides process.platform (CC-F3); see below
+  modulePath?: string;            // overrides where this build reports being loaded from
   stdout?: (chunk: string) => void;
   stderr?: (chunk: string) => void;
   isTTY?: boolean;                // default: stdin AND stdout are terminals
@@ -1756,6 +1964,7 @@ export interface DoctorContext {
   readonly deps: CliDeps;
   readonly io: CliIo;
   readonly platform: NodeJS.Platform;
+  readonly modulePath: string;              // where this build is loaded from (npx cache?)
   readonly clock: Clock;
   readonly logger: Logger;
   readonly envFilePath: string;             // read source AND write target
@@ -1778,13 +1987,38 @@ export interface Check {
 export const DOCTOR_CHECKS: readonly Check[];   // frozen, in report order
 export function doctorUsage(): string;
 export function parseDoctorArgs(argv: readonly string[]):
-  | { readonly ok: true; readonly flags: { profile?: string; offline: boolean; help: boolean } }
+  | { readonly ok: true;
+      readonly flags: { profile?: string; offline: boolean; json: boolean; help: boolean } }
   | { readonly ok: false; readonly message: string };
+
+export type Tally = Record<Severity, number>;
 export function renderFinding(check: Check, found: Finding): string;
 export function renderSummary(tally: Tally): string;
+
+/** One check's contribution to the `--json` document. */
+export interface DoctorReportCheck {
+  readonly id: string;
+  readonly title: string;
+  readonly findings: readonly Finding[];   // empty when the check had nothing to say
+}
+
+/** What `--json` prints: one schema-tagged, versioned document. `version` rises
+ *  when a field changes meaning or disappears — a new field does not, so a
+ *  consumer ignores what it does not recognize. Nothing in it is timed or
+ *  hashed: two runs of one configuration produce identical bytes. */
+export interface DoctorReport {
+  readonly schema: "tiktok-mcp-ai/doctor-report";
+  readonly version: 1;
+  readonly profile: string | null;                // null when none was resolved
+  readonly offline: boolean;
+  readonly checks: readonly DoctorReportCheck[];  // DOCTOR_CHECKS order, every check
+  readonly tally: Tally;
+  readonly exit_code: number;                     // the code this document belongs to
+}
+export function renderJsonReport(report: DoctorReport): string;
 ```
 
-Three rules bind:
+Four rules bind:
 
 1. **A check reports; it does not abort the report.** `runDoctor` wraps every
    `run` in its own `try`/`catch`, so a check that throws becomes one `fail` row
@@ -1796,7 +2030,17 @@ Three rules bind:
 3. **`DoctorContext.platform` is the seam, not `process.platform`.** CC-F3's two
    halves — the POSIX `chmod` offer and the Windows `icacls` remediation *text*,
    which is printed and never executed — must both be reachable on every CI leg.
-   That is why `CliDeps` carries `platform`.
+   That is why `CliDeps` carries `platform`. `modulePath` is on the context for
+   the same reason: the install check's npx-cache branch would otherwise be
+   reachable only from a real `npx` run, and `import.meta.url` is not overridable.
+4. **`--json` puts one document on stdout and nothing else.** No header, no rows,
+   no summary — including on the path where the configuration could not be read,
+   which reports the reason as the single finding of a synthetic `configuration`
+   check rather than leaving a consumer to interpret an empty stream. The two
+   exceptions are a usage error (stderr, exit 2) and `--help`, which still prints
+   the usage text. `--json` also implies non-interactive: the CC-F3 offer is
+   closed off exactly the way a non-TTY run closes it, because a machine consumer
+   cannot answer a prompt. The flag changes the rendering, never the exit code.
 
 ## Test harness (test/helpers.ts — consumed by every task)
 
@@ -1909,6 +2153,49 @@ harness error — "the loser sees `env_file_busy`" is the expected result of a
 contention test. `runContendingChildren` rejects only if the barrier itself fails
 or the canary fires.
 
+```ts
+// fixtures.ts — replaying a recorded sandbox interaction (TESTING.md § Recorded
+// sandbox fixtures). The format, sanitizer and discovery live in
+// scripts/lib/fixtures.ts; this is only the seam back into production code.
+export const REPLAY_ORIGIN: string;                 // 'https://open.tiktokapis.com'
+export const REPLAY_ACCESS_TOKEN: string;           // what replayContext() carries
+export function replayContext(): ApiContext;
+export function describeFixture(fixture: Fixture): string;
+
+// Areas whose interactions are recorded and secret-scanned but not replayed,
+// each with the reason. Ask before replaying; an unrouted endpoint inside a
+// *replayable* area still throws.
+export const NON_REPLAYABLE_AREAS: ReadonlyMap<FixtureArea, string>;
+export function nonReplayableReason(fixture: Fixture): string | undefined;
+export function routedEndpoints(): string[];
+
+export function responseFor(fixture: Fixture): Response;
+export interface ReplayOutcome {
+  readonly call: RecordedCall;      // what our client actually sent
+  readonly value?: unknown;         // what the api function returned
+  readonly error?: unknown;         // a TikTokError is a legitimate outcome
+}
+export function replayFixture(fixture: Fixture): Promise<ReplayOutcome>;
+
+export interface RequestMismatch { readonly what: string; readonly expected: string;
+                                   readonly actual: string; }
+export function compareRequest(fixture: Fixture, call: RecordedCall): RequestMismatch[];
+export function renderMismatches(mismatches: readonly RequestMismatch[]): string;
+
+// Synthetic fixtures — how the suite proves itself while the tree is empty.
+export interface SyntheticOverrides { /* url, method, area, responseBody, … */ }
+export function envelopeBody(data: unknown, error?: unknown): unknown;
+export function syntheticFixture(overrides?: SyntheticOverrides): Fixture;
+```
+
+`replayFixture` returns *both* directions from one call, which is not a
+convenience: `core/http.ts` reads `globalThis.fetch` off the global at call time
+and `src/api/*` exports no standalone response parser, so driving the api
+function against a scripted stub is the only seam there is — and it is the seam
+that makes the request assertion available in the same breath. A fixture that
+records an upstream rejection is a legitimate recording, so an outcome with
+`error` set is a pass; only a crash on *shape* is a failure.
+
 ---
 
 ## Change log
@@ -1976,3 +2263,10 @@ or the canary fires.
 | 2026-08-09 | `api/publish`: added `resolvePhotoDraftPostInfo({ title?, description? })` — the photo draft `post_info`, `derived: []`, no `CreatorInfo`. Not `resolvePhotoPostInfo` with optional arguments: a draft carries no privacy level and no toggles and must not grow defaults. It lives in `api/` anyway because it shares `PHOTO_TITLE_MAX` / `PHOTO_DESCRIPTION_MAX`, and a second copy of those limits is a second place for them to drift. Additive — no existing signature changed (raised by TD-6) | integrator (Wave-D sanctioned edit) |
 | 2026-08-09 | `api/publish`: a `FILE_UPLOAD` init whose payload carries no `upload_url` now throws `malformedPayload(<init endpoint>, "upload_url string for a FILE_UPLOAD init")` instead of returning a `PublishInitResult` with the field absent. `uploadUrl` was optional for the honest reason that `PULL_FROM_URL` has none, which made the one case that cannot proceed without it indistinguishable from the one that never wants it — and the tool layer would only discover the hole after the publish attempt was already spent. `PULL_FROM_URL` is unchecked and unchanged (raised by TD-6) | integrator (Wave-D approved deviation) |
 | 2026-08-09 | `docs/TOOLS.md` § 3.9: the draft `user_action` hint says "**Unopened** drafts expire", not "Unfinished". § 5.3's rendering and the tool description both already said "unopened", and the claim matters: TikTok expires a draft the user never opened, not one they opened and left unfinished, so the wrong word tells a user their in-progress edit is on a timer. § 5.3 is the normative rendering and two of the three sites already agreed. `docs/TIKTOK-API.md`'s scope table updated in the same change — `video.upload` listed `tiktok_post_photos` (MEDIA_UPLOAD), a tool that does not exist, where `tiktok_upload_photos_draft` does (raised by TD-6) | integrator (Wave-D spec reconciliation) |
+| 2026-08-09 | Added § `mcp/lifecycle.ts` — new module, no contract changed; the preamble's note that it is deliberately absent now points at the § the task wrote. It exports a watcher and a plain `onChange`, not a `Server` call: the notification is the composition root's to send, and `mcp/lifecycle` importing `mcp/server` to send it would make an untestable module out of a decision that is one line at the call site. The signal is the *derived* `profileSignature`, never file activity — a token refresh rewrites the env file on its own schedule and firing `tools/list_changed` on every refresh would be a bug, not a feature. Polling through the injected `Clock` is the floor rather than an `fs.watch` optimisation: `persistProfilePatch` writes by rename-replacement (which `fs.watch` reports inconsistently), network homes do not deliver events at all, and a watch no `mockClock` can drive cannot be tested to CC-H4. The interval doubles as § 6.3's debounce, so it is floored at 500 ms and an unusable value warns and falls back like `core/env-lock`'s duration (raised by TE-6) | integrator (Wave-E sanctioned edit) |
+| 2026-08-13 | Added § `mcp/http.ts` — new module, no contract changed. `TT_TRANSPORT=http` was documented as shipped (README § env table, CONFIGURATION.md § transport, SECURITY.md § Transport) while `src/index.ts` refused to start, so the § records the surface that closes the gap: `startHttpTransport`/`HttpTransportOptions`/`HttpTransportHandle`, `MCP_PATH`, and the exported `dnsRebindingRejection`/`OriginPolicy`. The refusal predicate is exported because the off-box branch of the `Host`/`Origin` policy is otherwise reachable only by binding off-box, which a test suite may not do. The check order (403 → 401 → 404 → 405), the byte-identical 401 for a missing and a wrong credential, and one `McpServerHandle` per session are contract rather than implementation: the first is what stops an unauthenticated caller from mapping the surface, the second is what stops it probing, and the third is what keeps two clients' initialization state apart (raised by TE-7) | integrator (Wave-E sanctioned edit) |
+| 2026-08-13 | `mcp/plan`: `peekPublishBucket`, `takePublishToken` and `localRateLimitedError` gained a trailing `options?: RateBucketOptions` (`{ limits?: PublishRateLimits }`) — additive, so every frozen call form still compiles; `PUBLISH_BUCKET_CAPACITY` / `PUBLISH_BUCKET_REFILL_MS` are replaced by `DEFAULT_PUBLISH_RPM` plus `resolvePublishBucket(options)`, since the two numbers are derived from one setting and only ever meaningful together. Same precedent as `PlanStoreOptions`: CONFIGURATION.md advertises `TT_PUBLISH_RPM` and `core/settings` parses it, but the bucket had no way to receive it and hard-coded the default, so the setting silently did nothing. `capacity = rpm`, `refillMs = ceil(60_000 / rpm)` — whole milliseconds because `refill` banks the remainder *in* `updatedAt` (a fractional interval would drift over a session and put `retry_at` on instants `Date` truncates), rounded up so a non-divisor lands just under the configured rate rather than just over. The default 6 still resolves to capacity 6 / 10 000 ms, which a test asserts equals `loadSettings(baselineEnv()).publishRpm`. `refill` also clamps a bucket down to the current capacity, because the bucket map is process-wide while the rate arrives per call (raised by the TT_PUBLISH_RPM defect fix) | integrator (Wave-E approved deviation) |
+| 2026-08-13 | § `cli/doctor.ts`: `parseDoctorArgs`'s flags gained `json: boolean`, and the module gained `DoctorReport`, `DoctorReportCheck` and `renderJsonReport` — plus `export` on `Tally`, which `renderSummary`'s frozen signature already named without declaring. All additive: every frozen call form still compiles and the human rendering is byte-identical. `--json` is what makes doctor a readiness gate for something other than a human, so a fourth rule now binds it: stdout carries exactly one document on every path that reaches it, including the path where the configuration could not be read, which reports the reason as a synthetic `configuration` check instead of pairing a non-zero exit with an empty stream. The document is snake_case (`exit_code`) to match the wire shape the tools already speak, and carries no timestamp or duration, so two runs of one configuration diff clean in CI. `--json` also implies non-interactive — the CC-F3 chmod offer would block a consumer with no way to answer it (raised by SYN-26) | integrator (round-2 finding) |
+| 2026-08-13 | § `cli/doctor.ts` and § `cli/index.ts`: `DoctorContext` gained `readonly modulePath: string` and `CliDeps` an optional `modulePath?: string` (additive), carrying a 14th check — `install` — at the end of the runtime-surface group. It warns when the CLI is running out of the npx cache, because npx re-runs its own cached copy and `npm cache clean` does not touch it, so an operator can chase a bug the published version fixed weeks ago; the remediation spells out the cache-clear command for `ctx.platform` verbatim (`rm -rf ~/.npm/_npx`, `rd /s /q "%LOCALAPPDATA%\npm-cache\_npx"`) since neither path is derivable from the other. `modulePath` is a seam for rule 3's reason — `import.meta.url` is not overridable, so both branches would otherwise be reachable only from a real `npx` run on the matching platform. The match is on a path *segment*, so a project directory named `my_npx_tools` is not the cache, and a non-npx install answers `ok` rather than silently: "where is this running from" is the first thing a stale-install bug report has to establish (raised by SYN-38) | integrator (round-2 finding) |
+| 2026-08-22 | Added § Extended harness `fixtures.ts` and recorded two deviations from TESTING.md's original fixture sketch, both in `scripts/lib/fixtures.ts`. **`response.headers` is part of the on-disk format**, which the sketch (status + body) did not call for: the chunked-upload path answers with a bare status, a `Content-Range` and no body at all, so a body-only fixture cannot express the one interaction most worth recording, and `Retry-After` is the same story on the retry path. **Replay goes through `globalThis.fetch`, not "the `api/` parsers"** — no standalone parser is exported and `core/http` reads the global at call time, so driving the api function against a scripted stub is the only seam; it is also what makes the request half of the contract free, which the sketch wanted as a separate mechanism. Two areas are exempt from replay by name with a reason (`auth`: form-encoded and outside the `{data,error}` envelope; `upload`: a pre-signed PUT on another origin) and still recorded, sanitized and secret-scanned — an unrouted endpoint inside a replayable area remains a loud failure, since a recorded interaction nobody replays looks exactly like a verified one (raised by the recorded-fixtures spine) | integrator (approved deviation) |
+| 2026-08-22 | `core/redact`: `SENSITIVE_PARAM_RE`'s prefix class gained `"` and `'`. It required `?`, `&`, whitespace or `;` before the parameter name, so in the position a form body actually reaches a log line — quoted, as a JSON string or interpolated into a message — the *first* parameter was the one place the rule could not see, and a serialized OAuth body puts `client_key` and `code` exactly there. No signature change; the replacement still preserves the prefix, so `"access_token=…` stays well-formed. Found by the fixtures leak detector, which had the same gap and the same fix (raised by the recorded-fixtures spine) | integrator (defect fix) |

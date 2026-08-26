@@ -201,9 +201,11 @@ surface. The presence of `plan_id` alone selects the step:
 #### 2.6.3 Execute (`plan_id` present) — pipeline order is normative
 
 1. Full local validation (§ 2.3), as in the preview.
-2. Local rate bucket check (§ 2.8): an empty bucket rejects with
+2. Local rate bucket **check** (§ 2.8): an empty bucket rejects with
    `local_rate_limited` — zero network, nothing consumed, the plan is **not**
-   consumed.
+   consumed. The check only *reads* the bucket; the token is taken at step 7,
+   so a call that never reaches an init — a rejected `plan_id`, a
+   `possible_duplicate` — leaves the bucket exactly as it found it.
 3. **Re-resolve** the payload through the same code path as the preview:
    re-stat the file (size/mtime/dev/ino must match the preview's resolution),
    re-run the `creator_info` pre-flight on direct-post tools.
@@ -218,9 +220,13 @@ surface. The presence of `plan_id` alone selects the step:
    `possible_duplicate` rejection happens **before** consumption, so the same
    `plan_id` may be re-applied with `force` within its TTL after the user
    verifies.
-7. **Consume the plan atomically** (mark used) — *before* the init request is
-   dispatched (CC-E7). A failed apply after this point always requires a
-   fresh preview; a consumed plan is never revived.
+7. **Take the rate token, then consume the plan atomically** (mark used) —
+   both *before* the init request is dispatched (CC-E7). The token is charged
+   last of the three refusals, so only a call that goes on to dispatch spends
+   one; if a concurrent apply emptied the bucket since step 2 the rejection is
+   `local_rate_limited` and the plan is still unconsumed, so the same
+   `plan_id` applies after the wait. A failed apply after the consume always
+   requires a fresh preview; a consumed plan is never revived.
 8. Journal intent append, fsync'd (§ 2.9).
 9. Init dispatch (and chunk PUTs for `source: "file"`), then journal outcome
    append.
@@ -274,8 +280,11 @@ with a fresh preview.
 
 (rationale: SYNTHESIS § 2.12)
 
-- **Publish inits:** a local token bucket per profile — capacity 6/min,
-  continuous refill (1 token per 10 s). An empty bucket rejects the execute
+- **Publish inits:** a local token bucket per profile — capacity
+  `TT_PUBLISH_RPM`/min (default 6), continuous refill (1 token per
+  `60_000 / TT_PUBLISH_RPM` ms, rounded up to whole milliseconds so a rate that
+  does not divide 60 000 evenly stays just under what was configured; 10 s at
+  the default). An empty bucket rejects the execute
   step **locally** with `local_rate_limited`, carrying `retry_after_s` and an
   absolute `retry_at`, plus a `wait` hint. Zero network; the server never
   sleeps a write call.
@@ -297,10 +306,13 @@ with a fresh preview.
   and an **outcome** record after the response (or terminal upload failure).
 - Persisted outcome vocabulary: `ok` (init accepted, `publish_id` recorded) ·
   `error` (clean failure; known-unsent transport failures carry
-  `error_code: "network_unsent"`) · `upload_failed` (init ok, chunk upload
-  aborted) · `send_ambiguous` (transport failure after the request may have
-  been sent). `unknown` is **derived at read time** (an intent with no
-  outcome record — e.g. a crash mid-publish) and is never persisted.
+  `error_code: "network_unsent"`) · `upload_failed` (**any** failure after the
+  init returned a `publish_id` — an aborted chunk upload, a rejected re-stat, an
+  upload host refusal: the attempt exists upstream and only the media is
+  missing, so it is never journaled as `error`) · `send_ambiguous` (transport
+  failure after the request may have been sent). `unknown` is **derived at read
+  time** (an intent with no outcome record — e.g. a crash mid-publish) and is
+  never persisted.
 - A journal append failure is a warning, never a publish failure: the result
   then carries top-level `journal: "unavailable"` plus a `note` hint telling
   the model the attempt was not recorded.
@@ -335,13 +347,13 @@ seven. Per-tool sections list only additions.
 
 | Code | Retryable | Message text (normative) |
 |---|---|---|
-| `local_rate_limited` | yes | "This server's publish limiter (6/min) rejected the call to protect the account from TikTok's spam systems. Wait until <retry_at> (<retry_after_s> s), then apply again with a fresh preview." |
+| `local_rate_limited` | yes | "This server's publish limiter (<TT_PUBLISH_RPM>/min, 6 by default) rejected the call to protect the account from TikTok's spam systems. Wait until <retry_at> (<retry_after_s> s), then apply again with a fresh preview." |
 | `daily_post_cap` | no | "TikTok reports this account reached its daily posting limit (~15 posts/24 h, shared across ALL apps posting via the API, not only this server). Do not retry today. Tell the user; posting resumes as the 24 h window rolls." |
 | `active_user_cap` | no | "This app is unaudited and already served its maximum of 5 posting users in the last 24 h (reached_active_user_cap). Do not retry today. The permanent fix is the developer passing TikTok's app audit." |
 | `pending_share_cap` | no | "TikTok blocked this draft: the account already has 5 unpublished API drafts from the last 24 h (spam_risk_too_many_pending_share). Ask the user to open TikTok's inbox notifications and publish or discard pending drafts, then try again." |
 | `plan_not_found` | no | "This plan_id is unknown, already used, or expired (plans are single-use and expire <ttl> minutes after the preview). Call the tool again WITHOUT plan_id to generate a fresh preview, show it to the user, and apply with the new plan_id only after the user approves." |
 | `plan_mismatch` | no | "The arguments (or the target account) differ from what this plan_id previewed. A plan applies only the exact previewed payload. Call the tool again WITHOUT plan_id to preview the changed arguments, show the new preview to the user, then apply with the new plan_id." |
-| `possible_duplicate` | no | "A publish attempt with this title on account '<profile>' was journaled at <ts> with outcome '<ok\|unknown>'<, publish_id <id>>. Verify with tiktok_get_publish_status and tiktok_list_publish_journal that no post was created. Only if confirmed, re-preview and apply with force: true." |
+| `possible_duplicate` | no | "A publish attempt with an identical payload (same media, text and settings — the guard matches the whole resolved request, not any single field) on account '<profile>' was journaled at <ts> with outcome '<ok\|unknown>'<, publish_id <id>>. Verify with tiktok_get_publish_status and tiktok_list_publish_journal that no post was created. Only if confirmed, re-preview and apply with force: true." |
 | `network_unsent` | no | "The network failed before the publish request was sent — TikTok received nothing and no post was created (journal outcome 'error'). When the connection recovers, generate a fresh preview and apply with the new plan_id." |
 | `network_ambiguous` | no | "The network failed after the publish request may already have been sent — the post MAY exist upstream. Do NOT apply again. Check tiktok_list_publish_journal (the latest entry will show outcome 'unknown') and tiktok_get_publish_status or tiktok_list_videos first; retry only if no post exists, with a fresh preview." |
 | `media_root_not_configured` | no | "source \"file\" is disabled: the operator has not set TT_MEDIA_ROOT (the only directory this server may read media from). Ask the user to set TT_MEDIA_ROOT in the server configuration and restart, or host the media on a verified URL and use source \"url\"." |
@@ -707,9 +719,11 @@ Notes:
   "PROCESSING_UPLOAD" | "PROCESSING_DOWNLOAD", journal: "recorded" |
   "unavailable" }` + `poll` hint. With `wait_for_completion: true`,
   additionally the final observed `status` (+ `public_post_id` when
-  complete) — and on poll timeout a `poll` hint with the graceful wording:
-  *"Still PROCESSING_UPLOAD after 60 s — normal for large videos. Call
-  tiktok_get_publish_status with publish_id <id>; do not re-post."*
+  complete) — and on poll timeout a `poll` hint carrying `poll_after` like
+  every other one (§ 2.7), with the graceful wording: *"Still
+  PROCESSING_UPLOAD after 60 s — normal for large videos. Call
+  tiktok_get_publish_status with publish_id <id> after <poll_after>; do not
+  re-post."*
 - **Errors:** full shared catalog. Most load-bearing here: `plan_not_found`,
   `plan_mismatch`, `possible_duplicate`, `network_unsent`,
   `network_ambiguous`, `upload_interrupted`, `privacy_level_unavailable`,

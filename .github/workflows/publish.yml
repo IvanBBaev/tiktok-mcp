@@ -1,33 +1,69 @@
 name: Publish
 
-# Publish to npm from CI on a version tag (never from a laptop). The same
-# `npm run check` gate runs here, and `prepublishOnly` runs it again as a
-# backstop, so a red build cannot reach the registry.
+# Publish to npm from CI on a version tag (never from a laptop).
+#
+# Two gates run before anything leaves the runner: `release:guard` (the tag,
+# every version field and the changelog agree — see scripts/release-guard.ts)
+# and the full `npm run check`. The guard runs first because it costs a second
+# and the suite costs minutes, and a version skew is not going to fix itself
+# halfway through the tests.
+#
+# Authentication is npm **trusted publishing**: there is no NPM_TOKEN anywhere
+# in this workflow. The registry trusts this repository + workflow filename via
+# OIDC, which is also what provenance is attested from — a token would be both
+# unnecessary and a thing that can leak.
+#
+# Do not rename this workflow: publish-mcp.yml triggers on `workflows: [Publish]`.
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: read
-  id-token: write # npm provenance (OIDC)
+  contents: write # create the GitHub release from the changelog section
+  id-token: write # npm trusted publishing + provenance (OIDC)
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # v7+ is required: older setup-node exported a placeholder NODE_AUTH_TOKEN,
+      # and npm treats any token it finds as "already authenticated" and never
+      # reaches for OIDC. `registry-url` is deliberately omitted for the same
+      # reason — it writes an _authToken line into .npmrc. The default registry
+      # is registry.npmjs.org regardless.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-          registry-url: 'https://registry.npmjs.org'
           cache: npm
+      # Node 22 ships npm 10.x; trusted publishing needs >= 11.5.1.
+      - run: npm install -g npm@latest
       - run: npm ci
-      - name: Tag must match package.json version
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          pkg=$(node -p "require('./package.json').version")
-          test "$tag" = "$pkg" || { echo "tag v$tag != package.json $pkg"; exit 1; }
+      # The guard runs from build/, like every other script in scripts/.
+      - run: npm run build
+      - name: Release identity gate (tag ⇄ versions ⇄ CHANGELOG)
+        run: npm run release:guard
       - run: npm run check
-      - run: npm publish --provenance --access public
+      # Last gate before the registry: pack the tree, install that tarball into a
+      # temp prefix and drive the installed binary through a real MCP handshake.
+      # `check` cannot cover this — it tests the repo layout, and what ships is
+      # the `files` subset. No credentials are involved (the install only reads
+      # the public registry for the runtime deps) and nothing is published here;
+      # `npm publish` below packs its own tarball from the same clean tree.
+      - run: npm run smoke:pack
+      # A prerelease tag must not land on `latest`, or every `npx tiktok-mcp-ai`
+      # in the world silently upgrades to a release candidate.
+      - name: Resolve the npm dist-tag
+        run: echo "DIST_TAG=$(node build/scripts/release-guard.js --dist-tag)" >> "$GITHUB_ENV"
+      - run: npm publish --provenance --access public --tag "$DIST_TAG"
+      # After npm, never before: a GitHub release pointing at a version the
+      # registry does not have is worse than no release at all.
+      - name: GitHub release from the changelog section
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node build/scripts/release-guard.js --notes > "$RUNNER_TEMP/notes.md"
+          prerelease=""
+          if [ "$DIST_TAG" != "latest" ]; then prerelease="--prerelease"; fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" $prerelease

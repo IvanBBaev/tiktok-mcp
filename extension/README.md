@@ -5,9 +5,13 @@ This extension registers the [`tiktok-mcp-ai`](https://www.npmjs.com/package/tik
 MCP server automatically — install it and the TikTok tools appear in Chat, with
 no manual `.vscode/mcp.json`.
 
-<!-- TODO(owner): before running `vsce publish`, add a 128×128 PNG at
-     `extension/icon.png` (referenced by `package.json`). It is intentionally
-     not committed here — the extension will not package/publish without it. -->
+<!-- TODO(owner): the Marketplace listing has no icon. `package.json` no longer
+     declares one, because `vsce` refuses to package an extension whose declared
+     icon is absent — and `publish-vscode.yml` fires on the same `v*` tag as the
+     npm release, so a missing file there would fail the job *after* npm had
+     already published. To add one: drop a 128×128 PNG at `extension/icon.png`
+     and put `"icon": "icon.png"` back in `package.json`. Nothing else depends
+     on it; the extension packages and publishes fine without one. -->
 
 ## What you get
 

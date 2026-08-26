@@ -1,7 +1,6 @@
 {
   "name": "tiktok-mcp-ai",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.7.0",
   "description": "Unofficial MCP server for TikTok (Display API + Content Posting API). Not affiliated with, endorsed by, or sponsored by TikTok or ByteDance; \"TikTok\" is a trademark of its owner, used here nominatively to indicate what this server connects to.",
   "license": "MIT",
   "author": "Ivan Baev <ivanbbaev@gmail.com>",
@@ -43,6 +42,12 @@
     "docs:env": "node build/scripts/gen-env-example.js",
     "sync": "node build/scripts/sync.js",
     "sync:write": "node build/scripts/sync.js --write",
+    "release:guard": "node build/scripts/release-guard.js",
+    "release:notes": "node build/scripts/release-guard.js --notes",
+    "release:dist-tag": "node build/scripts/release-guard.js --dist-tag",
+    "smoke:pack": "node build/scripts/smoke-pack.js",
+    "fixtures:record": "node build/scripts/fixtures-record.js",
+    "fixtures:sanitize": "node build/scripts/fixtures-sanitize.js",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test && npm run coverage:run && npm run coverage:gate && npm run sync"
   },
   "dependencies": {

@@ -2,11 +2,10 @@
   "name": "tiktok-mcp-ai",
   "displayName": "TikTok MCP",
   "description": "Drive TikTok from VS Code Copilot Chat — 11 tools over the Display and Content Posting APIs, with plan-then-execute write safety, OAuth 2.0 (PKCE) authorization and an append-only publish journal.",
-  "version": "0.0.0",
+  "version": "0.7.0",
   "publisher": "ivanbbaev",
   "author": "Ivan Baev",
   "license": "MIT",
-  "icon": "icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/IvanBBaev/tiktok-mcp.git"

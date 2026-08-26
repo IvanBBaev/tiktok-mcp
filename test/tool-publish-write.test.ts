@@ -45,7 +45,13 @@ import { TikTokError } from '../src/core/errors.js';
 import { createLogger } from '../src/core/log.js';
 import { loadSettings } from '../src/core/settings.js';
 import type { ToolCtx } from '../src/mcp/define.js';
-import { resetRateBuckets, takePublishToken } from '../src/mcp/plan.js';
+import {
+  peekPublishBucket,
+  publishRateLimits,
+  resetRateBuckets,
+  resolvePublishBucket,
+  takePublishToken,
+} from '../src/mcp/plan.js';
 import { PLAN_ID_PATTERN, resetPlanStore } from '../src/mcp/plan-store.js';
 import {
   HINT_TYPES,
@@ -380,6 +386,14 @@ async function withCtx<T>(
   }
 }
 
+/** Spend the whole publish budget the way a minute of applies would. */
+function drainPublishBucket(ctx: ToolCtx): void {
+  const limits = publishRateLimits(ctx.api.settings);
+  for (let i = resolvePublishBucket(limits).capacity; i > 0; i -= 1) {
+    takePublishToken(ctx.api.profile, ctx.api.clock, limits);
+  }
+}
+
 /**
  * Await `pending` while pushing virtual time forward in slices.
  *
@@ -617,6 +631,22 @@ test('a preview reports the rate bucket without spending from it', async () => {
   });
 });
 
+test('the reported bucket is the one TT_PUBLISH_RPM configured', async () => {
+  await withCtx({ TT_PUBLISH_RPM: '20' }, async (ctx, _dir, clock) => {
+    await withFetch(fakeApi(), async () => {
+      const full = previewOf(await run(ctx, previewArgs())).meta.rate_bucket;
+      assert.equal(full.tokens_available, 20, 'the burst the operator asked for');
+
+      takePublishToken(ctx.api.profile, clock, publishRateLimits(ctx.api.settings));
+      const spent = previewOf(await run(ctx, previewArgs())).meta.rate_bucket;
+      assert.equal(spent.tokens_available, 19);
+      // 20/min is a token every 3 s, so that is what the model is told to
+      // pace itself against — not the default's 10.
+      assert.equal(Date.parse(spent.next_token_at ?? ''), clock.now() + 3_000);
+    });
+  });
+});
+
 test('a preview without privacy_level returns the options and NO plan_id', async () => {
   await withCtx({}, async (ctx) => {
     const result = await withFetch(fakeApi(), async () =>
@@ -805,8 +835,7 @@ test('the local rate limit refuses before any network call and never spends the 
     const stub = fakeApi();
     const result = await withFetch(stub, async () => {
       const preview = previewOf(await run(ctx, previewArgs()));
-      // Drain the bucket the way six applies in one minute would.
-      for (let i = 0; i < 6; i += 1) takePublishToken('DEFAULT', ctx.api.clock);
+      drainPublishBucket(ctx);
       const refused = await run(ctx, previewArgs({ plan_id: preview.plan_id }));
       assert.equal(errorOf(refused).code, 'local_rate_limited');
       assert.equal(stub.calls.length, 1);
@@ -824,7 +853,7 @@ test('a rate-limit refusal carries a wait hint with an absolute instant', async 
   await withCtx({}, async (ctx) => {
     const result = await withFetch(fakeApi(), async () => {
       const preview = previewOf(await run(ctx, previewArgs()));
-      for (let i = 0; i < 6; i += 1) takePublishToken('DEFAULT', ctx.api.clock);
+      drainPublishBucket(ctx);
       return await run(ctx, previewArgs({ plan_id: preview.plan_id }));
     });
 
@@ -832,6 +861,46 @@ test('a rate-limit refusal carries a wait hint with an absolute instant', async 
     assert.equal(hint?.type, 'wait');
     assert.ok(hint?.retry_at?.endsWith('Z'));
     assert.equal(typeof hint?.retry_after_s, 'number');
+  });
+});
+
+test('a refusal that never reaches an init leaves the rate bucket untouched', async () => {
+  await withCtx({}, async (ctx) => {
+    const stub = fakeApi();
+    const limits = publishRateLimits(ctx.api.settings);
+    const tokens = (): number =>
+      peekPublishBucket(ctx.api.profile, ctx.api.clock, limits).tokens_available;
+
+    await withFetch(stub, async () => {
+      const preview = previewOf(await run(ctx, previewArgs()));
+      const budget = tokens();
+
+      // § 2.6.3 step 2 only reads the bucket; the token is taken at step 7,
+      // once nothing else can still say no. A caller who mistypes a plan_id
+      // therefore pays nothing — the alternative charged a minute's publish
+      // budget for a request TikTok never saw.
+      const unknown = await run(ctx, previewArgs({ plan_id: `plan_${'0'.repeat(32)}` }));
+      assert.equal(errorOf(unknown).code, 'plan_not_found');
+      const changed = await run(
+        ctx,
+        previewArgs({ plan_id: preview.plan_id, title: 'A different clip' }),
+      );
+      assert.equal(errorOf(changed).code, 'plan_mismatch');
+      assert.equal(countPath(stub, INIT_PATH), 0);
+      assert.equal(tokens(), budget, 'a rejected plan_id must not spend a token');
+
+      // The plan the caller did approve is still good, and paying for it is
+      // what moves the bucket.
+      const applied = await run(ctx, previewArgs({ plan_id: preview.plan_id }));
+      assert.equal(appliedOf(applied).publish_id, 'v_pub_url~test.123');
+      assert.equal(tokens(), budget - 1);
+
+      // Same for the duplicate guard, which also refuses ahead of step 7.
+      const second = previewOf(await run(ctx, previewArgs()));
+      const duplicate = await run(ctx, previewArgs({ plan_id: second.plan_id }));
+      assert.equal(errorOf(duplicate).code, 'possible_duplicate');
+      assert.equal(tokens(), budget - 1);
+    });
   });
 });
 
@@ -1049,10 +1118,38 @@ test('a wait that runs out of time is still a success, with a still-processing h
       assert.equal(hint?.publish_id, 'v_pub_url~test.123');
       assert.ok(hint?.text.includes('Still PROCESSING_DOWNLOAD after 60 s'));
       assert.ok(hint?.text.includes('do not re-post'));
-      // The § 3.8 text this hint copies is relative ("after N s"), so it
-      // carries no `poll_after` instant — unlike the hint an apply that did
-      // not wait emits. Pinned so the divergence stays a decision.
-      assert.equal(hint?.poll_after, undefined);
+      // § 2.7: every `poll` hint carries an absolute instant, this one
+      // included. The exact arithmetic is pinned by the next test, where no
+      // virtual time passes between the hint and the assertion.
+      assert.match(hint?.poll_after ?? '', /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/u);
+      assert.ok(hint?.text.includes(`after ${hint.poll_after ?? ''}`));
+    },
+  );
+});
+
+test("the still-processing hint's poll_after is the status tool's own interval", async () => {
+  // A zero budget times out on the first read, so nothing sleeps and virtual
+  // time stands exactly where the hint was built — the only way this instant
+  // can be asserted as a value rather than as a range.
+  await withCtx(
+    { TT_STATUS_POLL_INTERVAL_MS: '5000', TT_STATUS_POLL_TIMEOUT_MS: '0' },
+    async (ctx, _dir, clock) => {
+      const stub = fakeApi({
+        status: () => ttEnvelope({ status: 'PROCESSING_DOWNLOAD' }),
+      });
+      const result = await withFetch(stub, async () => {
+        const preview = previewOf(await run(ctx, previewArgs()));
+        return await run(
+          ctx,
+          previewArgs({ plan_id: preview.plan_id, wait_for_completion: true }),
+        );
+      });
+
+      assert.equal(appliedOf(result).status, 'PROCESSING_DOWNLOAD');
+      const [hint] = hintsOf(result);
+      assert.equal(hint?.type, 'poll');
+      assert.equal(hint?.poll_after, new Date(clock.now() + 5_000).toISOString());
+      assert.equal(clock.pending(), 0, 'a zero budget must not have slept');
     },
   );
 });
@@ -1461,12 +1558,15 @@ test('the file is re-verified between the plan guards and the first byte (CC-D3)
     assert.equal(stub.puts.length, 0);
 
     // The init already minted a publish_id, so the journal has to say that an
-    // attempt exists upstream even though not one byte was sent. Which failure
-    // word `result` gets is `classifyDispatch`'s business (CC-B4); the
-    // publish_id is what a reconciling reader cannot do without.
+    // attempt exists upstream even though not one byte was sent: after the
+    // init every failure is `upload_failed`, whatever aborted the bytes
+    // (CC-B4). `error` here would read as "nothing was created".
     const [outcome] = linesOf(await readJournal(dir), 'outcome');
     assert.equal(outcome?.['publish_id'], 'v_pub_file~test.456');
-    assert.notEqual(outcome?.['result'], 'ok');
+    assert.equal(outcome?.['result'], 'upload_failed');
+    assert.equal(outcome?.['error_code'], 'plan_mismatch');
+    // Nothing was accepted, so the chunk that failed is the first one.
+    assert.equal(outcome?.['chunk'], 1);
   });
 });
 

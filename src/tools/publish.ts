@@ -56,6 +56,7 @@ import {
 import {
   localRateLimitedError,
   localRateLimitedHint,
+  publishRateLimits,
   takePublishToken,
   type RateLimitRefusal,
 } from '../mcp/plan.js';
@@ -229,9 +230,10 @@ export async function awaitPublishToken(
   signal?: AbortSignal,
 ): Promise<RateLimitRefusal | undefined> {
   const { clock } = api;
+  const limits = publishRateLimits(api.settings);
   const deadline = clock.now() + api.settings.timeoutMs;
   for (;;) {
-    const take = takePublishToken(api.profile, clock);
+    const take = takePublishToken(api.profile, clock, limits);
     if (take.ok) return undefined;
     const remaining = deadline - clock.now();
     if (remaining <= 0) return take.refusal;
@@ -367,7 +369,7 @@ export const getCreatorInfoTool = defineTool<CreatorInfoInput, CreatorInfoData>(
     if (refusal !== undefined) {
       return {
         ok: false,
-        error: localRateLimitedError(refusal),
+        error: localRateLimitedError(refusal, publishRateLimits(ctx.api.settings)),
         hints: [localRateLimitedHint(refusal)],
       };
     }

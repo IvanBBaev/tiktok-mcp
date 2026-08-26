@@ -190,8 +190,9 @@ brick one of them. Hence:
 3. **Keeps the publish journal.** The journal is the only audit trail for
    "did it post?" — destroying it on revoke would destroy exactly the record
    needed most (rationale: SYNTHESIS § 2.10). Purging journal data requires
-   the **explicit `--purge-journal` flag**, available on `login --revoke`
-   and on `doctor`; without it, no revoke path touches the journal.
+   the **explicit `--purge-journal` flag**, which applies only together with
+   `login --revoke` and is rejected on its own; without it, no revoke path
+   touches the journal.
 
 ### 4.1 OAuth wire shape (CC-A12)
 
@@ -212,7 +213,8 @@ TT_ACTIVE_PROFILE=default                   # which profile tools use by default
 ```
 
 Every tool accepts `account: "brand"` to run one call against another profile;
-the selection travels via `AsyncLocalStorage`, so parallel calls with
+the selection is resolved per call and threaded explicitly through that call's
+own API context — nothing about it is ambient or shared — so parallel calls with
 different accounts cannot bleed into each other. `tiktok_get_auth_status`
 lists all profiles with expiry info.
 

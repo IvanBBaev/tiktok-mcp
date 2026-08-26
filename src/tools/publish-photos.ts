@@ -41,12 +41,18 @@ import {
 } from '../api/publish.js';
 import { defineTool, toolInput, type ToolCtx } from '../mcp/define.js';
 import { invalidParamsError, publishToolError } from '../mcp/errors.js';
-import { payloadDigest, peekPublishBucket, resolveWriteStep } from '../mcp/plan.js';
+import {
+  payloadDigest,
+  peekPublishBucket,
+  publishRateLimits,
+  resolveWriteStep,
+} from '../mcp/plan.js';
 import { PLAN_ID_PATTERN, type PlanExpectation } from '../mcp/plan-store.js';
 import type { Hint, ToolError, ToolResult } from '../mcp/result.js';
 import {
   accountBlock,
   checkMediaUrl,
+  checkWriteBucket,
   choosePrivacyHint,
   consentLine,
   creatorBlock,
@@ -56,7 +62,6 @@ import {
   resolveOpenId,
   runPlanGuards,
   signalOpt,
-  takeWriteToken,
   waitIfAsked,
   type AppliedData,
   type DraftPreview,
@@ -341,7 +346,13 @@ async function previewPhotos(
       args.brand_content_toggle === true,
       args.brand_organic_toggle === true,
     ),
-    meta: { rate_bucket: peekPublishBucket(api.profile, api.clock) },
+    meta: {
+      rate_bucket: peekPublishBucket(
+        api.profile,
+        api.clock,
+        publishRateLimits(api.settings),
+      ),
+    },
   };
 
   // § 2.6.1 step 4: no privacy level, no plan — with the live options attached,
@@ -401,8 +412,9 @@ async function executePhotos(
 ): Promise<ToolResult<PostPhotosData>> {
   const { api } = ctx;
 
-  // Step 2 — before any network, and before the plan is touched.
-  const refused = takeWriteToken(ctx);
+  // Step 2 — an empty bucket refuses before any network; the token is taken at
+  // step 7, once nothing else can still say no.
+  const refused = checkWriteBucket(ctx);
   if (refused !== undefined) return refused;
 
   // Step 3 — the preview's own code path, against live creator state.
@@ -439,7 +451,7 @@ async function executePhotos(
 
   // Steps 5–7.
   const guard = await runPlanGuards(ctx, planId, expectation, args.force === true);
-  if (guard !== undefined) return { ok: false, error: guard };
+  if (guard !== undefined) return guard;
 
   // Steps 8–9.
   const result = await dispatchWrite(ctx, {
@@ -594,7 +606,13 @@ async function previewPhotosDraft(
       account: accountBlock(api.profile, openId),
       action: DRAFT_ACTION,
       payload: { post_info: postInfo, source: photoSourceBlock(args) },
-      meta: { rate_bucket: peekPublishBucket(api.profile, api.clock) },
+      meta: {
+        rate_bucket: peekPublishBucket(
+          api.profile,
+          api.clock,
+          publishRateLimits(api.settings),
+        ),
+      },
     },
     hints: [plan.hint],
   };
@@ -608,7 +626,7 @@ async function executePhotosDraft(
   const { api } = ctx;
 
   // Step 2.
-  const refused = takeWriteToken(ctx);
+  const refused = checkWriteBucket(ctx);
   if (refused !== undefined) return refused;
 
   // Step 3 — no `creator_info` to re-read: a `video.upload`-only grant may not
@@ -632,7 +650,7 @@ async function executePhotosDraft(
 
   // Steps 5–7.
   const guard = await runPlanGuards(ctx, planId, expectation, args.force === true);
-  if (guard !== undefined) return { ok: false, error: guard };
+  if (guard !== undefined) return guard;
 
   // Steps 8–9.
   const result = await dispatchWrite(ctx, {

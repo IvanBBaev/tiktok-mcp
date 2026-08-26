@@ -52,12 +52,18 @@ import {
 import { defineTool, toolInput, type ToolCtx } from '../mcp/define.js';
 import { invalidParamsError, publishToolError } from '../mcp/errors.js';
 import type { IntentSource } from '../mcp/journal.js';
-import { payloadDigest, peekPublishBucket, resolveWriteStep } from '../mcp/plan.js';
+import {
+  payloadDigest,
+  peekPublishBucket,
+  publishRateLimits,
+  resolveWriteStep,
+} from '../mcp/plan.js';
 import { PLAN_ID_PATTERN, type PlanExpectation } from '../mcp/plan-store.js';
 import type { Hint, ToolError, ToolResult } from '../mcp/result.js';
 import {
   accountBlock,
   checkMediaUrl,
+  checkWriteBucket,
   choosePrivacyHint,
   consentLine,
   creatorBlock,
@@ -67,7 +73,6 @@ import {
   resolveOpenId,
   runPlanGuards,
   signalOpt,
-  takeWriteToken,
   waitIfAsked,
   type AppliedData,
   type ChunkPosition,
@@ -495,7 +500,13 @@ async function previewPost(
       args.brand_content_toggle === true,
       args.brand_organic_toggle === true,
     ),
-    meta: { rate_bucket: peekPublishBucket(api.profile, api.clock) },
+    meta: {
+      rate_bucket: peekPublishBucket(
+        api.profile,
+        api.clock,
+        publishRateLimits(api.settings),
+      ),
+    },
   };
 
   // § 2.6.1 step 4: no privacy level, no plan. The result still carries the
@@ -559,9 +570,9 @@ async function executePost(
 ): Promise<ToolResult<PostVideoData>> {
   const { api } = ctx;
 
-  // Step 2 — before any network, and before the plan is touched, so a refusal
-  // costs nothing but the round trip the caller did not make.
-  const refused = takeWriteToken(ctx);
+  // Step 2 — an empty bucket refuses before any network, and before the plan is
+  // touched; the token itself is only taken at step 7.
+  const refused = checkWriteBucket(ctx);
   if (refused !== undefined) return refused;
 
   // Step 3 — the same code path the preview ran, against live creator state and
@@ -607,7 +618,7 @@ async function executePost(
 
   // Steps 5–7.
   const guard = await runPlanGuards(ctx, planId, expectation, args.force === true);
-  if (guard !== undefined) return { ok: false, error: guard };
+  if (guard !== undefined) return guard;
 
   // Steps 8–9.
   const sender = videoSender(ctx, source.value, async (videoSource) =>
@@ -751,7 +762,13 @@ async function previewDraft(
       account: accountBlock(api.profile, openId),
       action: DRAFT_ACTION,
       payload: { source: source.value.block },
-      meta: { rate_bucket: peekPublishBucket(api.profile, api.clock) },
+      meta: {
+        rate_bucket: peekPublishBucket(
+          api.profile,
+          api.clock,
+          publishRateLimits(api.settings),
+        ),
+      },
     },
     hints: [plan.hint],
   };
@@ -765,7 +782,7 @@ async function executeDraft(
   const { api } = ctx;
 
   // Step 2.
-  const refused = takeWriteToken(ctx);
+  const refused = checkWriteBucket(ctx);
   if (refused !== undefined) return refused;
 
   // Step 3 — for a draft the whole of "re-resolve" is the source: there is no
@@ -785,7 +802,7 @@ async function executeDraft(
 
   // Steps 5–7.
   const guard = await runPlanGuards(ctx, planId, expectation, args.force === true);
-  if (guard !== undefined) return { ok: false, error: guard };
+  if (guard !== undefined) return guard;
 
   // Steps 8–9.
   const sender = videoSender(ctx, source.value, async (videoSource) =>

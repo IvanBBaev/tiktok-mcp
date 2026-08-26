@@ -1,61 +1,125 @@
 # Security Policy
 
+This file is the **disclosure policy**: which versions get fixes, how to report a
+vulnerability privately, and what is in scope. It is deliberately short. The
+design-security document — threat model, secret handling and redaction, egress
+allowlist, transport hardening, write safety, supply chain — is
+[docs/SECURITY.md](docs/SECURITY.md).
+
+## Supported versions
+
+`tiktok-mcp-ai` is **pre-1.0 and not yet released**: there is no published
+version, so today there is nothing to backport to. Once a release exists:
+
+| Version             | Supported                          |
+| ------------------- | ---------------------------------- |
+| Latest release      | Yes                                |
+| Any earlier release | No — upgrade to the latest release |
+| `main` (unreleased) | Yes, as the branch a fix lands on  |
+
+This is a solo-maintained project. There is no LTS branch and no backporting: a
+security fix ships in the next release cut from `main`, in a patch if it can be
+one. While the version is `0.x` that release may also carry breaking changes —
+see [docs/SECURITY.md § Compatibility and deprecation policy](docs/SECURITY.md#compatibility-and-deprecation-policy),
+whose security exception says exactly this.
+
 ## Reporting a vulnerability
 
-Please report security issues **privately** to
-**Ivan Baev <ivanbbaev@gmail.com>**, or via a
-[GitHub security advisory](https://github.com/IvanBBaev/tiktok-mcp/security/advisories/new).
-Do not open a public issue for anything exploitable. I aim to acknowledge a
-report within a few days and will credit you in the release notes unless you
-prefer to stay anonymous.
+**Do not open a public issue for anything exploitable.** Use one of these:
+
+1. **Preferred — GitHub private vulnerability reporting.** Repository
+   **Security** tab →
+   [**Report a vulnerability**](https://github.com/IvanBBaev/tiktok-mcp/security/advisories/new).
+   The report stays private to you and the maintainer, the whole exchange lives
+   next to the code, and it is the channel that can turn into a published GitHub
+   Security Advisory with a CVE if the finding warrants one.
+2. **Fallback — email.** Ivan Baev, **ivanbbaev@gmail.com**. Use this if the
+   Security tab is unavailable to you for any reason.
+
+There is **no PGP key, no `security@` address and no bug bounty** — please do not
+wait for any of them, and treat any claim that they exist as false.
+
+A useful report says what the vulnerability is, which version or commit you
+tested, the configuration it needs (transport, `TT_WRITE_MODE`, which tool
+packages, whether `TT_MEDIA_ROOT` is set), and the smallest reproduction you
+have. **Never paste a real `TT_CLIENT_SECRET`, OAuth token or env file** into a
+report — redact them; they are not needed to demonstrate a finding.
 
 For non-sensitive bugs, a normal
-[GitHub issue](https://github.com/IvanBBaev/tiktok-mcp/issues) is fine.
+[GitHub issue](https://github.com/IvanBBaev/tiktok-mcp/issues) is the right
+place.
 
-## Security model (summary)
+## What to expect
 
-`tiktok-mcp-ai` is a local MCP server that talks to the official TikTok for
-Developers APIs on your behalf. The full threat model lives in
-[docs/SECURITY.md](docs/SECURITY.md); the essentials:
+- **Acknowledgement within a few days.** Not hours — one person maintains this,
+  in their own time.
+- An assessment of whether it is in scope and what severity I think it carries,
+  with reasoning you are welcome to argue with.
+- A fix in the next release once one is agreed, and a `Security` entry in
+  [CHANGELOG.md](CHANGELOG.md) describing it.
+- **Credit in the release notes and the advisory**, unless you prefer to stay
+  anonymous — say so and you will not be named.
 
-- **Transport.** `stdio` by default — no listening socket. The optional
-  Streamable HTTP transport binds loopback, validates `Origin`/`Host` (even on
-  loopback, against DNS rebinding), and **requires** a bearer token
-  (`TT_HTTP_TOKEN`, constant-time comparison); a non-loopback bind additionally
-  requires TLS in front or an explicit `TT_HTTP_INSECURE=1`.
-- **Credentials.** OAuth 2.0 (PKCE) user tokens and the app client secret are
-  stored in a local env file, never a password. **No secret is ever written to
-  stdout, stderr, an MCP log, a tool result, an error message, a plan preview, or
-  the publish journal** — redaction is a core primitive below every sink.
-- **Write safety.** The four publishing tools are plan-then-execute: a call
-  without a `plan_id` only previews and mints a single-use, digest-bound token;
-  executing runs exactly the previewed payload. There is no way to post other
-  than the payload a human could see, and a retry cannot double-post.
-- **Network.** Egress is allowlisted — data calls reach only
-  `open.tiktokapis.com`, uploads only the anchored TikTok upload hosts, and the
-  OAuth authorize redirect only `www.tiktok.com`; all https/443, with
-  `redirect: "error"` so a 3xx to any other host is never followed.
-- **Local files.** `FILE_UPLOAD` reads only from `TT_MEDIA_ROOT` (fail-closed
-  when unset), with `realpath` containment and TOCTOU re-validation between plan
-  and execute.
-- **Env file.** Written owner-only (`0600`) on POSIX with atomic,
-  comment-preserving rewrites under a cross-process lock; on Windows the
-  `%LOCALAPPDATA%` profile ACLs are the boundary.
+These are intentions, not an SLA: nothing here promises a response time a solo
+maintainer cannot keep. In return, please allow a reasonable coordinated
+window — **90 days is the customary default** — before disclosing publicly, and
+tell me if you have a deadline of your own so we can plan around it rather than
+be surprised by it.
 
-## Hardened defaults
+## Scope
 
-Out of the box the server is read-only and least-privilege:
+**In scope** — anything in this repository that weakens the guarantees
+[docs/SECURITY.md](docs/SECURITY.md) claims, for example:
 
-- Default tool packages are `core` (the read tools only) — the four write tools
-  are not registered unless you opt in, and a read-only deployment's login scopes
-  never carry posting authority.
-- Write mode defaults to `plan` (preview + `plan_id`); `apply` (no injection
-  resistance) is opt-in for trusted automation only.
-- Local-file posting is fail-closed until you set `TT_MEDIA_ROOT`.
-- The AIGC (`is_aigc`) label defaults on; the upstream unaudited-app limits
-  (SELF_ONLY, 5 users/24h) are honored, not circumvented.
-- Results are size-budgeted and secrets are redacted everywhere; logs go to
-  stderr only, keeping stdout pure JSON-RPC.
+- a secret (`TT_CLIENT_SECRET`, an access or refresh token, `TT_HTTP_TOKEN`, an
+  `upload_token`) reaching stdout, stderr, a log, a tool result, an error
+  message, a plan preview or the publish journal;
+- a way to reach a host outside the documented egress allowlist, or to have the
+  account bearer token sent to an upload host;
+- a way to read or upload a file outside `TT_MEDIA_ROOT`, or to change the bytes
+  between the plan preview and the execute;
+- a way to publish content that differs from the previewed payload, to bypass
+  the `plan_id` gate, or to double-post on a retry;
+- an authentication or `Origin`/`Host` bypass on the HTTP transport;
+- env file or journal permissions weaker than documented on POSIX;
+- a supply-chain weakness in how this repository builds, tests or publishes
+  itself.
+
+**Out of scope:**
+
+- **Vulnerabilities in TikTok's own API, platform or web properties.** This
+  project is an independent client of the official TikTok for Developers APIs
+  and cannot fix them — report those to TikTok, not here.
+- **Anything that presupposes the attacker already has the credential**, i.e.
+  that requires the attacker to already hold your `TT_CLIENT_SECRET`, your OAuth
+  tokens, or read access to your env file. Those _are_ the keys; possessing them
+  is the compromise, not a path to one.
+- Attacks by a **local root/administrator user**, or by a **compromised MCP
+  client** — both are declared non-goals in
+  [docs/SECURITY.md § Threat model](docs/SECURITY.md#threat-model), because the
+  client sees every tool result by design.
+- The **accepted risks recorded in docs/SECURITY.md**, unless you can defeat the
+  compensating controls: notably DNS resolve-and-pin being deferred out of v1
+  (an attacker who controls DNS for an allowlisted name still has to defeat TLS).
+- Reports from automated scanners with no demonstrated impact, missing security
+  headers on the GitHub Pages documentation site, and findings in dependencies
+  that are already covered by an upstream advisory — Dependabot is watching for
+  those.
+
+## What is already automated
+
+Reported findings are triaged on top of gates that already run in CI:
+
+- **CodeQL** (`javascript-typescript`, `security-and-quality` queries) on every
+  push to `main`, every pull request, and weekly —
+  [`.github/workflows/codeql.yml`](.github/workflows/codeql.yml).
+- **Dependabot** on npm (root and `extension/`) and on GitHub Actions, weekly —
+  [`.github/dependabot.yml`](.github/dependabot.yml).
+- **`npm audit --omit=dev --audit-level=high`** in CI, which fails the build on a
+  high or critical advisory in a runtime dependency.
+- **GitHub Actions pinned by commit SHA**, and **npm publishing via trusted
+  publishing (OIDC) with provenance** — there is no long-lived npm token in this
+  repository. See [docs/SECURITY.md § Supply chain / code](docs/SECURITY.md#supply-chain--code).
 
 ## Trademark
 

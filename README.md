@@ -26,8 +26,8 @@ envelope that hides failures inside HTTP 200 responses).
 [Requirements](#requirements) · [Setup](#setup) ·
 [Configure credentials](#configure-credentials) · [Run / debug](#run--debug) ·
 [Develop](#develop) · [Tools](#tools) · [Security notes](#security-notes) ·
-[Project documentation](#project-documentation) · [Support](#support) ·
-[Trademark](#trademark)
+[Uninstall](#uninstall) · [Project documentation](#project-documentation) ·
+[Support](#support) · [Trademark](#trademark)
 
 _Built and maintained in my own time — if it helps, a
 [GitHub Sponsors](https://github.com/sponsors/IvanBBaev) tip keeps it going.
@@ -115,8 +115,9 @@ model can poll `tiktok_get_publish_status` for the terminal state.
   `npx tiktok-mcp-ai login` stores a refresh token — never a password. TikTok's
   hex `code_challenge` deviation from RFC 7636 is handled correctly.
 - **Multi-account profiles**: one TikTok app, many creator accounts
-  (`TT_PROFILE_<NAME>_*`); an optional `account` argument routes a single call
-  via `AsyncLocalStorage`, so parallel calls with different accounts never bleed.
+  (`TT_PROFILE_<NAME>_*`); an optional `account` argument routes a single call.
+  The profile is resolved per call and threaded explicitly through that call's
+  own API context, so parallel calls with different accounts never bleed.
 - **Tool packages**: load only the groups you need via `TT_TOOL_PACKAGES`
   (default profile `core` = all reads; `all` enables the write tools too).
 - Least-privilege controls: package deny/read-only lists (`TT_PACKAGES_DENY`,
@@ -127,7 +128,10 @@ model can poll `tiktok_get_publish_status` for the terminal state.
   media-upload hosts (`open-upload.tiktokapis.com` and the anchored regional
   `upload.<region>.tiktokapis.com` pattern), and `www.tiktok.com` for the OAuth
   authorize redirect — matched dot-anchored on the parsed hostname, https/443
-  only, with `redirect: "error"`. Nothing else is reachable.
+  only, with `redirect: "error"`. Nothing else is reachable. One honest
+  exception: the internal, unsupported `TT_OAUTH_BASE_URL` can move the OAuth
+  origin, and only there — it is honoured solely when it parses as a loopback
+  origin, so it can point the flow at a local stub and at nothing else.
 - Resilience: per-request timeout, a three-class retry matrix (reads retried
   with backoff and `Retry-After`; publish inits **never** retried; chunk PUTs
   replay-safe by byte range), a per-host concurrency semaphore, and a local
@@ -160,6 +164,12 @@ model can poll `tiktok_get_publish_status` for the terminal state.
 
 ## Setup
 
+You need your own TikTok developer app — this server ships no credentials.
+[docs/SETUP-TIKTOK-APP.md](docs/SETUP-TIKTOK-APP.md) is the full walkthrough
+(app, products, redirect URI, sandbox, the audit gate, domain verification);
+[docs/CLIENTS.md](docs/CLIENTS.md) has per-client configuration for Claude Code,
+Claude Desktop, VS Code and Cursor. The short version follows.
+
 From source (for development):
 
 ```bash
@@ -174,8 +184,10 @@ npx tiktok-mcp-ai
 ```
 
 Register it with an MCP client (Claude Desktop, VS Code Chat, the Inspector…) by
-pointing the server command at `npx`. The credentials go in the `env` block; the
-client key and secret are the only required values:
+pointing the server command at `npx`. **Credentials do not go in the client
+config** — the client key, the client secret and the tokens live in the env file
+below, which is written owner-only; a client's JSON usually is not, and often
+ends up in a dotfiles repo. Put only non-secret tuning in its `env` block:
 
 ```json
 {
@@ -184,8 +196,6 @@ client key and secret are the only required values:
       "command": "npx",
       "args": ["-y", "tiktok-mcp-ai"],
       "env": {
-        "TT_CLIENT_KEY": "…",
-        "TT_CLIENT_SECRET": "…",
         "TT_MEDIA_ROOT": "/path/to/your/media"
       }
     }
@@ -195,6 +205,8 @@ client key and secret are the only required values:
 
 `TT_MEDIA_ROOT` is only needed to post **local files** (`FILE_UPLOAD`); uploads
 are confined to that directory. Omit it for URL-based posting only.
+[docs/CLIENTS.md](docs/CLIENTS.md) has the same block per client, with the config
+file paths and where each client keeps its logs.
 
 **Claude Code plugin** (zero-config — installs the server wired up):
 
@@ -208,15 +220,15 @@ are confined to that directory. Omit it for URL-based posting only.
 Copilot Chat (agent mode) automatically, no manual `mcp.json`. Source:
 [extension/](extension/).
 
-The `client_secret` and the user tokens are read from
+The client key, the `client_secret` and the user tokens are read from
 `~/.config/tiktok-mcp-ai/.env` (POSIX) or `%LOCALAPPDATA%\tiktok-mcp-ai\.env`
-(Windows), or from real environment variables — see below.
+(Windows), or from real environment variables, which take precedence — see below.
 
 ### Quickstart
 
 Two required variables identify your TikTok app; everything else is optional
-tuning. Set them (in the env file or the real environment), then authorize the
-account you want to act as:
+tuning. Put them in the env file above, then authorize the account you want to
+act as:
 
 ```dotenv
 TT_CLIENT_KEY=your-app-client-key
@@ -246,9 +258,25 @@ npx tiktok-mcp-ai doctor
 
 `doctor` is an offline + online health check: it locates the env file, confirms
 the client key is present, checks token validity and expiry, makes one
-`user/info` probe, compares granted scopes against the configured packages, and
-reconciles the publish journal. It exits non-zero on hard failures, so it also
-works as a CI/readiness check. From inside a session you can also call the
+`user/info` probe, compares granted scopes against the configured packages,
+reports the publish journal, and warns when it is running from a stale npx
+cache. It exits non-zero on hard failures, so it also works as a CI/readiness
+check.
+
+For a machine consumer, `--json` prints the whole report as one JSON document on
+stdout — and nothing else, on every exit path:
+
+```bash
+npx tiktok-mcp-ai doctor --offline --json | jq '.tally, .exit_code'
+```
+
+The document is tagged (`"schema": "tiktok-mcp-ai/doctor-report"`, `"version"`)
+and holds `profile`, `offline`, one entry per check in report order with its
+findings (`severity`, `text`, optional `remediation`), the `tally` and the
+`exit_code`. It carries no timestamp, so two runs of the same configuration
+produce identical bytes. See
+[Troubleshooting § doctor](docs/TROUBLESHOOTING.md#run-doctor-first) for the
+field-by-field reference. From inside a session you can also call the
 `tiktok_get_auth_status` tool to see which profiles are authorized, their
 granted scopes, and token freshness — without exposing any secret.
 
@@ -313,8 +341,9 @@ One TikTok app can serve many accounts. The bare token keys
 profile; extra accounts use `TT_PROFILE_<NAME>_*` with the same keys.
 `TT_ACTIVE_PROFILE` selects the default, and every tool accepts an optional
 `account: "brand"` argument to run one call against another profile — the
-selection travels via `AsyncLocalStorage`, so parallel calls with different
-accounts cannot bleed into each other. Authorize an extra account with
+selection is resolved per call and passed down as an explicit parameter, and
+each call builds its own API context, so parallel calls with different accounts
+cannot bleed into each other. Authorize an extra account with
 `npx tiktok-mcp-ai login --profile brand`.
 
 ### Environment variables
@@ -384,7 +413,7 @@ read token cannot post. See [Security notes](#security-notes) for the full model
 - **VS Code**: install the **TikTok MCP** extension (above), or start the server
   from a `.vscode/mcp.json` registration and use it from Chat.
 - **MCP Inspector**: point it at `npx -y tiktok-mcp-ai`.
-- **Directly**: `npm start` (or `node build/src/index.js`).
+- **Directly**: `node build/src/index.js` (after `npm run build`).
 
 ### Command-line interface
 
@@ -398,7 +427,7 @@ active profile (`TT_ACTIVE_PROFILE`, or `--profile <name>`).
 | ------- | ------------ | ---------- |
 | `tiktok-mcp-ai` | Starts the MCP server. The transport (`stdio` default, or `http`) is chosen by `TT_TRANSPORT`; runs until `SIGINT`/`SIGTERM`. | `0` clean shutdown · `1` fatal startup error |
 | `tiktok-mcp-ai login` | One-time OAuth authorization-code + PKCE login: opens the browser, captures the loopback redirect (or manual paste), stores a refresh token. `--revoke` disconnects an account; `--purge-journal` also deletes journal data. | `0` success · `1` login/revoke failed |
-| `tiktok-mcp-ai doctor` | Offline + online health check: env file located, client key present, token validity/expiry, one `user/info` probe, granted scopes vs. enabled packages, journal reconciliation. | `0` healthy · non-zero on hard failures |
+| `tiktok-mcp-ai doctor` | Offline + online health check: env file located, client key present, token validity/expiry, one `user/info` probe, granted scopes vs. enabled packages, the publish journal, npx-cache staleness. `--offline` skips the probe; `--json` prints the report as one JSON document. | `0` healthy · non-zero on hard failures |
 
 ## Develop
 
@@ -445,12 +474,13 @@ summarized to their first sentence; the full text an agent sees is in
 
 <!-- GENERATED:TOOLS:END -->
 
-The table lists what this version actually registers. The publishing tools —
-`tiktok_get_creator_info`, `tiktok_get_publish_status`,
-`tiktok_list_publish_journal` and the four `publish-write` tools — are designed
-and specified in [docs/TOOLS.md](docs/TOOLS.md) but are not registered yet; the
-table grows itself as they land, since it is generated from the registry rather
-than written by hand.
+The table lists what this version actually registers — it is generated from the
+registry rather than written by hand, so it cannot drift.
+[docs/TOOLS.md](docs/TOOLS.md) has the full contract for each tool: input and
+output schemas, the plan/execute protocol, the error catalog and the hints
+vocabulary. Which of these tools a client actually sees depends on
+`TT_TOOL_PACKAGES`; a tool whose scopes no profile has granted is still listed,
+with an `[UNAVAILABLE: …]` prefix naming the `login` command that fixes it.
 
 All tools carry MCP annotations (`readOnlyHint`, `destructiveHint`,
 `idempotentHint`, `openWorldHint`) so clients can apply the right confirmation
@@ -549,18 +579,59 @@ there is no way to execute a payload other than the one previewed.
   as ephemeral; the server keeps no database — the env file and the publish
   journal are the only state.
 
-See [SECURITY.md](SECURITY.md) for the reporting channel and the hardened
-defaults, and [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
+The list above is the summary. [docs/SECURITY.md](docs/SECURITY.md) is the
+design-security document behind it: threat model, secret handling and redaction,
+the egress allowlist, local file confinement, write safety, transport hardening
+and the supply-chain posture. To report a vulnerability, use
+[SECURITY.md](SECURITY.md) — the disclosure policy: supported versions, how to
+report privately, and what is in scope.
+
+## Uninstall
+
+There is no database and nothing outside one directory. Everything this server
+writes lives beside the resolved env file — `~/.config/tiktok-mcp-ai/` on
+macOS/Linux, `%LOCALAPPDATA%\tiktok-mcp-ai\` on Windows, or the directory of
+`TT_ENV_FILE` if you set it:
+
+| File | What it holds |
+| ---- | ------------- |
+| `.env` | Client key, client secret, access and refresh tokens, your `TT_*` settings |
+| `journal.ndjson` (+ `journal.ndjson.1`) | Append-only publish attempts: timestamp, profile, `open_id`, tool, title excerpt, `publish_id`, outcome. No media, no tokens |
+| `.env.lock` | The cross-process write lock — transient, or left behind by a crash |
+| `.env.pre-schema<N>` | Backup written by a schema migration; it still contains credentials |
+
+To remove it all:
+
+```bash
+# 1. revoke the token with TikTok and clear it locally (repeat per profile)
+npx tiktok-mcp-ai login --revoke --profile DEFAULT
+
+# 2. delete the local state (add --purge-journal above to drop the journal in step 1)
+rm -rf ~/.config/tiktok-mcp-ai
+
+# 3. remove the package if it was installed globally
+npm uninstall -g tiktok-mcp-ai
+```
+
+Then remove the server entry from your MCP client's config (or uninstall the
+Claude Code plugin / VS Code extension). Revoking in TikTok's own account
+settings is independent of this server and worth doing if you want certainty;
+deleting the developer app removes the app-side record entirely.
+[docs/TROUBLESHOOTING.md § Uninstall and data removal](docs/TROUBLESHOOTING.md#uninstall-and-data-removal)
+has the long form, including the Windows paths.
 
 ## Project documentation
 
 | Document | Contents |
 | -------- | -------- |
+| [docs/SETUP-TIKTOK-APP.md](docs/SETUP-TIKTOK-APP.md) | Operator walkthrough of the TikTok developer portal: app, products, scopes, the redirect URI, sandbox vs. production, the audit gate, domain verification |
+| [docs/CLIENTS.md](docs/CLIENTS.md) | Per-client configuration: Claude Code, Claude Desktop, VS Code, Cursor, the MCP Inspector — and where each client keeps the logs |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Doctor-first triage: what each check means, the common failure modes by error code, uninstall and data removal |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layered architecture, bootstrap, transport, tool-spec pattern, manifest & registration, HTTP client and retry matrix, write safety (plan store, journal), pagination, redaction, error taxonomy |
 | [docs/TOOLS.md](docs/TOOLS.md) | Complete tool catalog with input/output schemas, annotations, the plan/execute contract, the error catalog and the hints vocabulary |
 | [docs/AUTH.md](docs/AUTH.md) | OAuth flows, the PKCE hex deviation, token lifecycle and refresh, revocation, multi-account profiles, the scope model |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every `TT_*` variable with defaults; env-file resolution (POSIX/Windows), permissions, profiles, the env-file lock and journal knobs |
-| [docs/SECURITY.md](docs/SECURITY.md) | Design threat model: assets, adversaries, secret handling, redaction, egress control, write safety, platform-compliance posture |
+| [docs/SECURITY.md](docs/SECURITY.md) | Design security: threat model, secret handling, redaction, egress control, write safety, transport hardening, supply chain, platform-compliance posture |
 | [docs/TIKTOK-API.md](docs/TIKTOK-API.md) | The upstream API landscape: endpoints, scopes, rate limits, the audit gate, media constraints, the chunk algorithm, the error envelope |
 | [docs/TESTING.md](docs/TESTING.md) | Test strategy: `node:test`, fetch mocking, the manifest snapshot, coverage gates, the CI matrix |
 | [docs/CORNER-CASES.md](docs/CORNER-CASES.md) | Catalog of corner cases (CC-*) every implementation work package must test |
@@ -568,7 +639,7 @@ defaults, and [docs/SECURITY.md](docs/SECURITY.md) for the full threat model.
 | [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) | Work packages, dependency spine, closed decision points, the road to v1.0 |
 | [docs/TASK-BREAKDOWN.md](docs/TASK-BREAKDOWN.md) | Wave/task decomposition for parallel development |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Short phase outline and out-of-scope list |
-| [CONTRIBUTING.md](CONTRIBUTING.md) / [SECURITY.md](SECURITY.md) | Dev setup, gates and conventions / security model and vulnerability reporting |
+| [CONTRIBUTING.md](CONTRIBUTING.md) / [SECURITY.md](SECURITY.md) | Dev setup, gates and conventions / disclosure policy: supported versions, private reporting, scope |
 | [WORKLOG.md](WORKLOG.md) / [CHANGELOG.md](CHANGELOG.md) | Detailed work journal / user-facing changelog |
 
 ## Support
