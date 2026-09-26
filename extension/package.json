@@ -1,7 +1,7 @@
 {
   "name": "tiktok-mcp-ai",
   "displayName": "TikTok MCP",
-  "description": "Drive TikTok from VS Code Copilot Chat — 11 tools over the Display and Content Posting APIs, with plan-then-execute write safety, OAuth 2.0 (PKCE) authorization and an append-only publish journal.",
+  "description": "Unofficial: drive TikTok from VS Code Copilot Chat — 11 tools over the Display and Content Posting APIs, with plan-then-execute write safety, OAuth 2.0 (PKCE) authorization and an append-only publish journal. Not affiliated with, endorsed by, or sponsored by TikTok or ByteDance.",
   "version": "0.7.0",
   "publisher": "ivanbbaev",
   "author": "Ivan Baev",

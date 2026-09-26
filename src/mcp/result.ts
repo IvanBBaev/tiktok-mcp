@@ -18,6 +18,11 @@
  * re-introduce a secret and no secret can be split across the elision point
  * (TOOLS.md §§ 2.4, 2.5).
  *
+ * The two § 5.2 hint caps are declared here, but at runtime they bind only to
+ * the notes truncation itself appends — every other hint in the server is a
+ * literal a tool writes. See {@link MAX_HINTS} for what that meant and what now
+ * checks it.
+ *
  * Layering: `core ← api ← mcp ← tools`.
  */
 
@@ -28,6 +33,18 @@ import { redactText } from '../core/redact.js';
 export type HintType =
   'wait' | 'poll' | 'approval_required' | 'user_action' | 'reauth' | 'note';
 
+/**
+ * The same vocabulary as a value, so it can be iterated rather than trusted.
+ *
+ * 2026-09-01: every member was checked against the emitters under `src/` —
+ * `wait` 1, `poll` 3, `approval_required` 1, `user_action` 6, `reauth` 2,
+ * `note` 9. All six are live; there is no second `wait_for_audit` hiding here.
+ *
+ * That is recorded as a dated verification and not as a guarantee: a census by
+ * grep is stale the moment someone adds a type, which is why
+ * `test/result.test.ts` now walks this list for emitters the way it already
+ * walks {@link USER_ACTIONS}.
+ */
 export const HINT_TYPES: readonly HintType[] = Object.freeze([
   'wait',
   'poll',
@@ -36,6 +53,41 @@ export const HINT_TYPES: readonly HintType[] = Object.freeze([
   'reauth',
   'note',
 ] as const);
+
+/**
+ * Closed vocabulary — the operator-side steps a `user_action` hint may name.
+ *
+ * Enumerable at runtime for the same reason as {@link HINT_TYPES}: a closed
+ * vocabulary nothing can iterate is a comment rather than a contract, and
+ * `test/result.test.ts` walks this list to check every member is one some code
+ * path actually emits.
+ *
+ * Membership is decided by the one question TOOLS.md § 5.1 asks — is this a
+ * step only the human or operator can take *next, before this call can
+ * proceed*? Two members have been weighed against it and answered oppositely,
+ * which is not an inconsistency but the test doing its job:
+ *
+ * - `wait_for_audit` was a member until 2026-08-31 and failed it. An unaudited
+ *   app is a standing condition of the installation, reported alongside a
+ *   preview or a successful post — a flow that continues, and which a
+ *   `user_action` would tell a model to halt. § 4 (flow 2) and § 5.1 both give
+ *   that case to `note`.
+ * - `move_file` and `host_media` were emitted by nothing until 2026-09-01 and
+ *   pass it. `file_outside_media_root` and `url_prefix_unverified` are
+ *   non-retryable refusals that end the call with nothing created, and neither
+ *   moving a file nor re-hosting media is something the model can do for
+ *   itself. They ride only on that shape: past an init the attempt exists
+ *   upstream (CC-B4) and the next step is a status poll, not a human.
+ */
+export const USER_ACTIONS = Object.freeze([
+  'login',
+  'open_tiktok_app',
+  'move_file',
+  'host_media',
+  'configure_server',
+] as const);
+
+export type UserAction = (typeof USER_ACTIONS)[number];
 
 export interface Hint {
   type: HintType;
@@ -57,14 +109,8 @@ export interface Hint {
   plan_id?: string;
   /** approval_required — absolute ISO-8601 UTC */
   expires_at?: string;
-  /** user_action */
-  action?:
-    | 'login'
-    | 'open_tiktok_app'
-    | 'move_file'
-    | 'host_media'
-    | 'configure_server'
-    | 'wait_for_audit';
+  /** user_action — see {@link USER_ACTIONS} for why the audit gate is not here. */
+  action?: UserAction;
   /** reauth — exact CLI line */
   command?: string;
   /** reauth */
@@ -128,11 +174,162 @@ export interface TruncatedResult {
   truncated: boolean;
 }
 
-/** TOOLS.md § 5.2 — at most three hints per result. */
-const MAX_HINTS = 3;
+/**
+ * TOOLS.md § 5.2 — at most three hints per result.
+ *
+ * **2026-09-01 — where the caps bind.** Both this and {@link MAX_HINT_CHARS}
+ * were read from exactly two places, `withNote` and `elisionNote`, and both of
+ * those run only on the notes *truncation itself* appends to a result it has
+ * just shortened. No hint a tool emits passes through either: every one is an
+ * array literal or a `Hint[]` accumulator under `src/tools/`, assigned straight
+ * onto the envelope. So for the hints a caller actually sees, the caps were
+ * documentation with no enforcement point — the shape the `wait_for_audit`
+ * defect had (see {@link USER_ACTIONS}): true on the day it was written, with
+ * nothing in the repo able to notice the day it stopped being true.
+ *
+ * Both are now exported, and `test/result.test.ts` walks the hint construction
+ * sites under `src/` against them. Several tool tests already asserted `<= 3`
+ * and `<= 300`, but only on the paths they happen to execute and with the two
+ * numbers retyped as literals; the walk covers construction sites rather than
+ * executions, and reads the numbers from here.
+ *
+ * Two mechanisms were weighed and rejected:
+ *
+ * - **Truncating hints at serialization.** A hint is what tells a model what to
+ *   do next. § 5.2 rule 4 orders them most-actionable-first, so the one a
+ *   truncator would drop is the least actionable — but "least actionable" is
+ *   not "unnecessary", and a silent drop is the worse failure of the two:
+ *   nothing downstream can tell that advice went missing, which is exactly why
+ *   §§ 2.4/CC-G7 make dropped *payload* announce itself with a marker and a
+ *   note. There is no equivalent receipt available for a dropped hint, because
+ *   the result is by definition already out of hint slots.
+ * - **Throwing on an over-cap result.** That trades a cosmetic ceiling for an
+ *   outage: a post that already succeeded upstream would come back to the
+ *   caller as a server error because this server wrote one sentence too many.
+ *
+ * A walk costs nothing at runtime and fails in CI instead. It is not total, and
+ * the test states precisely where it stops seeing: hint text that interpolates
+ * a value is measured with a nominal per-placeholder allowance, and three sites
+ * compose their hints from an array a *caller* built, which no text scan can
+ * bound. The deepest of those three reaches exactly three hints today, with no
+ * headroom left.
+ */
+export const MAX_HINTS = 3;
 
-/** TOOLS.md § 5.2 — a hint sentence never exceeds 300 characters. */
-const MAX_HINT_CHARS = 300;
+/**
+ * TOOLS.md § 5.2 — a hint sentence never exceeds 300 characters.
+ *
+ * Measured on `Hint.text` alone; the structured fields beside it are not part
+ * of the budget. See {@link MAX_HINTS} for where this binds and what checks it.
+ *
+ * **2026-09-02 — why one runtime enforcement and not a general one.** This cap
+ * is read at runtime in exactly one place, `elisionNote`, and that is the
+ * one place where it should be: the resume cursor is the only value in a hint
+ * whose length no static reading can bound. Everywhere else a hint is a fixed
+ * server template plus values admitted by {@link hintToken} /
+ * {@link hintEnum} — bounded by {@link MAX_HINT_TOKEN_CHARS} or by a
+ * server-owned vocabulary — so an over-long hint is a bug in *this server's*
+ * templates, which CI can see before the code ships and a caller never can.
+ *
+ * A general runtime guard was considered and rejected on the same grounds as
+ * the two mechanisms in {@link MAX_HINTS}, plus one that is specific to this
+ * cap: what a truncator would cut is the *end* of the sentence, and every poll
+ * hint in the server ends with the negative imperative that keeps a slow
+ * publish from becoming two posts ("Do not re-post.", "Do not post again.",
+ * "do not re-post."). Clipping a hint at 300 characters would strip exactly the
+ * half that prevents the accident, on the path where a model was about to be
+ * told to poll. Dropping the hint outright is worse still — no advice at all —
+ * and throwing turns a post that already succeeded upstream into an error. So
+ * the enforcement point stays where a failure costs nothing: the source walk in
+ * `test/result.test.ts`, which measures construction sites rather than the
+ * executions a runtime check would happen to see.
+ */
+export const MAX_HINT_CHARS = 300;
+
+/**
+ * TOOLS.md § 5.2 rule 3 — the longest upstream-originated identifier a hint may
+ * inline.
+ *
+ * The rule admits exactly two upstream-touched shapes into hint text (see the
+ * document for why): a **single opaque identifier** the recommended next call
+ * must quote back, and a **member of a closed vocabulary this server owns**.
+ * {@link hintToken} decides the first, {@link hintEnum} the second. Everything
+ * else — titles, nicknames, upstream error text, lists of ids — stays in `data`.
+ *
+ * 64 is not cosmetic. It is the largest value that keeps every hint that
+ * inlines an identifier inside {@link MAX_HINT_CHARS} with room to spare: the
+ * tightest of them (`journalUnavailableNote`) spends 174 characters on its own
+ * template, and the widest (`stillProcessingAfterApplyHint`) spends 116 plus a
+ * 19-character status, a 24-character timestamp and a small integer. Observed
+ * TikTok `publish_id`s are about half of it (`v_pub_url~v2.7300000000000000001`
+ * is 31), so the cap refuses hostile lengths without clipping honest ones.
+ */
+export const MAX_HINT_TOKEN_CHARS = 64;
+
+/**
+ * RFC 3986 *unreserved* characters, and an alphanumeric first character.
+ *
+ * The charset is the point, not an accident of what TikTok happens to send:
+ * a hint is an instruction channel, so a value entering it must not be able to
+ * carry a line break, a quote, a colon or a bracket — the punctuation with
+ * which upstream text would stop being a name and start being a sentence. The
+ * leading-alphanumeric rule additionally stops a value that would render as a
+ * list bullet or a command-line flag.
+ */
+const HINT_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/u;
+
+/**
+ * An upstream identifier as it may appear in hint text, or `undefined` when it
+ * may not.
+ *
+ * `undefined` is deliberately the "refuse" answer rather than a truncation or
+ * an escape: a clipped identifier is worse than none — a model would quote it
+ * back and get `invalid_publish_id` — and escaping would put upstream bytes in
+ * the channel anyway. Callers fall back to a template that names no identifier
+ * and leave the raw value in the structured field beside it, which is where
+ * § 5.2's own last sentence puts upstream data.
+ */
+export function hintToken(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (value.length === 0 || value.length > MAX_HINT_TOKEN_CHARS) return undefined;
+  return HINT_TOKEN_PATTERN.test(value) ? value : undefined;
+}
+
+/**
+ * The member of a server-owned vocabulary an upstream value selects, if any.
+ *
+ * What gets interpolated on a match is this server's own literal — the upstream
+ * string only chose which one — so a matched value is server-owned text under
+ * § 5.2 rule 3, not upstream text that happened to look safe. A value matching
+ * nothing is free text by definition and the caller must use a template that
+ * does not name it.
+ *
+ * This deliberately does not validate anything upstream: `api/publish.ts` still
+ * reports an unrecognized status rather than rejecting it, and `data.status`
+ * still carries whatever arrived. The narrowing happens here, at the hint
+ * boundary, and nowhere else.
+ */
+export function hintEnum<T extends string>(
+  value: string | undefined,
+  vocabulary: readonly T[],
+): T | undefined {
+  return vocabulary.find((member) => member === value);
+}
+
+/**
+ * How a hint names an identifier it wants quoted back into the next call.
+ *
+ * One helper rather than a guard per site: the three `poll` hints in the server
+ * all face the same choice, and the fallback has to be a phrase a model can act
+ * on. `label` is the structured field on the very same hint object (§ 5.1
+ * declares `publish_id` for `poll`), so the fallback is a precise reference
+ * rather than the "vague reference" § 5.2 rule 1 forbids — the value is one
+ * field away, in the typed form that was always the honest place for it.
+ */
+export function quotedHintToken(label: string, value: string | undefined): string {
+  const token = hintToken(value);
+  return token === undefined ? `this hint's ${label}` : `${label} "${token}"`;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -187,16 +384,11 @@ function withNote(hints: Hint[] | undefined, text: string): Hint[] | undefined {
   return [...existing, { type: 'note', text }];
 }
 
-function elisionNote(
-  returned: number,
-  total: number,
-  budget: number,
-  cursor?: string,
-): string {
-  const head = `Result truncated to fit the ${budget}-character response budget: ${returned} of ${total} items returned.`;
-  const withCursor = `${head} Call the same tool again with cursor "${cursor}" for the rest.`;
-  if (cursor !== undefined && withCursor.length <= MAX_HINT_CHARS) return withCursor;
-  return `${head} Narrow the request (fewer ids, a smaller page size) to see the rest.`;
+function elisionNote(returned: number, total: number, budget: number): string {
+  return (
+    `Result truncated to fit the ${budget}-character response budget: ${returned} of ${total} ` +
+    'items returned. Narrow the request (fewer ids, a smaller page size) to see the rest.'
+  );
 }
 
 function dropNote(budget: number): string {
@@ -221,20 +413,21 @@ function largestArrayKey(data: Record<string, unknown>): string | undefined {
   return best;
 }
 
-function existingTruncation(data: unknown): TruncationInfo | undefined {
-  if (!isRecord(data) || !isRecord(data['meta'])) return undefined;
-  const marker = data['meta']['truncation'];
-  return isRecord(marker) ? (marker as unknown as TruncationInfo) : undefined;
-}
-
-function markerFor(
-  previous: TruncationInfo | undefined,
+/**
+ * `meta` of an elided result. Every cursor the tool put there points past the
+ * *whole* page it fetched, so after items were cut from that page a cursor
+ * would resume beyond them and the cut items would never be seen. There is no
+ * cursor for "item N" to put in its place — upstream cursors are opaque — so
+ * the elided result carries none and its note says to narrow the request.
+ */
+function elidedMeta(
+  data: Record<string, unknown>,
   returned: number,
-): TruncationInfo {
-  const marker: TruncationInfo = { truncated: true, reason: 'char_budget', returned };
-  if (previous?.resume_cursor !== undefined)
-    marker.resume_cursor = previous.resume_cursor;
-  return marker;
+): Record<string, unknown> {
+  const meta = isRecord(data['meta']) ? { ...data['meta'] } : {};
+  delete meta['next_cursor'];
+  meta['truncation'] = { truncated: true, reason: 'char_budget', returned };
+  return meta;
 }
 
 /** The envelope with `data[key]` cut to its first `returned` items. */
@@ -246,18 +439,12 @@ function withElision(
   total: number,
   budget: number,
 ): ToolResult<unknown> {
-  const previous = existingTruncation(data);
-  const marker = markerFor(previous, returned);
-  const meta = isRecord(data['meta']) ? { ...data['meta'] } : {};
-  meta['truncation'] = marker;
+  const meta = elidedMeta(data, returned);
   const items = data[key] as unknown[];
   return {
     ...result,
     data: { ...data, [key]: items.slice(0, returned), meta },
-    hints: withNote(
-      result.hints,
-      elisionNote(returned, total, budget, marker.resume_cursor),
-    ),
+    hints: withNote(result.hints, elisionNote(returned, total, budget)),
   };
 }
 
@@ -267,8 +454,7 @@ function withMetaOnly(
   data: Record<string, unknown>,
   budget: number,
 ): ToolResult<unknown> {
-  const meta = isRecord(data['meta']) ? { ...data['meta'] } : {};
-  meta['truncation'] = markerFor(existingTruncation(data), 0);
+  const meta = elidedMeta(data, 0);
   return { ...result, data: { meta }, hints: withNote(result.hints, dropNote(budget)) };
 }
 
@@ -286,7 +472,7 @@ function withoutData(result: ToolResult<unknown>, budget: number): ToolResult<un
  * Redact, then shrink the envelope until it fits `budgetChars`.
  *
  * The ladder, in order: (1) the whole result; (2) the largest top-level array
- * under `data`, cut to the most trailing items that still fit — a binary
+ * under `data`, cut to the longest run of leading items that fits — a binary
  * search, so a 10 000-item page costs ~14 serializations; (3) `data` reduced
  * to its `meta` block; (4) the CC-G7 floor. Only the first level is free of a
  * `note` hint; every other level explains itself.

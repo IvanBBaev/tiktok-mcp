@@ -58,12 +58,14 @@ import {
   creatorBlock,
   dispatchWrite,
   draftInboxHint,
+  localRefusal,
   mintPlan,
   resolveOpenId,
   runPlanGuards,
   signalOpt,
   waitIfAsked,
   type AppliedData,
+  type DispatchOptions,
   type DraftPreview,
   type SourceBlock,
   type WritePreview,
@@ -162,18 +164,19 @@ function digestedPayload(
 }
 
 /**
- * The upstream half of a dispatch. `report` fires the moment a `publish_id`
- * exists, which is what lets a later failure be classified as an attempt that
- * happened rather than one that did not (CC-B4) — for photos there is no
- * second phase after it, but the classification still depends on the call.
+ * The upstream half of a dispatch. A photo post is its init alone — TikTok
+ * pulls the images itself, so there is no second phase that could fail behind
+ * the `publish_id` — which is why this sender never calls `report`: every
+ * failure it can raise is pre-init, and the `publish_id` is simply the value
+ * it resolves with (CC-B4).
  */
 function photoSender(
   ctx: ToolCtx,
   postInfo: Record<string, unknown>,
   postMode: 'DIRECT_POST' | 'MEDIA_UPLOAD',
   args: CarouselArgs,
-): (report: (publishId: string) => void) => Promise<string> {
-  return async (report) => {
+): DispatchOptions['send'] {
+  return async () => {
     const started = await initPhotoPost(ctx.api, {
       postInfo,
       postMode,
@@ -181,15 +184,15 @@ function photoSender(
       photoCoverIndex: args.photo_cover_index ?? 0,
       ...signalOpt(ctx),
     });
-    report(started.publishId);
     return started.publishId;
   };
 }
 
 /**
- * § 3.10: the duplicate guard excerpts title *and* description. A carousel is
- * frequently untitled with all the text in the description, and excerpting only
- * the title would make every such post look identical to the guard.
+ * § 3.10: the journal's `title_excerpt` takes title *and* description. A
+ * carousel is frequently untitled with all the text in the description, and
+ * excerpting only the title would make every such line look identical to the
+ * person reading the journal (the guard itself matches on the payload digest).
  */
 function excerptText(title: string | undefined, description: string | undefined): string {
   return [title, description].filter((part) => part !== undefined).join(' ');
@@ -495,7 +498,7 @@ export const postPhotosTool = defineTool<PostPhotosInput, PostPhotosData>({
     }
 
     const carouselError = checkCarousel(args, ctx.api.settings.verifiedUrlPrefixes);
-    if (carouselError !== undefined) return { ok: false, error: carouselError };
+    if (carouselError !== undefined) return localRefusal(carouselError, TOOL_NAME);
 
     const decision = resolveWriteStep(args.plan_id, ctx.api.settings.writeMode);
     return decision.step === 'preview'
@@ -568,6 +571,12 @@ type UploadPhotosDraftInput = z.infer<typeof UPLOAD_PHOTOS_DRAFT_INPUT>;
  * The draft `post_info` — title and description only. It is resolved through
  * `api/publish` rather than assembled here so the 90/4000 limits are checked
  * once, in the same place the posting tool checks them.
+ *
+ * Its callers do not guard it, and must not: the only throw
+ * `resolvePhotoDraftPostInfo` has is the 90/4000 limit, and the schema below
+ * caps both fields with the *same* two constants before `mcp/server` ever
+ * reaches this handler. A `try/catch` here would be a branch nothing can take,
+ * standing in the coverage report as if it described a real failure mode.
  */
 function draftPostInfo(args: UploadPhotosDraftInput): Record<string, unknown> {
   return resolvePhotoDraftPostInfo({
@@ -582,13 +591,7 @@ async function previewPhotosDraft(
 ): Promise<ToolResult<UploadPhotosDraftData>> {
   const { api } = ctx;
 
-  let postInfo: Record<string, unknown>;
-  try {
-    postInfo = draftPostInfo(args);
-  } catch (cause) {
-    return { ok: false, error: publishToolError(cause) };
-  }
-
+  const postInfo = draftPostInfo(args);
   const openId = await resolveOpenId(ctx);
   const plan = mintPlan(
     ctx,
@@ -631,12 +634,7 @@ async function executePhotosDraft(
 
   // Step 3 — no `creator_info` to re-read: a `video.upload`-only grant may not
   // carry the scope for it (§ 3.11).
-  let postInfo: Record<string, unknown>;
-  try {
-    postInfo = draftPostInfo(args);
-  } catch (cause) {
-    return { ok: false, error: publishToolError(cause) };
-  }
+  const postInfo = draftPostInfo(args);
   const openId = await resolveOpenId(ctx);
 
   // Step 4.
@@ -666,8 +664,14 @@ async function executePhotosDraft(
 
   const waited = await waitIfAsked(ctx, result, args.wait_for_completion === true);
   // § 5.3: the draft only becomes a post if the user opens the app, so that
-  // instruction rides ahead of the poll hint on every success.
-  if (waited.ok) waited.hints = [draftInboxHint(), ...(waited.hints ?? [])];
+  // instruction rides ahead of the poll hint on every success. `WaitedResult` is
+  // what makes `waited.hints` a plain array here: the poll hint is attached on
+  // every exit that returns an applied result, and the type says so.
+  // A draft that TikTok failed never reached the inbox, so there is nothing to
+  // open; the failed write gets no user action (§ 5.3).
+  if (waited.ok && waited.data.status !== 'FAILED') {
+    waited.hints = [draftInboxHint(), ...waited.hints];
+  }
   return waited;
 }
 
@@ -702,7 +706,7 @@ export const uploadPhotosDraftTool = defineTool<
     }
 
     const carouselError = checkCarousel(args, ctx.api.settings.verifiedUrlPrefixes);
-    if (carouselError !== undefined) return { ok: false, error: carouselError };
+    if (carouselError !== undefined) return localRefusal(carouselError, DRAFT_TOOL_NAME);
 
     const decision = resolveWriteStep(args.plan_id, ctx.api.settings.writeMode);
     return decision.step === 'preview'

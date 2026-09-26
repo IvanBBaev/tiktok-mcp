@@ -49,10 +49,11 @@
  *   Field names are restricted to `core/redact`'s allowlist.
  */
 
+import { isIPv4, isIPv6 } from 'node:net';
 import { systemClock, type Clock } from './clock.js';
 import { isTikTokError, TikTokError, type ErrorKind } from './errors.js';
 import { silentLogger, type Logger } from './log.js';
-import { registerSecret } from './redact.js';
+import { redactText, registerSecret } from './redact.js';
 
 // ---------------------------------------------------------------------------
 // egress allowlist (SECURITY.md § 2.5, TIKTOK-API.md § 4.7)
@@ -262,18 +263,54 @@ function asString(value: unknown): string | undefined {
 }
 
 /** CC-B2: a body that is not JSON is an outcome, not an exception. */
+/**
+ * TikTok ids are int64 and some arrive as bare JSON numbers
+ * (`publicaly_available_post_id`). Past 2^53 a `number` silently rounds to a
+ * different id, so an integer that does not fit is kept as its exact source
+ * digits instead — the one lossless representation. Uses the reviver's
+ * source-text context (Node 22+).
+ */
+function keepUnsafeIntegers(
+  _key: string,
+  value: unknown,
+  context: { source: string },
+): unknown {
+  return typeof value === 'number' &&
+    !Number.isSafeInteger(value) &&
+    /^-?\d+$/.test(context.source)
+    ? context.source
+    : value;
+}
+
 function parseJsonBody(text: string): { ok: true; value: unknown } | { ok: false } {
   if (text.trim() === '') return { ok: false };
   try {
-    return { ok: true, value: JSON.parse(text) as unknown };
+    return {
+      ok: true,
+      value: JSON.parse(
+        text,
+        keepUnsafeIntegers as Parameters<typeof JSON.parse>[1],
+      ) as unknown,
+    };
   } catch {
     return { ok: false };
   }
 }
 
-/** Whitespace-collapsed, length-capped body excerpt for a CC-B2 message. */
+/**
+ * Whitespace-collapsed and redacted — in that order, and BEFORE any caller
+ * truncates. `redactText` scrubs registered secrets by exact match, so a token
+ * the length cap cuts in half is no longer a match and its surviving prefix
+ * would reach the message; `TikTokError` redacting again on construction cannot
+ * put it back together. Redaction is idempotent, so the later pass is free.
+ */
+function redactSnippet(text: string): string {
+  return redactText(text).replace(/\s+/g, ' ').trim();
+}
+
+/** Whitespace-collapsed, redacted, length-capped body excerpt for a CC-B2 message. */
 function bodySnippet(text: string): string {
-  const oneLine = text.replace(/\s+/g, ' ').trim();
+  const oneLine = redactSnippet(text);
   if (oneLine === '') return '<empty body>';
   return oneLine.length <= BODY_SNIPPET_MAX
     ? oneLine
@@ -281,8 +318,18 @@ function bodySnippet(text: string): string {
 }
 
 function cap(text: string, max: number): string {
-  const oneLine = text.replace(/\s+/g, ' ').trim();
+  const oneLine = redactSnippet(text);
   return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max)}…`;
+}
+
+/**
+ * An upstream-supplied identifier on its way into an error message. An
+ * `error.code` or a `log_id` is as unbounded as any other string TikTok sends,
+ * so `UPSTREAM_TEXT_MAX` has to bind on those too: the human-readable message
+ * is not the only field a hostile or broken server controls.
+ */
+function upstreamText(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : cap(value, UPSTREAM_TEXT_MAX);
 }
 
 function positiveMs(value: number | undefined, fallback: number, name: string): number {
@@ -393,6 +440,75 @@ function timeoutFailure(ctx: FailureContext): TikTokError {
 }
 
 /**
+ * A publish init answered by a gateway rather than TikTok — a 5xx without an
+ * `error.code`, or any 2xx/5xx body that is not the JSON envelope — says
+ * nothing about whether the backend created the task. Same rule as a timeout
+ * (CC-B5): the outcome is unknown and the call is terminal.
+ */
+function gatewayAmbiguousFailure(status: number, ctx: FailureContext): Outcome<never> {
+  return {
+    ok: false,
+    status,
+    retryAfterMs: undefined,
+    retryable: false,
+    error: new TikTokError({
+      kind: 'network',
+      code: 'network_ambiguous',
+      message:
+        `${ctx.method} ${ctx.shownUrl} answered HTTP ${status} without a TikTok error envelope. ` +
+        `A publish init may still have been processed, so the outcome is unknown and it is NOT retried.`,
+      remediation:
+        'Check the publish journal for an intent without an outcome and verify upstream state before creating a new attempt.',
+    }),
+  };
+}
+
+/**
+ * A success envelope whose `data` is `null`, a scalar or an array. Every
+ * endpoint documents an object there, and handing the value on would crash the
+ * reader on its first property. For an init that crash would journal `error`,
+ * which the duplicate guard lets through, although TikTok said `ok` — so the
+ * init reads it as ambiguous and never retries; any other call reads it as an
+ * upstream shape change.
+ */
+function malformedDataFailure(raw: RawResponse, ctx: FailureContext): Outcome<never> {
+  const shape =
+    `${ctx.method} ${ctx.shownUrl} answered HTTP ${raw.status} with error.code "ok" ` +
+    `but a \`data\` that is not an object: ${bodySnippet(raw.bodyText)}`;
+  if (ctx.retryClass === 'init') {
+    return {
+      ok: false,
+      status: raw.status,
+      retryAfterMs: undefined,
+      retryable: false,
+      error: new TikTokError({
+        kind: 'network',
+        code: 'network_ambiguous',
+        message: `${shape}. A publish init may still have been accepted, so the outcome is unknown and it is NOT retried.`,
+        remediation:
+          'Check the publish journal for an intent without an outcome and verify upstream state before creating a new attempt.',
+      }),
+    };
+  }
+  return {
+    ok: false,
+    status: raw.status,
+    retryAfterMs: undefined,
+    retryable: false,
+    error: upstreamFailure({
+      kind: 'api',
+      message: `TikTok returned an error: ${shape}. This is an upstream response-shape change, not a bad request.`,
+      retryable: false,
+      remediation: 'Retry later; if it persists, the endpoint contract has changed.',
+    }),
+  };
+}
+
+function initGatewayStatus(status: number): boolean {
+  return status >= 500 || (status >= 200 && status < 300);
+}
+
+/**
  * Undici surfaces a blocked redirect as a `TypeError: fetch failed` whose cause
  * mentions the redirect; the exact wording is not part of any contract, so the
  * chain is inspected defensively and a miss simply degrades to "network error".
@@ -413,7 +529,7 @@ function rateLimitFailure(opts: {
   status: number;
   apiCode: string | undefined;
   logId: string | undefined;
-  waitMs: number | undefined;
+  waitMs: number;
   ctx: FailureContext;
 }): TikTokError {
   const { ctx } = opts;
@@ -421,10 +537,8 @@ function rateLimitFailure(opts: {
   // CC-H2: the hint is an ISO-8601 UTC instant derived from the injected clock;
   // every comparison behind it stays numeric epoch milliseconds.
   const hint =
-    opts.waitMs === undefined
-      ? 'Wait before calling again.'
-      : `Wait until ${new Date(ctx.clock.now() + opts.waitMs).toISOString()} ` +
-        `(${Math.ceil(opts.waitMs / 1000)} s) and call again. Do not retry earlier.`;
+    `Wait until ${new Date(ctx.clock.now() + opts.waitMs).toISOString()} ` +
+    `(${Math.ceil(opts.waitMs / 1000)} s) and call again. Do not retry earlier.`;
   return new TikTokError({
     kind: 'api',
     code: 'rate_limited',
@@ -472,9 +586,11 @@ function hostAllowed(hostname: string, kind: 'api' | 'upload'): boolean {
 }
 
 /**
- * Default-deny egress guard. Throws `TikTokError` (`kind: "validation"`,
- * `code: "egress_blocked"`) before any socket is opened; returns the parsed
- * `URL` so callers reuse the normalized form instead of re-parsing.
+ * The default-deny egress rule as a pure function: the parsed `URL` when the
+ * input is accepted, otherwise the `TikTokError` (`kind: "validation"`,
+ * `code: "egress_blocked"`) naming the first rule it broke. Nothing is thrown
+ * here — `assertAllowedUrl` raises the verdict, and `guardUrl` reads the reason
+ * off it for the log line first — so no caller narrows a `catch` binding.
  *
  * Accepted iff **all** of:
  * - the WHATWG parser accepts it as an absolute URL;
@@ -493,27 +609,39 @@ function hostAllowed(hostname: string, kind: 'api' | 'upload'): boolean {
  * rejected. A trailing-dot host (`open.tiktokapis.com.`) is a different name
  * and is rejected too.
  */
-export function assertAllowedUrl(url: string, kind: 'api' | 'upload'): URL {
+function checkAllowedUrl(url: string, kind: 'api' | 'upload'): URL | TikTokError {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    throw egressBlocked('not a parsable absolute URL', '<unparsable url>');
+    return egressBlocked('not a parsable absolute URL', '<unparsable url>');
   }
   const shown = safeUrlText(url);
   if (parsed.protocol !== 'https:') {
-    throw egressBlocked(`scheme "${parsed.protocol}" is not https:`, shown);
+    return egressBlocked(`scheme "${parsed.protocol}" is not https:`, shown);
   }
   if (parsed.username !== '' || parsed.password !== '') {
-    throw egressBlocked('the URL carries userinfo credentials', shown);
+    return egressBlocked('the URL carries userinfo credentials', shown);
   }
   if (parsed.port !== '') {
-    throw egressBlocked(`port ${parsed.port} is not 443`, shown);
+    return egressBlocked(`port ${parsed.port} is not 443`, shown);
   }
   if (!hostAllowed(parsed.hostname, kind)) {
-    throw egressBlocked(`host is not allowlisted for ${kind} calls`, shown);
+    return egressBlocked(`host is not allowlisted for ${kind} calls`, shown);
   }
   return parsed;
+}
+
+/**
+ * Default-deny egress guard. Throws `TikTokError` (`kind: "validation"`,
+ * `code: "egress_blocked"`) before any socket is opened; returns the parsed
+ * `URL` so callers reuse the normalized form instead of re-parsing. The rules
+ * are `checkAllowedUrl`'s, above.
+ */
+export function assertAllowedUrl(url: string, kind: 'api' | 'upload'): URL {
+  const verdict = checkAllowedUrl(url, kind);
+  if (isTikTokError(verdict)) throw verdict;
+  return verdict;
 }
 
 /**
@@ -561,16 +689,14 @@ function guardUrl(
   logger: Logger,
   fields: Record<string, unknown>,
 ): URL {
-  try {
-    return assertAllowedUrl(raw, kind);
-  } catch (error) {
-    logger.warn('egress blocked', {
-      ...fields,
-      url: safeUrlText(raw),
-      reason: error instanceof Error ? error.message : 'egress_blocked',
-    });
-    throw error;
-  }
+  const verdict = checkAllowedUrl(raw, kind);
+  if (!isTikTokError(verdict)) return verdict;
+  logger.warn('egress blocked', {
+    ...fields,
+    url: safeUrlText(raw),
+    reason: verdict.message,
+  });
+  throw verdict;
 }
 
 // ---------------------------------------------------------------------------
@@ -580,33 +706,85 @@ function guardUrl(
 /**
  * Private, loopback, link-local and otherwise non-routable literals. Used to
  * refuse a DNS answer that points an allowlisted name at an internal address
- * (the DNS-rebinding shape of SSRF).
+ * (the DNS-rebinding shape of SSRF). Anything that does not parse as an IP
+ * address is refused too — a resolver answer is always a literal, so a string
+ * that is not one is not something to connect to.
  */
 function isPrivateAddress(address: string): boolean {
   const value = address.trim().toLowerCase();
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
-  if (v4 !== null) {
-    const octets = [v4[1], v4[2], v4[3], v4[4]].map((part) => Number(part ?? '0'));
-    const [a = 0, b = 0] = octets;
-    if (octets.some((octet) => octet > 255)) return true; // not a valid address at all
-    if (a === 0 || a === 10 || a === 127) return true; // this-network, private, loopback
-    if (a === 169 && b === 254) return true; // link-local (169.254/16, incl. IMDS)
-    if (a === 172 && b >= 16 && b <= 31) return true; // private 172.16/12
-    if (a === 192 && b === 168) return true; // private 192.168/16
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
-    if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking 198.18/15
-    if (a >= 224) return true; // multicast + reserved + broadcast
-    return false;
+  if (isIPv4(value)) return isPrivateV4(value.split('.').map(Number));
+  // Brackets a URL host carries and a zone id (`fe80::1%en0`) are not part of
+  // the address itself.
+  const v6 = value.replace(/^\[/, '').replace(/\]$/, '').replace(/%.*$/, '');
+  if (!isIPv6(v6)) return true;
+  return isPrivateV6(ipv6Hextets(v6));
+}
+
+/** `octets` are four integers in 0–255 (`isIPv4` or two hextets guarantee it). */
+function isPrivateV4(octets: readonly number[]): boolean {
+  const [a = 0, b = 0, c = 0] = octets;
+  if (a === 0 || a === 10 || a === 127) return true; // this-network, private, loopback
+  if (a === 169 && b === 254) return true; // link-local (169.254/16, incl. IMDS)
+  if (a === 172 && b >= 16 && b <= 31) return true; // private 172.16/12
+  if (a === 192 && b === 168) return true; // private 192.168/16
+  if (a === 192 && b === 0 && (c === 0 || c === 2)) return true; // IETF 192.0.0/24, TEST-NET-1
+  if (a === 192 && b === 88 && c === 99) return true; // 6to4 relay anycast (deprecated)
+  if (a === 198 && b === 51 && c === 100) return true; // TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return true; // TEST-NET-3
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
+  if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking 198.18/15
+  return a >= 224; // multicast + reserved + broadcast
+}
+
+/**
+ * The eight 16-bit groups of a valid IPv6 literal. The WHATWG URL serializer
+ * does the normalization — it compresses, lowercases and rewrites an embedded
+ * dotted IPv4 tail as two hex groups — so only the `::` gap is left to expand.
+ * Classifying the groups rather than the text is what closes the spellings a
+ * textual match misses: `0:0:0:0:0:0:0:0`, `::ffff:7f00:1`, `0::1`.
+ */
+function ipv6Hextets(v6: string): number[] {
+  const host = new URL(`http://[${v6}]/`).hostname.slice(1, -1);
+  const [head = '', tail] = host.split('::');
+  const left = head === '' ? [] : head.split(':');
+  const right = tail === undefined || tail === '' ? [] : tail.split(':');
+  const gap = new Array<string>(8 - left.length - right.length).fill('0');
+  return [...left, ...gap, ...right].map((group) => parseInt(group, 16));
+}
+
+/** The IPv4 address carried in two hextets. */
+function embeddedV4(high: number, low: number): number[] {
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff];
+}
+
+function isPrivateV6(h: readonly number[]): boolean {
+  const [h0 = 0, h1 = 0, h2 = 0, h3 = 0, h4 = 0, h5 = 0, h6 = 0, h7 = 0] = h;
+  const zeroTo4 = h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0;
+  // `::/96` (unspecified, loopback, the deprecated IPv4-compatible form) and
+  // `::ffff:0:0/96` (IPv4-mapped): classified by the IPv4 they carry, which
+  // makes `::` 0.0.0.0 and `::1` 0.0.0.1 — both "this network", both refused.
+  if (zeroTo4 && (h5 === 0 || h5 === 0xffff)) return isPrivateV4(embeddedV4(h6, h7));
+  // `::ffff:0:0:0/96` (SIIT, IPv4-translated): the same rule, one group over.
+  const zeroTo3 = h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0;
+  if (zeroTo3 && h4 === 0xffff && h5 === 0) return isPrivateV4(embeddedV4(h6, h7));
+  if (h0 === 0x64 && h1 === 0xff9b) {
+    // NAT64: the well-known /96 translates the IPv4 it carries; the local-use
+    // 64:ff9b:1::/48 is private by definition.
+    if (h2 === 0 && h3 === 0 && h4 === 0 && h5 === 0)
+      return isPrivateV4(embeddedV4(h6, h7));
+    return h2 === 1;
   }
-  // IPv6 (with or without the brackets a URL host carries).
-  const v6 = value.replace(/^\[/, '').replace(/\]$/, '');
-  if (v6 === '::' || v6 === '::1' || v6 === '0:0:0:0:0:0:0:1') return true;
-  const mapped = /^::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(v6);
-  if (mapped !== null) return isPrivateAddress(mapped[1] ?? '');
-  if (/^f[cd][0-9a-f]{0,2}:/.test(v6)) return true; // unique-local fc00::/7
-  if (/^fe[89ab][0-9a-f]?:/.test(v6)) return true; // link-local fe80::/10
-  if (/^ff[0-9a-f]{2}:/.test(v6)) return true; // multicast ff00::/8
-  return false;
+  // Only global unicast `2000::/3` is ever a public destination. Everything
+  // outside it — the rest of `0000::/8`, discard `100::/64` and the dummy
+  // prefix, SRv6 SIDs `5f00::/16`, unique-local `fc00::/7`, link- and
+  // site-local `fe80::/9`, multicast `ff00::/8`, and the IETF-reserved space in
+  // between — is refused by this one rule rather than an enumeration.
+  if ((h0 & 0xe000) !== 0x2000) return true;
+  if (h0 === 0x2002) return isPrivateV4(embeddedV4(h1, h2)); // 6to4 2002::/16
+  // IETF protocol assignments 2001::/23 (Teredo, ORCHID, benchmarking, ...)
+  // and documentation 2001:db8::/32 and 3fff::/20.
+  if (h0 === 0x2001 && (h1 < 0x200 || h1 === 0xdb8)) return true;
+  return h0 === 0x3fff && h1 < 0x1000;
 }
 
 /**
@@ -798,18 +976,25 @@ async function performRequest(
     () => undefined,
   );
 
+  // The outer `try` owns the cleanup, the inner one turns a fetch failure into
+  // the right error. Nested rather than one `try/catch/finally` so the `finally`
+  // is reached only by a return or an unwinding throw — every arm of the inner
+  // `catch` throws, and there is no fall-through edge into the cleanup. The
+  // `finally` body itself runs on every call.
   try {
-    const response = await globalThis.fetch(target, {
-      ...spec,
-      redirect: 'error',
-      signal: controller.signal,
-    });
-    const bodyText = await response.text();
-    return { status: response.status, headers: response.headers, bodyText };
-  } catch (error) {
-    if (firstCause === 'caller') throw abortReason;
-    if (firstCause === 'timeout') throw timeoutFailure(ctx);
-    throw transportFailure(error, ctx);
+    try {
+      const response = await globalThis.fetch(target, {
+        ...spec,
+        redirect: 'error',
+        signal: controller.signal,
+      });
+      const bodyText = await response.text();
+      return { status: response.status, headers: response.headers, bodyText };
+    } catch (error) {
+      if (firstCause === 'caller') throw abortReason;
+      if (firstCause === 'timeout') throw timeoutFailure(ctx);
+      throw transportFailure(error, ctx);
+    }
   } finally {
     stopTimer.abort();
     await timer;
@@ -854,6 +1039,10 @@ function outcomeFromThrow<T>(error: unknown): Outcome<T> {
  * only while the class allows it, the attempt budget is unspent, and the
  * wall-clock budget still has room. Every wait goes through `sleepUntil`, so a
  * caller abort during a backoff surfaces as that abort.
+ *
+ * The ladder is a `while` over a failed outcome: each round either throws the
+ * last error or waits and tries again, and the first success is both the loop's
+ * exit condition and the function's value.
  */
 async function withRetries<T>(
   opts: {
@@ -868,10 +1057,9 @@ async function withRetries<T>(
   },
   attempt: (attemptNo: number) => Promise<Outcome<T>>,
 ): Promise<T> {
-  for (let attemptNo = 1; ; attemptNo += 1) {
-    const outcome = await attempt(attemptNo);
-    if (outcome.ok) return outcome.value;
-
+  let attemptNo = 1;
+  let outcome = await attempt(attemptNo);
+  while (!outcome.ok) {
     const lastAttempt = attemptNo >= opts.attempts;
     const remainingBudgetMs = opts.budgetDeadlineMs - opts.clock.now();
     if (!outcome.retryable || lastAttempt || remainingBudgetMs <= 0) {
@@ -904,7 +1092,10 @@ async function withRetries<T>(
       ...(outcome.status === undefined ? {} : { status: outcome.status }),
     });
     await sleepUntil(opts.clock, opts.clock.now() + waitMs, opts.signal);
+    attemptNo += 1;
+    outcome = await attempt(attemptNo);
   }
+  return outcome.value;
 }
 
 // ---------------------------------------------------------------------------
@@ -936,8 +1127,33 @@ function decodeEnvelope<T>(raw: RawResponse, ctx: FailureContext): Outcome<T> {
   const retryAfterMs = parseRetryAfterMs(raw.headers.get('retry-after'), ctx.clock.now());
   const parsed = parseJsonBody(raw.bodyText);
   const classRetryable = ctx.retryClass !== 'init';
+  const rateLimited = (apiCode?: string, logId?: string): Outcome<T> => {
+    const waitMs =
+      retryAfterMs ??
+      waitForAttempt({
+        attempt: 1,
+        retryAfterMs: undefined,
+        remainingBudgetMs: RETRY_AFTER_MAX_MS,
+        random: () => 0,
+      });
+    return {
+      ok: false,
+      status: raw.status,
+      retryAfterMs,
+      retryable: classRetryable,
+      error: rateLimitFailure({ status: raw.status, apiCode, logId, waitMs, ctx }),
+    };
+  };
+  // CC-B8: a 429 is the rate limit whatever its body — an edge that answers
+  // with an empty or HTML page still means "wait", not "upstream error".
+  if (raw.status === 429 && (!parsed.ok || asRecord(parsed.value) === undefined)) {
+    return rateLimited();
+  }
 
   if (!parsed.ok) {
+    if (!classRetryable && initGatewayStatus(raw.status)) {
+      return gatewayAmbiguousFailure(raw.status, ctx);
+    }
     // CC-B2: HTML/empty/truncated gateway body — never a JSON.parse crash.
     return {
       ok: false,
@@ -958,6 +1174,9 @@ function decodeEnvelope<T>(raw: RawResponse, ctx: FailureContext): Outcome<T> {
 
   const record = asRecord(parsed.value);
   if (record === undefined) {
+    if (!classRetryable && initGatewayStatus(raw.status)) {
+      return gatewayAmbiguousFailure(raw.status, ctx);
+    }
     return {
       ok: false,
       status: raw.status,
@@ -978,32 +1197,18 @@ function decodeEnvelope<T>(raw: RawResponse, ctx: FailureContext): Outcome<T> {
   // CC-B1: HTTP 200 is not success — `error.code === "ok"` is.
   const upstreamFailed = envelope.apiCode !== undefined && envelope.apiCode !== 'ok';
   if (!upstreamFailed && raw.status >= 200 && raw.status < 300) {
+    if (envelope.hasData && asRecord(envelope.data) === undefined) {
+      return malformedDataFailure(raw, ctx);
+    }
     return { ok: true, value: (envelope.hasData ? envelope.data : parsed.value) as T };
   }
 
-  const rateLimited = raw.status === 429 || envelope.apiCode === 'rate_limit_exceeded';
-  if (rateLimited) {
-    const waitMs =
-      retryAfterMs ??
-      waitForAttempt({
-        attempt: 1,
-        retryAfterMs: undefined,
-        remainingBudgetMs: RETRY_AFTER_MAX_MS,
-        random: () => 0,
-      });
-    return {
-      ok: false,
-      status: raw.status,
-      retryAfterMs,
-      retryable: classRetryable,
-      error: rateLimitFailure({
-        status: raw.status,
-        apiCode: envelope.apiCode,
-        logId: envelope.logId,
-        waitMs,
-        ctx,
-      }),
-    };
+  if (raw.status === 429 || envelope.apiCode === 'rate_limit_exceeded') {
+    return rateLimited(envelope.apiCode, envelope.logId);
+  }
+
+  if (!classRetryable && raw.status >= 500 && envelope.apiCode === undefined) {
+    return gatewayAmbiguousFailure(raw.status, ctx);
   }
 
   const retryable =
@@ -1022,8 +1227,8 @@ function decodeEnvelope<T>(raw: RawResponse, ctx: FailureContext): Outcome<T> {
       kind: 'api',
       message:
         `TikTok returned an error for ${ctx.method} ${ctx.shownUrl}: ` +
-        `${envelope.apiCode ?? `HTTP ${raw.status}`} (HTTP ${raw.status}, ` +
-        `log_id ${envelope.logId ?? 'absent'})${detail}`,
+        `${upstreamText(envelope.apiCode) ?? `HTTP ${raw.status}`} (HTTP ${raw.status}, ` +
+        `log_id ${upstreamText(envelope.logId) ?? 'absent'})${detail}`,
       retryable,
       ...(envelope.apiCode === undefined ? {} : { apiCode: envelope.apiCode }),
       ...(envelope.logId === undefined ? {} : { logId: envelope.logId }),
@@ -1214,8 +1419,8 @@ export async function oauthRequest<T>(opts: OauthRequestOptions): Promise<T> {
     throw upstreamFailure({
       kind: 'auth',
       message:
-        `The TikTok token endpoint rejected the request: ${flatError} ` +
-        `(HTTP ${raw.status}, log_id ${logId ?? 'absent'})` +
+        `The TikTok token endpoint rejected the request: ${cap(flatError, UPSTREAM_TEXT_MAX)} ` +
+        `(HTTP ${raw.status}, log_id ${upstreamText(logId) ?? 'absent'})` +
         (description === undefined ? '' : ` — ${cap(description, UPSTREAM_TEXT_MAX)}`),
       retryable: false,
       apiCode: flatError,
@@ -1227,7 +1432,7 @@ export async function oauthRequest<T>(opts: OauthRequestOptions): Promise<T> {
       kind: 'api',
       message:
         `The TikTok token endpoint answered HTTP ${raw.status} without an OAuth error field ` +
-        `(log_id ${logId ?? 'absent'}).`,
+        `(log_id ${upstreamText(logId) ?? 'absent'}).`,
       retryable: false,
       ...(logId === undefined ? {} : { logId }),
     });

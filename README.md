@@ -109,8 +109,9 @@ model can poll `tiktok_get_publish_status` for the terminal state.
 - **Append-only publish journal**: a write-ahead `journal.ndjson` records an
   intent (fsync'd) before every publish and an outcome after — a durable audit
   trail of "did it post?" that survives crashes, readable via
-  `tiktok_list_publish_journal`. A same-payload duplicate within 10 minutes is
-  refused (`possible_duplicate`) unless you pass `force`.
+  `tiktok_list_publish_journal`. A same-payload duplicate within 10 minutes — or
+  one still being sent by another call — is refused (`possible_duplicate`)
+  unless you pass `force`.
 - **OAuth 2.0 (Login Kit) with PKCE**: a one-time interactive
   `npx tiktok-mcp-ai login` stores a refresh token — never a password. TikTok's
   hex `code_challenge` deviation from RFC 7636 is handled correctly.
@@ -139,6 +140,16 @@ model can poll `tiktok_get_publish_status` for the terminal state.
 - MCP **tool annotations** (all four hints on every tool), structured error
   payloads written for the model, and **structured logging on stderr only** —
   stdout stays pure JSON-RPC.
+- MCP **resources and prompts**: six read-only snapshots at `tiktok://…` URIs
+  (`auth/status`, `user/info`, `videos/recent`, `creator/info`,
+  `publish/journal`, `publish/{publish_id}/status`, with `?account=` selecting
+  the profile — or filtering the journal) and three guided prompts (post a
+  video, post photos, send to drafts) — both gated with the tool packages,
+  neither adding write or network surface.
+- MCP **argument completion** (`completion/complete`): `account` completes
+  from the configured profiles, `privacy_level` from the four privacy levels,
+  the status resource's `publish_id` from the local journal — local data only,
+  never a request to TikTok.
 - Credentials in a local env file (`TT_ENV_FILE`, else the XDG/`%LOCALAPPDATA%`
   config dir), written owner-only (`0600`) with atomic, comment-preserving
   rewrites; no secret ever enters a log, a tool result, or the journal.
@@ -360,7 +371,7 @@ knobs. See [.env.example](.env.example) for a template and
 | `TT_CLIENT_SECRET` | yes | — | TikTok app client secret. Never logged or returned by any tool. |
 | `TT_MEDIA_ROOT` | no | — (fail-closed) | The only directory `FILE_UPLOAD` tools may read media from; unset ⇒ `source:"file"` is rejected locally. Choose a dedicated media folder, never `$HOME`. |
 | `TT_VERIFIED_URL_PREFIXES` | no | — | Comma-separated `https://` prefixes verified in the developer portal, so the plan phase can catch unverifiable `PULL_FROM_URL` domains early. **Advisory only** — TikTok's portal is the source of truth. |
-| `TT_TOOL_PACKAGES` | no | `core` | Comma/space list of packages (`auth`, `user`, `video`, `publish`, `publish-write`) or a profile: `core` = all reads, `all` = everything. |
+| `TT_TOOL_PACKAGES` | no | `core` | Comma-separated list of packages (`auth`, `user`, `video`, `publish`, `publish-write`) or a profile: `core` = all reads, `all` = everything. |
 | `TT_PACKAGES_DENY` | no | — | Packages forced off regardless of `TT_TOOL_PACKAGES` (deny wins). |
 | `TT_PACKAGES_READONLY` | no | `0` | `1` registers only read-only tools (unregisters `publish-write`). |
 | `TT_WRITE_MODE` | no | `plan` | `plan` (default — preview then `plan_id`), `apply` (**trusted automation only: no injection resistance**), or `deny` (the `publish-write` package is not registered). |
@@ -371,15 +382,14 @@ knobs. See [.env.example](.env.example) for a template and
 | `TT_LOCK_PROFILE` | no | — | Pin the session to one profile: an explicit `account` naming any other profile fails locally (no network spent). |
 | `TT_REDIRECT_PORT` | no | — (ephemeral) | Optional fixed-port pin for the `login` loopback server; unset binds `127.0.0.1:0`. |
 | `TT_LOGIN_SCOPES` | no | derived | Scopes requested by `login`; the default is least-privilege from `TT_TOOL_PACKAGES`. Set explicitly to override. |
-| `TT_TOKEN_REFRESH_SKEW_S` | no | `1800` | Refresh the access token this many seconds before its expiry. |
+| `TT_TOKEN_REFRESH_SKEW_S` | no | `1800` | Refresh the access token this many seconds before its expiry (max `43200`). |
 | `TT_TRANSPORT` | no | `stdio` | `stdio` (default) or `http` (Streamable HTTP for remote/agent clients). |
 | `TT_HTTP_HOST` | no | `127.0.0.1` | Bind host for the http transport (loopback by default). |
 | `TT_PORT` | no | `3000` | TCP port for the http transport. |
 | `TT_HTTP_TOKEN` | no | — | Bearer token, **required whenever `TT_TRANSPORT=http`** (loopback included); compared constant-time. The server refuses to start over http without it. |
 | `TT_HTTP_INSECURE` | no | `0` | `1` acknowledges a non-loopback bind without TLS termination in front. |
 | `TT_TIMEOUT_MS` | no | `30000` | Per-request timeout (ms). |
-| `TT_MAX_RETRIES` | no | `3` | Retry cap for the idempotent **read** class (429/5xx/network, honoring `Retry-After`). Publish inits are never retried. |
-| `TT_MAX_CONCURRENT` | no | `4` | Per-host concurrency semaphore. |
+| `TT_MAX_RETRIES` | no | `3` | Retry cap for the idempotent **read** class (429/5xx/network, honoring `Retry-After`): each read is tried once plus up to this many retries (default: up to 4 attempts). Publish inits are never retried. |
 | `TT_PUBLISH_RPM` | no | `6` | Local token bucket for publish inits, per profile — an empty bucket rejects locally with an absolute `retry_at`. |
 | `TT_FETCH_ALL_CAP` | no | `200` | Item cap for `fetch_all` pagination; a capped read always surfaces `truncated`. |
 | `TT_RESULT_CHAR_BUDGET` | no | `25000` | Truncation budget for tool results (always valid JSON). |
@@ -425,9 +435,9 @@ active profile (`TT_ACTIVE_PROFILE`, or `--profile <name>`).
 
 | Command | What it does | Exit codes |
 | ------- | ------------ | ---------- |
-| `tiktok-mcp-ai` | Starts the MCP server. The transport (`stdio` default, or `http`) is chosen by `TT_TRANSPORT`; runs until `SIGINT`/`SIGTERM`. | `0` clean shutdown · `1` fatal startup error |
-| `tiktok-mcp-ai login` | One-time OAuth authorization-code + PKCE login: opens the browser, captures the loopback redirect (or manual paste), stores a refresh token. `--revoke` disconnects an account; `--purge-journal` also deletes journal data. | `0` success · `1` login/revoke failed |
-| `tiktok-mcp-ai doctor` | Offline + online health check: env file located, client key present, token validity/expiry, one `user/info` probe, granted scopes vs. enabled packages, the publish journal, npx-cache staleness. `--offline` skips the probe; `--json` prints the report as one JSON document. | `0` healthy · non-zero on hard failures |
+| `tiktok-mcp-ai` | Starts the MCP server. The transport (`stdio` default, or `http`) is chosen by `TT_TRANSPORT`; runs until `SIGINT`/`SIGTERM` — or, on stdio, until the client closes stdin, which is how an MCP client ends the session. On a signal, calls still in flight get up to 10 s to answer before the server closes (either transport), and a request arriving meanwhile is refused as shutting down (HTTP `503`, stdio JSON-RPC `-32000`); a closed stdin ends the stdio session at once, even mid-drain. | `0` clean shutdown · `1` fatal startup error |
+| `tiktok-mcp-ai login` | One-time OAuth authorization-code + PKCE login: opens the browser, captures the loopback redirect (or manual paste), stores a refresh token. `--revoke` disconnects an account; `--purge-journal` also deletes journal data. | `0` success · `1` login/revoke failed (including `--manual` when stdin ends before a paste) · `2` usage error (bad flags, an invalid `--profile`) |
+| `tiktok-mcp-ai doctor` | Offline + online health check: env file located, client key present, token validity/expiry, one `user/info` probe, granted scopes vs. enabled packages, the publish journal, npx-cache staleness. `--offline` skips the probe; `--json` prints the report as one JSON document. | `0` healthy (warnings allowed) · `1` a check failed · `2` usage error (unknown option, `--profile` without a value, an invalid profile name) |
 
 ## Develop
 
@@ -490,8 +500,8 @@ only writes, gated by plan-then-execute.
 ### Tool packages
 
 Tools are grouped into packages so you can expose only what a given client needs
-(fewer tools keep the model focused). Set `TT_TOOL_PACKAGES` to a comma/space
-separated list of profiles or package names:
+(fewer tools keep the model focused). Set `TT_TOOL_PACKAGES` to a comma-separated
+list of profiles or package names:
 
 - `core` (default) — `auth`, `user`, `video`, `publish` (all the read tools,
   including the read-only publishing context: creator info, publish status, and
@@ -531,6 +541,53 @@ The four `publish-write` tools never mutate on the first call:
 
 `force: true` overrides **only** the duplicate guard, never the digest check —
 there is no way to execute a payload other than the one previewed.
+
+### Prompts and resources
+
+Two more MCP primitives ride on the tools without adding write or network
+surface of their own ([docs/TOOLS.md § 7](docs/TOOLS.md#7-prompts-and-resources)):
+
+- **Resources** — six read-only snapshots a client can attach to a
+  conversation: `tiktok://auth/status`, `tiktok://user/info`,
+  `tiktok://videos/recent` (one default page), `tiktok://creator/info`,
+  `tiktok://publish/journal` (the newest 20 attempts across all profiles) and
+  `tiktok://publish/{publish_id}/status` — a URI template, listed by
+  `resources/templates/list`, whose path segment becomes the tool's
+  `publish_id`. Each is the matching read tool called with its defaults,
+  through the same pipeline (account resolution, scope check, redaction,
+  truncation), returned as the usual JSON envelope in `application/json` text.
+  The one fixed argument is the status resource's `wait_for_completion: false`:
+  a snapshot is one status request, never a poll. `?account=<profile>` selects
+  the profile — except on the journal, where it filters the rows to that
+  profile instead; the `{?account}` templates are advertised too.
+- **Prompts** — three guided flows, each one `user` message that names the
+  exact tool for every step. `tiktok_post_video_guided` (`video`, optional
+  `title`, `privacy_level`, `account`) steers the canonical post-a-video flow
+  with the failure discipline attached: preview without a `plan_id`, ask on
+  `plan_incomplete`, show the consent line and wait for approval, execute with
+  the same arguments plus the token, poll to `PUBLISH_COMPLETE`.
+  `tiktok_post_photos_guided` (`photo_urls`, optional `title`, `description`,
+  `privacy_level`, `account`) steers the same flow for a carousel through
+  `tiktok_post_photos`, asking about music and naming the offending
+  `photo_urls[<i>]` on an unverified prefix. `tiktok_upload_draft_guided`
+  (optional `video`, `photo_urls`, `title`, `description`, `account`) takes
+  exactly one of `video` / `photo_urls`, steers the matching draft tool with no
+  creator pre-flight and polls to `SEND_TO_USER_INBOX` — and renders a question
+  instead of steps when given both or neither.
+- **Argument completion** — `completion/complete` offers values for the
+  arguments of both: `account` from the configured profiles (under
+  `TT_LOCK_PROFILE`, the locked name alone), `privacy_level` on the two post
+  prompts from the four privacy levels, and the status template's `publish_id`
+  from the publish journal, newest first, narrowed to the `account` already
+  filled in. Prefix match, case-insensitive, at most 100 values with `total`
+  and `hasMore` telling the rest; every source is local data — a completion
+  never calls TikTok
+  ([docs/TOOLS.md § 7.3](docs/TOOLS.md#73-argument-completion)).
+
+Both lists follow the tool packages: the prompts appear only when both
+`publish-write` and `publish` are enabled, each resource only with its tool's package, and
+`resources/list_changed` is sent alongside `tools/list_changed` when the
+credential store changes.
 
 ## Security notes
 
@@ -625,13 +682,14 @@ has the long form, including the Windows paths.
 | Document | Contents |
 | -------- | -------- |
 | [docs/SETUP-TIKTOK-APP.md](docs/SETUP-TIKTOK-APP.md) | Operator walkthrough of the TikTok developer portal: app, products, scopes, the redirect URI, sandbox vs. production, the audit gate, domain verification |
+| [docs/AUDIT.md](docs/AUDIT.md) | TikTok's content-sharing audit: what it lifts, the preconditions, the demo-video shot list, the submission checklist, what changes on a pass, and the journey log |
 | [docs/CLIENTS.md](docs/CLIENTS.md) | Per-client configuration: Claude Code, Claude Desktop, VS Code, Cursor, the MCP Inspector — and where each client keeps the logs |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Doctor-first triage: what each check means, the common failure modes by error code, uninstall and data removal |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layered architecture, bootstrap, transport, tool-spec pattern, manifest & registration, HTTP client and retry matrix, write safety (plan store, journal), pagination, redaction, error taxonomy |
 | [docs/TOOLS.md](docs/TOOLS.md) | Complete tool catalog with input/output schemas, annotations, the plan/execute contract, the error catalog and the hints vocabulary |
 | [docs/AUTH.md](docs/AUTH.md) | OAuth flows, the PKCE hex deviation, token lifecycle and refresh, revocation, multi-account profiles, the scope model |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Every `TT_*` variable with defaults; env-file resolution (POSIX/Windows), permissions, profiles, the env-file lock and journal knobs |
-| [docs/SECURITY.md](docs/SECURITY.md) | Design security: threat model, secret handling, redaction, egress control, write safety, transport hardening, supply chain, platform-compliance posture |
+| [docs/SECURITY.md](docs/SECURITY.md) | Design security: threat model, secret handling, redaction, egress control, write safety, transport hardening, supply chain, platform-compliance posture — and the compatibility and deprecation policy: what counts as a breaking change to each public surface, the grace period, and how a deprecation is announced |
 | [docs/TIKTOK-API.md](docs/TIKTOK-API.md) | The upstream API landscape: endpoints, scopes, rate limits, the audit gate, media constraints, the chunk algorithm, the error envelope |
 | [docs/TESTING.md](docs/TESTING.md) | Test strategy: `node:test`, fetch mocking, the manifest snapshot, coverage gates, the CI matrix |
 | [docs/CORNER-CASES.md](docs/CORNER-CASES.md) | Catalog of corner cases (CC-*) every implementation work package must test |

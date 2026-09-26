@@ -4,9 +4,12 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { MAX_TIMER_MS } from '../src/core/clock.js';
 import { isTikTokError, TikTokError } from '../src/core/errors.js';
 import {
+  canonicalHostName,
   DEFAULT_PROFILE,
+  isLoopbackHost,
   knownSettingVars,
   loadSettings,
   settingVarName,
@@ -66,7 +69,6 @@ test('an empty environment yields exactly the documented defaults', () => {
     uploadTimeoutMs: 120_000,
     maxRetries: 3,
     chunkRetries: 3,
-    maxConcurrent: 4,
     publishRpm: 6,
     fetchAllCap: 200,
     resultCharBudget: 25_000,
@@ -79,11 +81,12 @@ test('an empty environment yields exactly the documented defaults', () => {
     port: 3_000,
     httpToken: undefined,
     httpInsecure: false,
+    httpAllowedHosts: undefined,
     oauthBaseUrl: undefined,
   });
 });
 
-test('the default write mode is plan — no accidental publishing (CC-C1)', () => {
+test('the default write mode is plan — no accidental publishing', () => {
   assert.equal(load().writeMode, 'plan');
   assert.equal(DEFAULT_PROFILE, 'DEFAULT');
 });
@@ -103,7 +106,7 @@ test('cc-f6 every invalid variable is reported in one aggregated error', () => {
     TT_TIMEOUT_MS: 'soon',
     TT_PLAN_TTL_S: '-5',
     TT_WRITE_MODE: 'yolo',
-    TT_MAX_CONCURRENT: '0',
+    TT_PUBLISH_RPM: '0',
   });
 
   assert.equal(err.kind, 'config');
@@ -113,7 +116,7 @@ test('cc-f6 every invalid variable is reported in one aggregated error', () => {
     'TT_TIMEOUT_MS',
     'TT_PLAN_TTL_S',
     'TT_WRITE_MODE',
-    'TT_MAX_CONCURRENT',
+    'TT_PUBLISH_RPM',
   ]) {
     assert.match(err.message, new RegExp(name), `${name} is missing from the aggregate`);
   }
@@ -237,6 +240,20 @@ test('a trailing comma in a list is tolerated, an all-comma list is not', () => 
   assert.match(loadError({ TT_TOOL_PACKAGES: ',,' }).message, /at least one package/);
 });
 
+test('the separator is the comma alone — a space-separated list is one bad name', () => {
+  // README called these "comma/space" lists until 2026-09-01. `splitList` splits on
+  // `,` only, so the space form is not a lenient spelling of the same value: it is a
+  // single package named "auth user video", and the whole config is refused at startup.
+  const err = loadError({ TT_TOOL_PACKAGES: 'auth user video' });
+  assert.match(err.message, /TT_TOOL_PACKAGES\[0\]/);
+  assert.match(err.message, /auth user video/);
+  assert.deepEqual(load({ TT_TOOL_PACKAGES: 'auth,user,video' }).toolPackages, [
+    'auth',
+    'user',
+    'video',
+  ]);
+});
+
 test('cc-f4 the active profile is upper-cased and shape-checked', () => {
   assert.equal(load({ TT_ACTIVE_PROFILE: 'work' }).activeProfile, 'WORK');
   assert.equal(load({ TT_LOCK_PROFILE: 'work_2' }).lockProfile, 'WORK_2');
@@ -285,6 +302,39 @@ test('verified URL prefixes must be https', () => {
     loadError({ TT_VERIFIED_URL_PREFIXES: 'not a url' }).message,
     /URL prefix/,
   );
+  // The scheme check and the parse are two different rules: a bare scheme, and
+  // an unclosed IPv6 host, both start with https:// and are still not URLs.
+  // Without the parse they would be accepted as prefixes nothing can match.
+  assert.match(loadError({ TT_VERIFIED_URL_PREFIXES: 'https://' }).message, /URL prefix/);
+  assert.match(
+    loadError({ TT_VERIFIED_URL_PREFIXES: 'https://[cdn.example.com/' }).message,
+    /URL prefix/,
+  );
+});
+
+test('the internal oauth base url must be an absolute http(s) URL', () => {
+  // The variable is test-only (CONFIGURATION.md § Internal / test-only) and
+  // `core/oauth` ignores any value that is not a loopback origin — but it is
+  // still validated here, so a typo in a harness fails at startup instead of
+  // silently doing nothing on every token exchange.
+  assert.equal(
+    load({ TT_OAUTH_BASE_URL: 'http://127.0.0.1:8123' }).oauthBaseUrl,
+    'http://127.0.0.1:8123',
+  );
+  assert.equal(
+    load({ TT_OAUTH_BASE_URL: 'https://open.tiktokapis.com' }).oauthBaseUrl,
+    'https://open.tiktokapis.com',
+  );
+  // Two different rules, as with the prefixes above: a value `new URL` cannot
+  // parse at all, and one it parses into a scheme no token exchange can use.
+  assert.match(
+    loadError({ TT_OAUTH_BASE_URL: 'not-a-url' }).message,
+    /absolute http\(s\) URL/,
+  );
+  assert.match(
+    loadError({ TT_OAUTH_BASE_URL: 'ftp://127.0.0.1/' }).message,
+    /absolute http\(s\) URL/,
+  );
 });
 
 test('zero is accepted where zero is meaningful and rejected where it is not', () => {
@@ -292,8 +342,71 @@ test('zero is accepted where zero is meaningful and rejected where it is not', (
   assert.equal(load({ TT_CHUNK_RETRIES: '0' }).chunkRetries, 0);
   assert.equal(load({ TT_TOKEN_REFRESH_SKEW_S: '0' }).tokenRefreshSkewS, 0);
   assert.equal(load({ TT_ENV_LOCK_WAIT_MS: '0' }).envLockWaitMs, 0);
-  assert.match(loadError({ TT_TIMEOUT_MS: '0' }).message, />= 1/);
+  assert.match(loadError({ TT_TIMEOUT_MS: '0' }).message, /1–2147483647/);
   assert.match(loadError({ TT_PLAN_MAX_OUTSTANDING: '0' }).message, />= 1/);
+});
+
+test('the retry counts are capped at 10 and the refresh skew at half a day', () => {
+  // A retry budget past 10 turns one failing call into minutes of backoff, and
+  // a skew past half the access token's 24 h lifetime would refresh on (almost)
+  // every call.
+  assert.equal(load({ TT_MAX_RETRIES: '10' }).maxRetries, 10);
+  assert.equal(load({ TT_CHUNK_RETRIES: '10' }).chunkRetries, 10);
+  assert.equal(load({ TT_TOKEN_REFRESH_SKEW_S: '43200' }).tokenRefreshSkewS, 43_200);
+
+  assert.match(
+    loadError({ TT_MAX_RETRIES: '11' }).message,
+    /TT_MAX_RETRIES: .*a whole number 0–10/,
+  );
+  assert.match(
+    loadError({ TT_CHUNK_RETRIES: '11' }).message,
+    /TT_CHUNK_RETRIES: .*a whole number 0–10/,
+  );
+  assert.match(
+    loadError({ TT_TOKEN_REFRESH_SKEW_S: '43201' }).message,
+    /TT_TOKEN_REFRESH_SKEW_S: .*a whole number of seconds 0–43200/,
+  );
+  // The former one-day cap is now refused too.
+  assert.match(
+    loadError({ TT_TOKEN_REFRESH_SKEW_S: '86400' }).message,
+    /TT_TOKEN_REFRESH_SKEW_S: .*0–43200/,
+  );
+});
+
+test('every millisecond setting is capped at the largest delay a timer accepts', () => {
+  // 2^31 - 1 is what setTimeout honours; one more would silently fire at once.
+  const settings = [
+    ['TT_ENV_LOCK_HEARTBEAT_MS', 'envLockHeartbeatMs', 1],
+    ['TT_ENV_LOCK_STALE_MS', 'envLockStaleMs', 1],
+    ['TT_ENV_LOCK_WAIT_MS', 'envLockWaitMs', 0],
+    ['TT_TIMEOUT_MS', 'timeoutMs', 1],
+    ['TT_UPLOAD_TIMEOUT_MS', 'uploadTimeoutMs', 1],
+    ['TT_STATUS_POLL_INTERVAL_MS', 'statusPollIntervalMs', 1],
+    ['TT_STATUS_POLL_TIMEOUT_MS', 'statusPollTimeoutMs', 0],
+  ] as const;
+  assert.equal(MAX_TIMER_MS, 2_147_483_647);
+  for (const [name, field, min] of settings) {
+    // The heartbeat must stay below the stale threshold, which is capped too —
+    // so the heartbeat's own cap is shown one below it, under a capped stale.
+    const accepted =
+      name === 'TT_ENV_LOCK_HEARTBEAT_MS'
+        ? load({
+            [name]: String(MAX_TIMER_MS - 1),
+            TT_ENV_LOCK_STALE_MS: String(MAX_TIMER_MS),
+          })
+        : load({ [name]: String(MAX_TIMER_MS) });
+    assert.equal(
+      accepted[field],
+      name === 'TT_ENV_LOCK_HEARTBEAT_MS' ? MAX_TIMER_MS - 1 : MAX_TIMER_MS,
+      name,
+    );
+    const err = loadError({ [name]: String(MAX_TIMER_MS + 1) });
+    assert.match(
+      err.message,
+      new RegExp(`${name}: .*milliseconds ${String(min)}–2147483647`),
+      name,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -343,6 +456,158 @@ test('cc-g6 binding beyond loopback requires an explicit TT_HTTP_INSECURE acknow
   assert.doesNotThrow(() =>
     load({ ...base, TT_HTTP_HOST: '0.0.0.0', TT_HTTP_INSECURE: '1' }),
   );
+});
+
+test('cc-g6 TT_HTTP_ALLOWED_HOSTS is unset by default and reads as undefined', () => {
+  assert.equal(load().httpAllowedHosts, undefined);
+  assert.equal(load({ TT_HTTP_ALLOWED_HOSTS: '' }).httpAllowedHosts, undefined);
+});
+
+test('cc-g6 TT_HTTP_ALLOWED_HOSTS accepts DNS names, IPv4 and IPv6, lowercased and bare', () => {
+  assert.deepEqual(
+    load({
+      TT_HTTP_ALLOWED_HOSTS:
+        'MCP.Example.COM, localhost ,10.0.0.7,[::1],FE80::1,[2001:DB8::2],a-b.c0',
+    }).httpAllowedHosts,
+    [
+      'mcp.example.com',
+      'localhost',
+      '10.0.0.7',
+      '::1',
+      'fe80::1',
+      '2001:db8::2',
+      'a-b.c0',
+    ],
+  );
+  // The longest legal label (63) and a name at the 253-character limit.
+  const label63 = 'a'.repeat(63);
+  const name253 = [label63, label63, label63, 'a'.repeat(61)].join('.');
+  assert.equal(name253.length, 253);
+  assert.deepEqual(
+    load({ TT_HTTP_ALLOWED_HOSTS: `${label63}.example,${name253}` }).httpAllowedHosts,
+    [`${label63}.example`, name253],
+  );
+});
+
+test('cc-g6 TT_HTTP_ALLOWED_HOSTS refuses anything but a bare host name', () => {
+  const label64 = 'a'.repeat(64);
+  const name254 = ['a'.repeat(63), 'a'.repeat(63), 'a'.repeat(63), 'a'.repeat(62)].join(
+    '.',
+  );
+  assert.equal(name254.length, 254);
+  for (const bad of [
+    'mcp.example.com:443',
+    '[::1]:3000',
+    'https://mcp.example.com',
+    '*.example.com',
+    '[]',
+    'a..b',
+    '-lead.example',
+    'trail-.example',
+    `${label64}.example`,
+    name254,
+  ]) {
+    const err = loadError({ TT_HTTP_ALLOWED_HOSTS: `ok.example,${bad}` });
+    assert.match(
+      err.message,
+      /TT_HTTP_ALLOWED_HOSTS\[1\].*expected bare host names \(no scheme, port or wildcard\)/,
+      bad,
+    );
+  }
+  assert.match(
+    loadError({ TT_HTTP_ALLOWED_HOSTS: ' , ,' }).message,
+    /TT_HTTP_ALLOWED_HOSTS: .*expected at least one host name/,
+  );
+});
+
+test('canonicalHostName gives the form the WHATWG URL parser gives a hostname', () => {
+  for (const [input, canonical] of [
+    // IPv6 is compressed and lowercased, brackets optional on the way in and
+    // never present on the way out.
+    ['[0:0:0:0:0:0:0:1]', '::1'],
+    ['0:0:0:0:0:0:0:1', '::1'],
+    ['[::1]', '::1'],
+    ['2001:DB8:0:0:0:0:0:2', '2001:db8::2'],
+    // An IPv4-mapped literal is rewritten into hex groups, as a browser does.
+    ['::ffff:127.0.0.1', '::ffff:7f00:1'],
+    ['[::FFFF:127.0.0.1]', '::ffff:7f00:1'],
+    // Numeric IPv4 shorthands are expanded.
+    ['127.1', '127.0.0.1'],
+    ['0x7f.1', '127.0.0.1'],
+    ['2130706433', '127.0.0.1'],
+    // Names are lowercased and otherwise kept.
+    ['MCP.Example.COM', 'mcp.example.com'],
+    ['LocalHost', 'localhost'],
+    ['a-b.c0', 'a-b.c0'],
+  ] as const) {
+    assert.equal(canonicalHostName(input), canonical, input);
+  }
+});
+
+test('canonicalHostName refuses anything that is not a bare host', () => {
+  for (const bad of [
+    // A zone id is valid IPv6 to `net.isIPv6`, but no URL can carry one.
+    'fe80::1%eth0',
+    '[fe80::1%eth0]',
+    // Characters outside [a-z0-9.-]: ports, paths, userinfo, wildcards, spaces.
+    'mcp.example.com:443',
+    '[::1]:3000',
+    'mcp.example.com/path',
+    'user@mcp.example.com',
+    '*.example.com',
+    'mcp_example.com',
+    'a b',
+    '',
+    '[]',
+    // Allowed characters that the URL parser itself throws on: a name that
+    // ends in a number is an IPv4 address, and these are not valid ones.
+    '1.2.3.256',
+    '1.2.3.4.5',
+    '256.0.0.1',
+  ]) {
+    assert.equal(canonicalHostName(bad), undefined, bad);
+  }
+});
+
+test('cc-g6 TT_HTTP_ALLOWED_HOSTS stores every entry in its canonical form', () => {
+  assert.deepEqual(
+    load({
+      TT_HTTP_ALLOWED_HOSTS:
+        '[0:0:0:0:0:0:0:1],::ffff:127.0.0.1,127.1,MCP.Example.COM,[2001:DB8:0:0::2]',
+    }).httpAllowedHosts,
+    ['::1', '::ffff:7f00:1', '127.0.0.1', 'mcp.example.com', '2001:db8::2'],
+  );
+  for (const bad of ['fe80::1%eth0', '1.2.3.256', 'mcp_example.com']) {
+    assert.match(
+      loadError({ TT_HTTP_ALLOWED_HOSTS: `ok.example,${bad}` }).message,
+      /TT_HTTP_ALLOWED_HOSTS\[1\].*expected bare host names/,
+      bad,
+    );
+  }
+});
+
+test('isLoopbackHost covers only what stays on the machine', () => {
+  for (const host of [
+    'localhost',
+    'LocalHost',
+    '::1',
+    '[::1]',
+    '127.0.0.1',
+    '127.255.255.254',
+  ]) {
+    assert.equal(isLoopbackHost(host), true, host);
+  }
+  for (const host of [
+    '0.0.0.0',
+    '::',
+    '[::]',
+    '10.0.0.7',
+    '128.0.0.1',
+    'mcp.example.com',
+    'localhost.example.com',
+  ]) {
+    assert.equal(isLoopbackHost(host), false, host);
+  }
 });
 
 test('cc-f5 a heartbeat slower than the stale threshold is a startup error', () => {

@@ -140,7 +140,7 @@ export const accountArg = z.string().min(1).optional().describe(ACCOUNT_DESCRIPT
  */
 export function toolInput<Shape extends z.ZodRawShape>(
   shape: Shape,
-): z.ZodObject<{ account: typeof accountArg } & Shape, 'strict'> {
+): z.ZodObject<{ account: typeof accountArg } & Shape, z.core.$strict> {
   return z.object({ account: accountArg, ...shape }).strict();
 }
 

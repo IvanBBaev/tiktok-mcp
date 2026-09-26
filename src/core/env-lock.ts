@@ -31,30 +31,62 @@
  *   `core/settings` refuses the inverted combination and this module warns
  *   about it when the options are passed directly (CC-F5).
  * - **A lock hand-over is bounded, not prevented.** Two processes that decide
- *   the same lock is stale race to remove it, but only one of them can win the
- *   following `mkdir`, so the mutex still holds. The residual hazard — a holder
+ *   the same lock is stale race to remove it. The removal is a `rename` to a
+ *   unique tombstone, which only one of them can win, and the winner checks
+ *   the tombstone is the directory whose age it measured before deleting it —
+ *   so a breaker that lost the race puts a successor's fresh lock back rather
+ *   than deleting it, and only one process can win the following `mkdir`. The residual hazard — a holder
  *   whose lock was reclaimed while it was still writing — is what the heartbeat
  *   exists to make practically impossible; the heartbeat additionally *reports*
  *   the loss when it notices, and the release step then leaves the current
  *   holder's directory alone instead of deleting a lock it no longer owns.
+ * - **Ownership is verified, not assumed.** "The directory exists" does not
+ *   mean "the directory is mine": a holder that stalls past `staleMs` can have
+ *   its lock broken and re-created by another process under the same path, and
+ *   an unchecked `utimes` would then keep the *new* holder's lock fresh while
+ *   an unchecked `rm` on release would delete it and let a third writer in.
+ *   So every acquisition records an identity for the directory it created, and
+ *   both the heartbeat touch and the release `rm` re-read it first; on a
+ *   mismatch (or a vanished directory) the lock is treated as lost and left
+ *   alone. The identity is the exact `holder.json` content, which carries a
+ *   per-acquisition random `token` — portable to every file system, unlike an
+ *   inode number, which is `0` or unstable on some Windows and network file
+ *   systems. Only when that record could not be written does the identity fall
+ *   back to the directory's `ino` + `birthtimeMs`. A check-then-act window of
+ *   one syscall remains between the verification and the touch/`rm`; closing
+ *   the hand-over from minutes to that window is what the check is for.
  * - **Not reentrant.** This is a file-system mutex with no in-process
  *   bookkeeping, so two concurrent callers inside one process serialize exactly
  *   like two processes do — and a *nested* acquisition of the same env file
  *   deadlocks until `waitMs` expires and then surfaces `env_file_busy`. The
  *   in-process guard belongs one layer up: `core/oauth` single-flights refresh
  *   per profile and only the winner takes this lock (ARCHITECTURE.md § 7.3).
- * - **The journal does not use this lock** — its `O_APPEND` writes need none
- *   (ARCHITECTURE.md § 8.3), and taking the credential lock for every journal
- *   line would serialize the whole server behind it.
+ * - **Journal appends do not take this lock** — their `O_APPEND` writes need
+ *   none (ARCHITECTURE.md § 8.3), and taking the credential lock for every
+ *   journal line would serialize the whole server behind it. Journal *rotation*
+ *   does use this mutex, keyed on `journal.ndjson` rather than the env file, so
+ *   it never queues behind a token refresh (`label` names it in the messages).
  * - **Timeout is a retryable, actionable error.** On `env_file_busy` the caller
  *   (oauth) re-reads the env file once and adopts a token the other process
  *   rotated before surfacing anything (TOOLS.md § 3.0); a failure to *take* the
  *   lock never invalidates the credentials already in memory (CC-H3).
  */
 
-import { mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import {
+  lstat,
+  mkdir,
+  readFile,
+  readlink,
+  realpath,
+  rename,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 import { systemClock, type Clock } from './clock.js';
 import { TikTokError } from './errors.js';
@@ -64,7 +96,11 @@ import { createLogger, type Logger } from './log.js';
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 
-/** Diagnostic-only holder record inside the lock directory (never liveness). */
+/**
+ * Holder record inside the lock directory. Never liveness: its diagnostic
+ * fields say who to look for, and its per-acquisition `token` makes the record
+ * the ownership identity the heartbeat and the release step verify.
+ */
 const HOLDER_FILE = 'holder.json';
 
 /**
@@ -72,10 +108,17 @@ const HOLDER_FILE = 'holder.json';
  * passes `settings.envLockWaitMs` / `envLockStaleMs` / `envLockHeartbeatMs`,
  * which is where `TT_ENV_LOCK_*` is validated; these constants only cover a
  * direct caller that does not care.
+ *
+ * They are exported because two other modules need the same numbers and used to
+ * spell them out again: `core/settings.ts` as the `TT_ENV_LOCK_*` defaults, and
+ * `cli/doctor.ts` for the staleness verdict it prints when settings could not be
+ * loaded. Three copies of one documented default is three chances to move two of
+ * them — and the one that drifts is the doctor row, which is read precisely when
+ * the configuration is already suspect.
  */
-const DEFAULT_WAIT_MS = 30_000;
-const DEFAULT_STALE_MS = 15_000;
-const DEFAULT_HEARTBEAT_MS = 2_000;
+export const DEFAULT_WAIT_MS = 30_000;
+export const DEFAULT_STALE_MS = 15_000;
+export const DEFAULT_HEARTBEAT_MS = 2_000;
 
 /** Contention retry window (ARCHITECTURE.md § 7.2: "50–150 ms jitter"). */
 const RETRY_MIN_MS = 50;
@@ -110,6 +153,13 @@ export interface EnvLockOptions {
    * determinism rule 4). Defaults to `Math.random`.
    */
   random?: () => number;
+  /**
+   * What the messages call the lock and the file it guards. Additive: the
+   * journal takes this same mutex for rotation, and "another process is
+   * updating the credential file" would send its reader to the wrong file.
+   * Defaults to the env file's wording.
+   */
+  label?: { lock: string; guards: string };
 }
 
 /**
@@ -124,6 +174,43 @@ export function envLockDir(envFilePath: string): string {
   return `${envFilePath}.lock`;
 }
 
+/** Links followed before a chain counts as a loop (Linux's SYMLOOP_MAX). */
+const MAX_LINK_HOPS = 40;
+
+/**
+ * The one spelling of a file that every writer agrees on: symlinks resolved, a
+ * dangling chain followed hop by hop to the file it will create, and a file
+ * that does not exist yet placed under its parent's real directory. The lock
+ * directory and the atomic write both key on it — a symlink and its target
+ * locked under two different names would exclude nothing while writing the
+ * same bytes, and a write renamed onto a link mid-chain would replace that
+ * link with a regular file.
+ *
+ * A loop has no file at its end; the path is then returned as given, and the
+ * read that follows reports the loop.
+ */
+export async function canonicalPath(path: string): Promise<string> {
+  let current = resolve(path);
+  for (let hop = 0; hop <= MAX_LINK_HOPS; hop += 1) {
+    try {
+      return await realpath(current);
+    } catch {
+      // Not there yet, or a link to something not there yet.
+    }
+    const parent = await realpath(dirname(current)).catch(() => dirname(current));
+    const here = join(parent, basename(current));
+    try {
+      if (!(await lstat(here)).isSymbolicLink()) return here;
+      // A relative target is relative to the link's real directory.
+      current = resolve(parent, await readlink(here));
+    } catch {
+      // Nothing at the path at all: it is its own target.
+      return here;
+    }
+  }
+  return resolve(path);
+}
+
 /** Everything the acquire/heartbeat/release steps need, resolved once. */
 interface LockState {
   readonly envFilePath: string;
@@ -134,6 +221,32 @@ interface LockState {
   readonly staleMs: number;
   readonly heartbeatMs: number;
   readonly random: () => number;
+  /** e.g. `env-file`, as in "the env-file lock". */
+  readonly lockLabel: string;
+  /** e.g. `the credential file`. */
+  readonly guards: string;
+}
+
+/**
+ * Why the lock can no longer be treated as this acquisition's own. `lost` is
+ * set when the directory is gone or now belongs to another holder; otherwise
+ * the ownership could not be established (e.g. `EACCES`), which is reported
+ * but is not proof that anyone else holds the lock.
+ */
+interface OwnershipFailure {
+  readonly lost: boolean;
+  readonly code: string;
+}
+
+/**
+ * The identity of the directory one acquisition created: the exact holder
+ * record it wrote (`record`), or — when that record could not be written — the
+ * directory's `ino:birthtimeMs` (`stat`). `expected` is the failure itself when
+ * even the fallback could not be captured.
+ */
+interface LockIdentity {
+  readonly source: 'record' | 'stat';
+  readonly expected: string | OwnershipFailure;
 }
 
 /** The diagnostic record, as far as it could be read back. */
@@ -156,6 +269,28 @@ function errnoOf(err: unknown): string | undefined {
     if (typeof code === 'string') return code;
   }
   return undefined;
+}
+
+/**
+ * The errno to put in a log field, with a name for the values that carry none.
+ * One helper rather than seven copies of `errnoOf(err) ?? 'unknown'`, because
+ * only two of the seven catches can actually take the fallback and the other
+ * five would be writing a case they can never exercise:
+ *
+ * - `writeHolder` and `lockUnusable` catch more than a syscall — a clock whose
+ *   `toISOString` throws a `RangeError`, a diagnostic sink that throws a
+ *   `TypeError` — so `unknown` is a real outcome there, and both are tested;
+ * - the five sites whose `try` holds nothing but an `fs/promises` call
+ *   (`breakStaleLock`'s `rename` and `rm`, `readIdentity`, the heartbeat's
+ *   `utimes`, `release`) cannot reach it.
+ *   Every rejection those produce is a `UVException` or a Node `ERR_*` error,
+ *   both of which carry a string `code`; the one shape that does not — a path
+ *   argument whose getter throws during validation — is ruled out by
+ *   `envLockDir` (line 131), whose template literal makes `state.lockDir` a
+ *   primitive string.
+ */
+function errnoCode(err: unknown): string {
+  return errnoOf(err) ?? 'unknown';
 }
 
 /**
@@ -213,6 +348,8 @@ function resolveOptions(envFilePath: string, opts: EnvLockOptions): LockState {
     staleMs,
     heartbeatMs,
     random: opts.random ?? Math.random,
+    lockLabel: opts.label?.lock ?? 'env-file',
+    guards: opts.label?.guards ?? 'the credential file',
   };
 }
 
@@ -237,13 +374,44 @@ function jitterMs(random: () => number): number {
  * stepped backwards, or a network file system whose clock runs ahead) reads as
  * "fresh", which is the safe direction: a live lock is never stolen.
  */
-async function lockAgeMs(lockDir: string, clock: Clock): Promise<number | undefined> {
+async function lockAge(lockDir: string, clock: Clock): Promise<LockAge | undefined> {
   try {
     const info = await stat(lockDir);
-    return clock.now() - info.mtimeMs;
+    return { ageMs: clock.now() - info.mtimeMs, identity: staleIdentity(info) };
   } catch {
     return undefined;
   }
+}
+
+/** What the age was measured on: the directory itself, not whatever holds its path. */
+interface LockAge {
+  readonly ageMs: number;
+  readonly identity: string;
+}
+
+/**
+ * The identity of one lock directory as the file system sees it. A rename
+ * keeps it; a directory re-created under the same path gets a new one (a
+ * reused inode still carries a new birth time where the file system has one).
+ */
+function dirIdentity(info: { ino: number; birthtimeMs: number }): string {
+  return `${String(info.ino)}:${String(info.birthtimeMs)}`;
+}
+
+/**
+ * What a breaker compares before deleting: the directory identity plus the
+ * mtime its age was measured on. Where the file system reports no birth time
+ * (`birthtimeMs` is 0) a successor may reuse the inode and match on identity
+ * alone; it cannot also carry the stale mtime, since taking a lock stamps a
+ * fresh one. A rename leaves the mtime alone, and a holder that heartbeats in
+ * between is alive — so a mismatch hands the lock back either way.
+ */
+function staleIdentity(info: {
+  ino: number;
+  birthtimeMs: number;
+  mtimeMs: number;
+}): string {
+  return `${dirIdentity(info)}:${String(info.mtimeMs)}`;
 }
 
 /** Best-effort read of the diagnostic record; a damaged file simply says nothing. */
@@ -264,52 +432,179 @@ async function readHolder(lockDir: string): Promise<LockHolder> {
   }
 }
 
-/** Diagnostics only — who to look for, never who to trust (CC-A2). */
-async function writeHolder(state: LockState): Promise<void> {
-  const holder = {
-    pid: process.pid,
-    hostname: hostname(),
-    createdAt: new Date(state.clock.now()).toISOString(), // CC-H2: ISO-8601 UTC
-  };
+/**
+ * Write the holder record and return its exact content — the ownership
+ * identity — or `undefined` when it could not be written. The diagnostic fields
+ * say who to look for, never who to trust (CC-A2); the `token` is what tells
+ * this acquisition's directory apart from a successor's under the same path.
+ */
+async function writeHolder(state: LockState): Promise<string | undefined> {
   try {
-    await writeFile(join(state.lockDir, HOLDER_FILE), `${JSON.stringify(holder)}\n`, {
-      mode: FILE_MODE,
-    });
+    // Building the record is inside the `try` on purpose: `hostname()` is a
+    // syscall that can fail, and an escaping failure would reach `acquire`'s
+    // catch, which reads every error there as a `mkdir` verdict — turning a
+    // lock this process already holds into `env_lock_unusable` and leaving the
+    // directory behind.
+    const holder = {
+      pid: process.pid,
+      hostname: hostname(),
+      createdAt: new Date(state.clock.now()).toISOString(), // CC-H2: ISO-8601 UTC
+      token: randomUUID(),
+    };
+    const content = `${JSON.stringify(holder)}\n`;
+    await writeFile(join(state.lockDir, HOLDER_FILE), content, { mode: FILE_MODE });
+    return content;
   } catch (err) {
     // The lock is already held; failing here would throw away a valid mutex
     // over a diagnostic nicety.
-    state.logger.debug('could not write the env-file lock holder record', {
+    state.logger.debug(`could not write the ${state.lockLabel} lock holder record`, {
       dir: state.lockDir,
-      code: errnoOf(err) ?? 'unknown',
+      code: errnoCode(err),
     });
+    return undefined;
+  }
+}
+
+/**
+ * Read the current identity of the lock directory from `source`, or the
+ * failure that prevented it. `ENOENT` means the directory (or the record in
+ * it) is gone, which is a lost lock; any other errno only means it could not
+ * be checked.
+ */
+async function readIdentity(
+  lockDir: string,
+  source: LockIdentity['source'],
+): Promise<string | OwnershipFailure> {
+  try {
+    if (source === 'record') return await readFile(join(lockDir, HOLDER_FILE), 'utf8');
+    return dirIdentity(await stat(lockDir));
+  } catch (err) {
+    const code = errnoCode(err);
+    return { lost: code === 'ENOENT', code };
+  }
+}
+
+/** Record the identity of the directory this acquisition just created. */
+async function captureIdentity(state: LockState): Promise<LockIdentity> {
+  const record = await writeHolder(state);
+  if (record !== undefined) return { source: 'record', expected: record };
+  return { source: 'stat', expected: await readIdentity(state.lockDir, 'stat') };
+}
+
+/**
+ * Whether the lock directory is still the one this acquisition created:
+ * `undefined` when it is, otherwise why it cannot be treated as ours.
+ */
+async function verifyOwnership(
+  state: LockState,
+  identity: LockIdentity,
+): Promise<OwnershipFailure | undefined> {
+  if (typeof identity.expected !== 'string') return identity.expected;
+  const current = await readIdentity(state.lockDir, identity.source);
+  if (typeof current !== 'string') return current;
+  return current === identity.expected
+    ? undefined
+    : { lost: true, code: 'env_lock_replaced' };
+}
+
+/** The warning for a lock that was lost while held (vanished or replaced). */
+function lossMessage(state: LockState, failure: OwnershipFailure): string {
+  return failure.code === 'ENOENT'
+    ? `the ${state.lockLabel} lock ${state.lockDir} vanished while it was held — another ` +
+        `process may be writing ${state.envFilePath} at the same time`
+    : `the ${state.lockLabel} lock ${state.lockDir} was reclaimed by another holder while it ` +
+        `was held — another process may be writing ${state.envFilePath} at the same time`;
+}
+
+/** Whether anything is at `path`; an unreadable path counts as taken. */
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (err) {
+    return errnoOf(err) !== 'ENOENT';
   }
 }
 
 /**
  * Remove a lock whose mtime says its holder is gone (CC-F5). Returns whether
  * the directory is now clear to re-create.
+ *
+ * The age was measured by an earlier `stat`, and between that and the removal
+ * another process may already have broken the same lock and taken a fresh one
+ * under the same path. Removing the path would then delete a live lock. So the
+ * directory is first moved aside with a `rename` — atomic, so of two breakers
+ * only one gets it — and the tombstone is checked to be the very directory
+ * whose age was measured. If it is not, it is somebody's live lock: it is put
+ * back, and this call waits like any other contender.
  */
-async function breakStaleLock(state: LockState, ageMs: number): Promise<boolean> {
+async function breakStaleLock(state: LockState, stale: LockAge): Promise<boolean> {
+  const ageMs = stale.ageMs;
   const holder = await readHolder(state.lockDir);
+  const tombstone = `${state.lockDir}.stale-${randomUUID()}`;
   try {
-    await rm(state.lockDir, { recursive: true, force: true });
+    await rename(state.lockDir, tombstone);
   } catch (err) {
+    // `ENOENT`: another breaker got there first, and the path is clear or
+    // already re-taken — either way the next `mkdir` decides.
+    if (errnoOf(err) === 'ENOENT') return true;
     state.logger.warn(
-      `could not remove the stale env-file lock ${state.lockDir} ` +
+      `could not remove the stale ${state.lockLabel} lock ${state.lockDir} ` +
         `(last touched ${String(Math.round(ageMs))} ms ago)`,
       {
         dir: state.lockDir,
         env_file: state.envFilePath,
-        code: errnoOf(err) ?? 'unknown',
+        code: errnoCode(err),
       },
     );
     return false;
   }
 
+  state.logger.debug(`moved the stale ${state.lockLabel} lock aside`, {
+    dir: state.lockDir,
+    tombstone,
+  });
+  let ours: boolean;
+  try {
+    ours = staleIdentity(await stat(tombstone)) === stale.identity;
+  } catch {
+    ours = false;
+  }
+  if (!ours) {
+    // A successor's lock, taken after the age was measured: hand it back — but
+    // only onto a free path. On POSIX a `rename` onto an empty directory
+    // replaces it, and an empty directory there is a third process's lock in
+    // the instant between its `mkdir` and its holder file.
+    try {
+      if (await exists(state.lockDir)) throw new Error('the lock path is taken');
+      await rename(tombstone, state.lockDir);
+      state.logger.debug(
+        `the stale ${state.lockLabel} lock ${state.lockDir} was re-taken before it could be removed`,
+        { dir: state.lockDir, env_file: state.envFilePath },
+      );
+      return false;
+    } catch {
+      // The path was taken yet again in between. The successor's heartbeat
+      // reports the loss; the tombstone must not outlive it, so it is removed
+      // below like any other.
+    }
+  }
+
+  try {
+    await rm(tombstone, { recursive: true, force: true });
+  } catch (err) {
+    // The path is already clear; only the remains are left behind.
+    state.logger.warn(
+      `could not delete the remains of the stale ${state.lockLabel} lock at ${tombstone}`,
+      { dir: tombstone, env_file: state.envFilePath, code: errnoCode(err) },
+    );
+  }
+  if (!ours) return false;
+
   // Visible by contract: a broken lock means some process died holding it, and
   // the operator needs to know that happened even though this call recovered.
   state.logger.warn(
-    `removed a stale env-file lock: ${state.lockDir} was last touched ` +
+    `removed a stale ${state.lockLabel} lock: ${state.lockDir} was last touched ` +
       `${String(Math.round(ageMs))} ms ago, past the ${String(state.staleMs)} ms ` +
       'stale threshold',
     {
@@ -329,7 +624,7 @@ function busyError(state: LockState, waitedMs: number, attempts: number): TikTok
     kind: 'config',
     code: 'env_file_busy',
     message:
-      `another tiktok-mcp-ai process is updating the credential file ` +
+      `another tiktok-mcp-ai process is updating ${state.guards} ` +
       `${state.envFilePath} and did not release ${state.lockDir} within ` +
       `${String(waitedS)} s (${String(attempts)} attempt${attempts === 1 ? '' : 's'})`,
     retryable: true,
@@ -340,13 +635,13 @@ function busyError(state: LockState, waitedMs: number, attempts: number): TikTok
 }
 
 function lockUnusable(state: LockState, cause: unknown): TikTokError {
-  const code = errnoOf(cause) ?? 'unknown';
+  const code = errnoCode(cause);
   return new TikTokError({
     kind: 'config',
     code: 'env_lock_unusable',
     message:
-      `the env-file lock directory ${state.lockDir} could not be created (${code}), ` +
-      'so concurrent credential writes cannot be made safe',
+      `the ${state.lockLabel} lock directory ${state.lockDir} could not be created (${code}), ` +
+      `so concurrent writes to ${state.guards} cannot be made safe`,
     remediation:
       `Check that ${dirname(state.lockDir)} exists and is writable by this user, ` +
       'or point TT_ENV_FILE at a writable location.',
@@ -361,7 +656,7 @@ function lockUnusable(state: LockState, cause: unknown): TikTokError {
  * accumulated from the sleeps, so a process suspended mid-sleep does not
  * silently extend its own budget (CC-H1).
  */
-async function acquire(state: LockState): Promise<void> {
+async function acquire(state: LockState): Promise<LockIdentity> {
   const { clock, lockDir, logger, staleMs } = state;
   const startedAt = clock.now();
   const deadline = startedAt + state.waitMs;
@@ -374,14 +669,15 @@ async function acquire(state: LockState): Promise<void> {
     try {
       // `recursive` stays false on purpose: it is the entire mutual exclusion.
       await mkdir(lockDir, { mode: DIR_MODE });
-      await writeHolder(state);
-      logger.debug('env-file lock acquired', {
+      // Never throws: a failure to record the identity is itself the identity.
+      const identity = await captureIdentity(state);
+      logger.debug(`${state.lockLabel} lock acquired`, {
         dir: lockDir,
         env_file: state.envFilePath,
         attempt,
         duration_ms: clock.now() - startedAt,
       });
-      return;
+      return identity;
     } catch (err) {
       const code = errnoOf(err);
       if (code === 'ENOENT' && !parentCreated) {
@@ -398,12 +694,12 @@ async function acquire(state: LockState): Promise<void> {
       if (code !== 'EEXIST') throw lockUnusable(state, err);
     }
 
-    const ageMs = await lockAgeMs(lockDir, clock);
-    if (ageMs !== undefined && ageMs > staleMs && staleBreaks < MAX_STALE_BREAKS) {
+    const age = await lockAge(lockDir, clock);
+    if (age !== undefined && age.ageMs > staleMs && staleBreaks < MAX_STALE_BREAKS) {
       staleBreaks += 1;
       // Reclaiming a dead lock is progress, not waiting: retry immediately
       // instead of spending part of the wait budget on it.
-      if (await breakStaleLock(state, ageMs)) continue;
+      if (await breakStaleLock(state, age)) continue;
     }
 
     const remainingMs = deadline - clock.now();
@@ -415,7 +711,7 @@ async function acquire(state: LockState): Promise<void> {
 interface Heartbeat {
   /** Stop touching the lock and wait for the loop to finish. */
   stop(): Promise<void>;
-  /** Whether the lock directory was observed to be gone while `fn` ran. */
+  /** Whether the lock was observed to be gone or replaced while `fn` ran. */
   lost(): boolean;
 }
 
@@ -423,11 +719,16 @@ interface Heartbeat {
  * Keep the lock's mtime fresh while `fn` runs, so a slow critical section is
  * never mistaken for a dead process (CC-F5).
  *
+ * Every touch is preceded by an ownership check: stamping a directory that now
+ * belongs to another holder would keep *its* lock alive under our name and
+ * hide the loss, so a vanished or replaced lock marks the heartbeat lost and
+ * ends it without touching anything.
+ *
  * Built from repeated bounded `clock.sleep`s rather than `setInterval` — the
  * timer globals are banned outside `core/clock` precisely so this loop is
  * drivable by `mockClock().advance()` (CC-H4).
  */
-function startHeartbeat(state: LockState): Heartbeat {
+function startHeartbeat(state: LockState, identity: LockIdentity): Heartbeat {
   const { clock, heartbeatMs, lockDir, logger } = state;
   const stopping = new AbortController();
   let lost = false;
@@ -439,7 +740,7 @@ function startHeartbeat(state: LockState): Heartbeat {
       } catch (err) {
         if (stopping.signal.aborted) return; // the normal end: release() aborted us
         logger.warn(
-          `the env-file lock heartbeat for ${lockDir} stopped early; the lock may be ` +
+          `the ${state.lockLabel} lock heartbeat for ${lockDir} stopped early; the lock may be ` +
             `declared stale after ${String(state.staleMs)} ms while it is still held`,
           {
             dir: lockDir,
@@ -450,22 +751,27 @@ function startHeartbeat(state: LockState): Heartbeat {
         return;
       }
 
-      const at = new Date(clock.now());
-      try {
-        await utimes(lockDir, at, at);
-      } catch (err) {
-        const code = errnoOf(err) ?? 'unknown';
-        lost = code === 'ENOENT';
-        logger.warn(
-          lost
-            ? `the env-file lock ${lockDir} vanished while it was held — another ` +
-                `process may be writing ${state.envFilePath} at the same time`
-            : `could not refresh the mtime of the env-file lock ${lockDir} (${code}); ` +
-                'it may be declared stale while it is still held',
-          { dir: lockDir, env_file: state.envFilePath, code },
-        );
-        return;
+      let failure = await verifyOwnership(state, identity);
+      if (failure === undefined) {
+        const at = new Date(clock.now());
+        try {
+          await utimes(lockDir, at, at);
+          continue;
+        } catch (err) {
+          const code = errnoCode(err);
+          failure = { lost: code === 'ENOENT', code };
+        }
       }
+
+      lost = failure.lost;
+      logger.warn(
+        lost
+          ? lossMessage(state, failure)
+          : `could not refresh the mtime of the ${state.lockLabel} lock ${lockDir} ` +
+              `(${failure.code}); it may be declared stale while it is still held`,
+        { dir: lockDir, env_file: state.envFilePath, code: failure.code },
+      );
+      return;
     }
   })();
 
@@ -478,26 +784,50 @@ function startHeartbeat(state: LockState): Heartbeat {
   };
 }
 
-/** Release: stop the heartbeat, then delete the lock directory. Never throws. */
-async function release(state: LockState, heartbeat: Heartbeat): Promise<void> {
+/**
+ * Release: stop the heartbeat, verify the directory is still ours, then delete
+ * it. Never throws.
+ */
+async function release(
+  state: LockState,
+  identity: LockIdentity,
+  heartbeat: Heartbeat,
+): Promise<void> {
   await heartbeat.stop();
-  // The directory was already reclaimed by someone else and may now belong to a
-  // different holder; deleting it would hand the lock to a third process.
+  // The heartbeat already saw the loss and reported it.
   if (heartbeat.lost()) return;
+
+  // The directory may have been reclaimed since the last beat and now belong to
+  // a different holder; deleting it would hand the lock to a third process.
+  // Ownership that could not be established is not deleted blind either; the
+  // lock is left for the stale threshold to reclaim.
+  const failure = await verifyOwnership(state, identity);
+  if (failure !== undefined) {
+    state.logger.warn(failure.lost ? lossMessage(state, failure) : leakedMessage(state), {
+      dir: state.lockDir,
+      env_file: state.envFilePath,
+      code: failure.code,
+    });
+    return;
+  }
 
   try {
     await rm(state.lockDir, { recursive: true, force: true });
   } catch (err) {
-    state.logger.warn(
-      `could not remove the env-file lock ${state.lockDir}; the next writer will ` +
-        `treat it as stale after ${String(state.staleMs)} ms`,
-      {
-        dir: state.lockDir,
-        env_file: state.envFilePath,
-        code: errnoOf(err) ?? 'unknown',
-      },
-    );
+    state.logger.warn(leakedMessage(state), {
+      dir: state.lockDir,
+      env_file: state.envFilePath,
+      code: errnoCode(err),
+    });
   }
+}
+
+/** The warning for a lock this process owns but could not remove. */
+function leakedMessage(state: LockState): string {
+  return (
+    `could not remove the ${state.lockLabel} lock ${state.lockDir}; the next writer will ` +
+    `treat it as stale after ${String(state.staleMs)} ms`
+  );
 }
 
 /**
@@ -517,12 +847,12 @@ export async function withEnvLock<T>(
   fn: () => Promise<T>,
   opts: EnvLockOptions = {},
 ): Promise<T> {
-  const state = resolveOptions(envFilePath, opts);
-  await acquire(state);
-  const heartbeat = startHeartbeat(state);
+  const state = resolveOptions(await canonicalPath(envFilePath), opts);
+  const identity = await acquire(state);
+  const heartbeat = startHeartbeat(state, identity);
   try {
     return await fn();
   } finally {
-    await release(state, heartbeat);
+    await release(state, identity, heartbeat);
   }
 }

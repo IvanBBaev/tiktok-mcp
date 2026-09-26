@@ -45,7 +45,7 @@ updates:
           - '@typescript-eslint/*'
         update-types: ['major', 'minor', 'patch']
       # Everything else that only affects the build/test toolchain. Minor and
-      # patch only — a dev-dependency major (c8, prettier, @types/node) changes
+      # patch only — a dev-dependency major (c8, prettier, fast-check) changes
       # gate behaviour and gets its own PR.
       dev-dependencies:
         applies-to: version-updates
@@ -70,6 +70,11 @@ updates:
       # own branch, when someone is ready to fix the fallout — not opened by a
       # bot every week and left to rot. Minor and patch updates still flow.
       - dependency-name: typescript
+        update-types: ['version-update:semver-major']
+      # @types/node follows the oldest supported runtime (`engines.node` is
+      # `>=22`), not the newest. Typing against a later major lets an API that
+      # Node 22 lacks typecheck cleanly and fail only at runtime there.
+      - dependency-name: '@types/node'
         update-types: ['version-update:semver-major']
 
   # ----------------------------------------------------- npm (VS Code extension)
@@ -97,6 +102,16 @@ updates:
       # moves with the root one, in the same deliberate migration.
       - dependency-name: typescript
         update-types: ['version-update:semver-major']
+      # Same reasoning as the root @types/node: the extension runs on VS Code's
+      # bundled Node, which trails the latest major.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      # @types/vscode moves with `engines.vscode`, never ahead of it: vsce
+      # refuses to package when the declared @types/vscode range starts above
+      # the engines range, and raising engines to match would drop every user
+      # on an older VS Code for no API the extension uses.
+      - dependency-name: '@types/vscode'
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']
 
   # --------------------------------------------------------------- GitHub Actions
   - package-ecosystem: github-actions

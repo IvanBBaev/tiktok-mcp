@@ -57,8 +57,8 @@ npm install
 npm run build    # clean + tsc -> build/
 ```
 
-Everything runs on Node's built-ins plus three runtime dependencies
-(`@modelcontextprotocol/sdk`, `zod`, `zod-to-json-schema`) — no test framework,
+Everything runs on Node's built-ins plus two runtime dependencies
+(`@modelcontextprotocol/sdk`, `zod`) — no test framework,
 no bundler. There is deliberately no `dotenv`: the env file is read by
 `core/config`'s own parser, because importing `dotenv/config` would let a
 dependency print to stdout before the transport connects (CC-G3).
@@ -176,7 +176,10 @@ version tag — maintainers only:
    version and date, and refresh the compare links.
 2. Bump the version (`npm version <patch|minor|major>`), which creates the
    `vX.Y.Z` tag.
-3. Push the tag; CI runs the full gate and publishes on green.
+3. Push the tag; CI runs the full gate and publishes on green. A prerelease
+   tag (`vX.Y.Z-rc.N`) goes to npm under the `next` dist-tag only — the VS Code
+   Marketplace rejects semver prereleases, so `publish-vscode.yml` skips its
+   publish step for such a version.
 4. Verify the published package and the GitHub release notes.
 
 Versioning follows [SemVer](https://semver.org):

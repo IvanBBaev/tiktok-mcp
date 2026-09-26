@@ -47,25 +47,47 @@ windows × 24, advisory 26) — this phase is release engineering only.
 - CodeQL, dependabot, publish workflows (npm trusted publishing with
   provenance + MCP registry), CHANGELOG, root `SECURITY.md`, Claude Code
   plugin manifest (`.claude-plugin/`).
+- Shipped here beyond the original outline: the documentation site (`site/`,
+  deployed by `.github/workflows/pages.yml`) and the packed-tarball smoke gate
+  (`npm run smoke:pack`, re-run in `publish.yml` before publishing), which
+  replaced the hand-run RC checklist. Two manual steps still stand between the
+  site and the audit (G-4), and naming only the second one reads as a single
+  click: `site/privacy.html` and `site/terms.html` are **untracked**, and
+  `pages.yml` builds the artifact from the repository's checkout, so a deploy
+  today would publish a site without the two pages the audit requires; and
+  GitHub Pages is not enabled, so every URL on the site returns 404.
 - npm publish `0.x`; **submit** the TikTok content-sharing audit (required to
   lift SELF_ONLY). Audit *passed* is a 1.x platform milestone outside our
-  control — v1.0 does not wait on TikTok's review queue. Document the audit
-  journey.
+  control — v1.0 does not wait on TikTok's review queue. The submission
+  playbook, the demo-video shot list and the journey log are docs/AUDIT.md.
 - v1.0 itself is defined by the "Road to v1.0" section of
   docs/IMPLEMENTATION-PLAN.md: the 11-tool surface frozen under semver plus
-  the gap list G-1..G-13 closed (LICENSE, unofficial-status disclaimer,
-  operator docs, revoke flow, RC checklist, …).
+  the gap list G-1..G-14 closed (LICENSE, unofficial-status disclaimer,
+  operator docs, revoke flow, Privacy Policy + ToS at live URLs,
+  first-release bootstrap, …).
 - Optional: Research API package (`research`) — only if access is granted;
   client-credentials auth, own rate limits. No dark scaffold before then.
 
 ## Phase 4 — Ergonomics (demand-driven)
-- MCP resources (e.g. `tiktok://videos/recent` snapshot) and prompts
-  (guided "post a video" flow).
+- MCP resources, prompts and argument completion — **shipped 2026-09-19** in
+  three slices (TOOLS.md § 7): six read snapshots at `tiktok://auth/status`,
+  `tiktok://user/info`, `tiktok://videos/recent`, `tiktok://creator/info`,
+  `tiktok://publish/journal`, `tiktok://publish/{publish_id}/status`
+  (`?account=` selects the profile; on the journal it filters;
+  `publish/{publish_id}/status` is a URI template whose path parameter is the
+  tool argument), three guided prompts (`tiktok_post_video_guided`,
+  `tiktok_post_photos_guided`, `tiktok_upload_draft_guided`) and
+  `completion/complete` over their arguments — `account` from the configured
+  profiles, `privacy_level` from the four privacy levels, `publish_id` from the
+  write-ahead journal. Resources and prompts ride the tool pipeline and the
+  package gate, completion is matched against the same gated lists and reads
+  local data only; none of the three adds write or network surface.
 - Webhooks ingestion (portability events) if a use case appears.
 - Desktop packaging only if usage justifies it. (The VS Code extension was
   pulled forward and shipped in Phase 3 — `extension/`, published by
-  `.github/workflows/publish-vscode.yml` on the same `v*` tag as the npm
-  release. What is still demand-driven is anything beyond that listing.)
+  `.github/workflows/publish-vscode.yml` once the npm release on that `v*` tag
+  succeeds; a prerelease tag ships to npm only, since the Marketplace rejects
+  semver prereleases. What is still demand-driven is anything beyond that listing.)
 
 ## Explicit non-goals
 - No ads/Business API, no comment management (no public API), no scraping or

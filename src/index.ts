@@ -26,7 +26,11 @@
  * truncates a piped stdout, and the last thing a CLI run does is print.
  */
 
+import type { StdioSession } from './mcp/server.js';
+
 const MIN_NODE_MAJOR = 22;
+/** How long a signalled stdio shutdown waits for calls in flight (as HTTP's drain). */
+const STDIO_DRAIN_MS = 10_000;
 
 function nodeMajor(): number {
   return Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10);
@@ -40,7 +44,7 @@ function nodeMajor(): number {
  */
 async function startServer(): Promise<void> {
   const config = await import('./core/config.js');
-  const { loadSettings } = await import('./core/settings.js');
+  const { isLoopbackHost, loadSettings } = await import('./core/settings.js');
   const { createLogger } = await import('./core/log.js');
   const { systemClock } = await import('./core/clock.js');
   const { overlayEnvFile, packageVersion } = await import('./cli/index.js');
@@ -55,6 +59,8 @@ async function startServer(): Promise<void> {
 
   const { createServer, connectStdio } = await import('./mcp/server.js');
   const { PACKAGES } = await import('./tools/index.js');
+  const { PROMPTS } = await import('./tools/prompts.js');
+  const { RESOURCES } = await import('./tools/resources.js');
   const { createApiContext } = await import('./api/context.js');
 
   const version = await packageVersion();
@@ -63,19 +69,39 @@ async function startServer(): Promise<void> {
   // and the tool descriptions are rebuilt from it (TOOLS.md § 6.3). The
   // credential watch below reads through this same function, so what it
   // compares is byte-for-byte what `tools/list` would have answered.
-  const readProfiles = async (): Promise<{ name: string; scopes: string[] }[]> => {
+  const readProfiles = async (): Promise<
+    { name: string; scopes: string[]; authorized: boolean }[]
+  > => {
     const current = await config.readEnvFile(envFilePath);
     const merged = overlayEnvFile(process.env, current);
     return config.listProfiles(current, merged).map((name) => {
       try {
+        const stored = config.readProfile(name, current, merged);
         return {
           name,
-          scopes: config.readProfile(name, current, merged).scopes ?? [],
+          scopes: stored.scopes ?? [],
+          authorized:
+            stored.accessToken !== undefined || stored.refreshToken !== undefined,
         };
       } catch {
-        return { name, scopes: [] };
+        return { name, scopes: [], authorized: false };
       }
     });
+  };
+
+  // What the MCP surface reads: a store that cannot be read is a store with no
+  // profiles, so every tool lists as unavailable — the answer the credential
+  // watch announces — instead of `tools/list` failing with the file's path.
+  // The watch keeps reading through `readProfiles` itself, where the failure
+  // is what it logs.
+  const listingProfiles = async (): Promise<
+    { name: string; scopes: string[]; authorized: boolean }[]
+  > => {
+    try {
+      return await readProfiles();
+    } catch {
+      return [];
+    }
   };
 
   // One SDK `Server` binds exactly one transport, so the http branch builds one
@@ -87,16 +113,28 @@ async function startServer(): Promise<void> {
       name: 'tiktok-mcp-ai',
       version,
       packages: PACKAGES,
+      prompts: PROMPTS,
+      resources: RESOURCES,
       runtime: {
         settings,
         log,
-        profiles: readProfiles,
+        profiles: listingProfiles,
         // The api layer owns token resolution from here on: `createApiContext`
         // binds the profile onto the logger and routes every bearer through
-        // `ensureFreshAccessToken` (ARCHITECTURE § 6).
+        // `ensureFreshAccessToken` (ARCHITECTURE § 6). It gets the real
+        // process env, not `env`: the overlay froze the env file's startup
+        // tokens into it, and since the env wins over the file (CC-F2) every
+        // re-read under the lock would return them — a refresh token another
+        // process already rotated, or one `login --revoke` already cleared.
         createContext: (profile: string) =>
           Promise.resolve(
-            createApiContext({ profile, settings, log, clock: systemClock, env }),
+            createApiContext({
+              profile,
+              settings,
+              log,
+              clock: systemClock,
+              env: process.env,
+            }),
           ),
       },
     });
@@ -112,10 +150,10 @@ async function startServer(): Promise<void> {
   // avoidable "Not connected" in an otherwise clean shutdown.
   let stopWatch: () => Promise<void> = () => Promise.resolve();
   let closing = false;
-  const shutdown = (signal: NodeJS.Signals): void => {
+  const shutdown = (reason: string): void => {
     if (closing) return;
     closing = true;
-    log.info(`received ${signal}; shutting down`);
+    log.info(`${reason}; shutting down`);
     void stopWatch()
       .then(() => closeTransport())
       .catch((err: unknown) => {
@@ -124,8 +162,8 @@ async function startServer(): Promise<void> {
         });
       });
   };
-  process.once('SIGINT', shutdown);
-  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', () => shutdown('received SIGINT'));
+  process.once('SIGTERM', () => shutdown('received SIGTERM'));
 
   process.on('unhandledRejection', (reason: unknown) => {
     log.error('unhandled rejection', {
@@ -136,7 +174,7 @@ async function startServer(): Promise<void> {
   process.on('uncaughtException', (err: Error) => {
     log.error('uncaught exception', { reason: err.message });
     process.exitCode = 1;
-    shutdown('SIGTERM');
+    shutdown('uncaught exception');
   });
 
   if (settings.transport === 'http') {
@@ -146,9 +184,21 @@ async function startServer(): Promise<void> {
       log,
       clock: systemClock,
       createHandle: () => makeHandle(),
+      releaseHandle: (handle) => {
+        handles.delete(handle);
+      },
     });
     closeTransport = () => transport.close();
-    if (settings.httpInsecure) {
+    // A signal that landed during the bind already ran `shutdown` against the
+    // no-op placeholder; the listener it could not see is closed here instead.
+    if (closing) {
+      await closeTransport();
+      return;
+    }
+    // On loopback the flag is redundant (nothing needs acknowledging there), and
+    // the bind is neither reachable off-box nor exposed to rebinding past the
+    // pinned Host check, so neither warning would be true.
+    if (settings.httpInsecure && !isLoopbackHost(settings.httpHost)) {
       // `core/settings` already made the operator acknowledge this; the point
       // of repeating it is that the acknowledgement lives in an env file and
       // the person reading the logs may not be the person who wrote it.
@@ -156,6 +206,14 @@ async function startServer(): Promise<void> {
         'TT_HTTP_INSECURE=1: this bind is reachable off-box without TLS in front of it',
         { url: transport.url },
       );
+      if (settings.httpAllowedHosts === undefined) {
+        // Past loopback the Host/Origin check can only hold Origin to Host, and
+        // after DNS rebinding the two agree; the allowlist is what pins them.
+        log.warn(
+          'TT_HTTP_ALLOWED_HOSTS is unset: past loopback, DNS rebinding is stopped only by the bearer',
+          { url: transport.url },
+        );
+      }
     }
     // The URL never carries the bearer, and `TT_HTTP_TOKEN` is a registered
     // secret — a log line cannot hand out the credential (CC-G6).
@@ -166,8 +224,29 @@ async function startServer(): Promise<void> {
     });
   } else {
     const handle = makeHandle();
-    closeTransport = () => handle.server.close();
-    await connectStdio(handle);
+    const stdio: { session?: StdioSession } = {};
+    const clientGone = new AbortController();
+    // A signal (a host restart) lets calls in flight answer first, as the HTTP
+    // transport's drain does: closing aborts every handler, and a publish cut
+    // mid-upload is an ambiguous attempt. A closed stdin has nobody to answer,
+    // whether it closed before the signal or during the drain.
+    closeTransport = async () => {
+      await stdio.session?.drain(STDIO_DRAIN_MS, systemClock, clientGone.signal);
+      await handle.server.close();
+    };
+    // Closing stdin is how an MCP client ends a stdio session. The SDK's
+    // transport only listens for `data`, and the credential watch below keeps
+    // a timer alive, so without this a disconnected server would linger until
+    // somebody signalled it.
+    process.stdin.once('end', () => {
+      clientGone.abort();
+      shutdown('stdin closed by the client');
+    });
+    stdio.session = await connectStdio(handle);
+    if (closing) {
+      await closeTransport();
+      return;
+    }
     log.info('tiktok-mcp-ai is serving MCP on stdio', {
       profile: settings.activeProfile,
       env_file: envFilePath,
@@ -178,32 +257,38 @@ async function startServer(): Promise<void> {
   // to run for the life of the process — a credential watch, a health probe —
   // starts below and is torn down from `shutdown`.
 
-  // CC-A7. Without this the tool list is only correct the next time a client
-  // asks: a `login` in another terminal grants a scope, and the `[UNAVAILABLE]`
-  // markers stay stale until something happens to trigger a `tools/list`.
-  // Starting after connect is part of the contract — `sendToolListChanged()`
-  // throws on a server with no transport.
+  // CC-A7. Without this the tool and resource lists are only correct the next
+  // time a client asks: a `login` in another terminal grants a scope, and the
+  // `[UNAVAILABLE]` markers stay stale until something happens to trigger a
+  // `tools/list` or `resources/list`. Starting after connect is part of the
+  // contract — `notifyListChanged()` (the SDK's `sendToolListChanged()` and
+  // `sendResourceListChanged()` underneath) throws on a server with no
+  // transport.
   const { startCredentialWatch } = await import('./mcp/lifecycle.js');
+  if (closing) return;
   const watch = startCredentialWatch({
     envFilePath,
     clock: systemClock,
     logger: log,
     profiles: readProfiles,
     onChange: async (change) => {
-      log.info('credentials changed; telling clients to re-list the tools', {
-        env_file: envFilePath,
-        added: change.added.length,
-        removed: change.removed.length,
-        rescoped: change.rescoped.length,
-      });
+      log.info(
+        'credentials changed; telling clients to re-list the tools and resources',
+        {
+          env_file: envFilePath,
+          added: change.added.length,
+          removed: change.removed.length,
+          rescoped: change.rescoped.length,
+        },
+      );
       // A session that has already gone away rejects the notification. That is
       // the session ending, not a failure worth reporting, so it is dropped
-      // from the set instead of logged — which is also how a long-lived http
-      // process stops accumulating handles for sessions it can no longer reach.
+      // from the set instead of logged. (Closed http sessions normally leave
+      // the set through `releaseHandle`; this catches any that did not.)
       await Promise.all(
         [...handles].map(async (handle) => {
           try {
-            await handle.notifyToolListChanged();
+            await handle.notifyListChanged();
           } catch {
             handles.delete(handle);
           }

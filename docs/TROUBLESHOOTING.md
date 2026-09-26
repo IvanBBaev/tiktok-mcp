@@ -22,7 +22,7 @@ From a clone, that is `node build/src/index.js doctor`.
 
 | Option | Effect |
 | ------ | ------ |
-| `--profile <name>` | Check that profile instead of `TT_ACTIVE_PROFILE` (default `DEFAULT`) |
+| `--profile <name>` | Check that profile instead of the default — `TT_LOCK_PROFILE` when set, else `TT_ACTIVE_PROFILE` (default `DEFAULT`) |
 | `--offline` | Skip the live TikTok probe and run the local checks only |
 | `--json` | Print the whole report as one JSON document instead of rows |
 | `-h`, `--help` | Show the usage text |
@@ -31,7 +31,7 @@ From a clone, that is `node build/src/index.js doctor`.
 | --------- | ------- |
 | `0` | Healthy — warnings are allowed |
 | `1` | A check failed, or the configuration could not be read at all |
-| `2` | Usage error (an unknown option) |
+| `2` | Usage error — an unknown option, `--profile` without a value (`--profile --json` counts as missing), or an invalid profile name |
 
 Every row is `[ ok ]`, `[info]`, `[warn]` or `[FAIL]`, followed by the check
 name and what it found. A row that has a fix carries it on the next line behind
@@ -115,19 +115,19 @@ path of the server.
 | `env lock` | Whether `<envfile>.lock` is held right now, and whether it is stale. |
 | `app credentials` | Whether `TT_CLIENT_KEY` and `TT_CLIENT_SECRET` are set. |
 | `profiles` | Which profiles exist and which one is active. |
-| `tokens` | `open_id` (masked), refresh-token expiry, access-token expiry. An expired refresh token is a failure; an expired access token is an info row, because renewing it is routine. |
+| `tokens` | `open_id` (masked), refresh-token expiry, access-token expiry. An expired refresh token is a failure; an expired access token is an info row, because renewing it is routine. A profile whose stored values cannot be read at all — a damaged timestamp (`invalid_timestamp`), for instance — fails the row and the run: `profile <P> could not be read (<code>): <message>`. The exceptions are the errors another row already reports (`missing_credentials`, `unknown_profile`, `invalid_profile_name`), so one cause is not failed twice. |
 | `scopes` | Granted scopes, and which tools of the enabled packages stay unusable without which scope. |
 | `api probe` | One live `user/info` call. An auth rejection fails the run; a network problem is only a warning, because a flaky link is not a broken install. Skipped with `--offline`, and skipped when the profile has not granted `user.info.basic`. |
 | `media root` | Whether `TT_MEDIA_ROOT` points at a readable directory. Unset is an info row: file uploads simply stay disabled. |
-| `publish journal` | Whether a journal file exists beside the env file, and its size. |
-| `transport` | The configured transport. |
+| `publish journal` | The journal beside the env file, folded the way `tiktok_list_publish_journal` folds it: how many attempts are recorded, and how many of those never reached an outcome. Unresolved attempts are a warning rather than a failure — the request may have been sent, so the post may exist — and the row names the two tool calls that settle it. A journal that exists but cannot be read is reported as unreadable, not as "nothing published yet". The row also looks at the journal's rotation lock, `journal.ndjson.lock`: absent, it adds nothing; held for less than the 15 s stale threshold, an info line `rotation lock held right now (N old)`; older, a warning `a stale rotation lock has been held for …`, with the `rm -rf` command to remove it if no server is running. |
+| `transport` | The configured transport. For `http` it warns when `TT_HTTP_INSECURE=1` exposes a plaintext bind off-box, and again when that runs without `TT_HTTP_ALLOWED_HOSTS` — past loopback, the allowlist is what stops DNS rebinding. On a loopback bind the flag is redundant and neither warning appears. |
 | `install` | Whether this copy is running from the npx cache. It warns if it is, because npx keeps its own copy and will not fetch a newer release while that copy is there — and `npm cache clean` does not remove it. The row carries the cache path for your platform. |
 
 ## Setup and startup
 
 | Symptom | What it means | Fix |
 | ------- | ------------- | --- |
-| `tiktok-mcp-ai requires Node.js 22 or newer; this is …` | The version guard in the launcher. Nothing from the app was even loaded. | Install Node 22+ (`.nvmrc` pins 24). In a GUI client, point `command` at the absolute path of the new interpreter. |
+| `tiktok-mcp-ai requires Node.js >= 22, but this is …` | The version guard in the launcher (`bin/tiktok-mcp-ai.cjs`). Nothing from the app was even loaded. Starting the entry directly (`node build/src/index.js`) hits the app's own guard instead, worded `tiktok-mcp-ai requires Node.js 22 or newer; this is …`. | Install Node 22+ (`.nvmrc` pins 24). In a GUI client, point `command` at the absolute path of the new interpreter. |
 | The client reports "command not found" / "server failed to start" | The client cannot resolve `node`, `npx` or the entry file. GUI clients do not inherit your shell `PATH`. | Use absolute paths in the client config — see [docs/CLIENTS.md](CLIENTS.md). |
 | `doctor` says `missing TikTok app credentials: …` (`missing_credentials`) | `TT_CLIENT_KEY` and/or `TT_CLIENT_SECRET` are not set anywhere the process can see. | Put both in the env file, or in the client's `env` block. Restart the client afterwards. |
 | Tools appear but every call fails with `unknown_account '<name>'` | The `account` argument names a profile that does not exist; the error lists the ones that do. | Drop the argument to use the default profile, or run `login --profile <name>` first. |
@@ -141,10 +141,12 @@ path of the server.
 | TikTok's own screen rejects the login before the browser comes back | The `redirect_uri` this server sent is not registered on the app — usually the missing trailing slash, `localhost` instead of `127.0.0.1`, or a registration without a wildcard port. | Register `http://127.0.0.1:*/callback/` exactly ([docs/SETUP-TIKTOK-APP.md § 3](SETUP-TIKTOK-APP.md#3-register-the-redirect-uri)). |
 | `login` fails naming `TT_REDIRECT_PORT` | You pinned a port and something else is on it. It never silently moves to an unregistered shape. | Free the port, change the pin (and the registration), or run `login --manual`. |
 | `login` hangs with no browser | Headless or SSH session. | `login --no-browser` prints the URL; `login --manual` also skips the loopback listener and takes the redirect URL by paste. |
+| `login --manual` prints `No redirect URL was pasted (the input ended); nothing was changed.` and exits 1 | Standard input closed before a line was read — stdin redirected from `/dev/null` or an empty pipe, or Ctrl-D at the prompt. Nothing was written. | Run it again on a terminal and paste the redirect URL (or just the `code`), or pipe that line in. |
 | A tool fails with `auth_expired` | TikTok rejected the token and the automatic refresh could not fix it — the refresh token expired (365 days), was revoked in the TikTok app, or the app's secret changed. Not retryable. | `npx tiktok-mcp-ai login --profile <name>`. Do not retry the call until that finishes. |
 | `doctor` says `the refresh token expired … ; this server cannot renew it on its own` | Same condition, caught locally before any call. | Same: log in again. |
 | `doctor` warns `the refresh token expires …` | It has less than 30 days left. Everything works today. | Re-run `login` before the date given. |
 | `doctor` says `the access token expired …` as an **info** row | Expected. The 24-hour access token is renewed on the next call from the refresh token. | Nothing. |
+| `login --revoke` prints `…, but its credentials were NOT cleared from <path>: the file could not be rewritten.` and exits 1 | The revoke itself (or the attempt at it) happened, but the env file could not be rewritten, so the tokens are still on disk. With `--purge-journal`, the journal is left alone too (`The publish journal was not purged.`), so a rerun finishes the whole job. | Follow the printed `Fix:` line: make the file writable (permissions, free disk space) and run the same `login --revoke` again, or delete the profile's token keys from the file by hand. |
 | Tokens work in the terminal but not in the client | The client is a different process with a different environment — usually a different `HOME`, `XDG_CONFIG_HOME` or `TT_ENV_FILE`, so it reads a different env file. | Compare `doctor`'s `env file` row with the path the client uses; pin `TT_ENV_FILE` in the client config if they differ. |
 
 ## Scopes and unavailable tools
@@ -168,7 +170,19 @@ Ask the user to run: npx tiktok-mcp-ai login --profile DEFAULT --scopes video.pu
 then verify with tiktok_get_auth_status.
 ```
 
-(error code `missing_scope`). Consequences worth knowing:
+(error code `missing_scope`). A profile with no stored credentials at all —
+the default profile before the first `login`, a profile that holds only app
+keys (no access or refresh token), or one whose record cannot be read — gets a different
+sentence under the same code, with `details.configured: false` and a plain
+`login` (no `--scopes`, which would grant that one scope alone):
+
+```
+Account 'DEFAULT' has no stored credentials, so it grants no scopes; this tool requires
+video.publish. Ask the user to run: npx tiktok-mcp-ai login --profile DEFAULT — then
+verify with tiktok_get_auth_status.
+```
+
+Consequences worth knowing:
 
 - A marker can be stale in either direction on a multi-account setup: the union
   may look fine while the *chosen* profile is not, and a stale marker never
@@ -190,7 +204,9 @@ directory named `<envfile>.lock` beside it, kept alive by a heartbeat.
 | Symptom | What it means | Fix |
 | ------- | ------------- | --- |
 | A call fails with `env_file_busy` | Another `tiktok-mcp-ai` process held the lock longer than `TT_ENV_LOCK_WAIT_MS` (30 s default). Retryable. | Wait a few seconds and retry. If nothing else is running, `doctor`'s `env lock` row reports the stale lock and prints the `rm -rf <envfile>.lock` command. |
-| `doctor` warns about a stale lock | A writer crashed. The next writer breaks a stale lock by itself, so this is a report, not a repair. | Nothing, usually. Remove the directory only if nothing is writing. |
+| `doctor` warns about a stale lock | A writer crashed. The next writer breaks a stale lock by itself — it renames the directory to a unique `<lock>.stale-<uuid>` tombstone, checks it moved the same directory whose age it measured, hands it back if a successor had re-taken the path meanwhile (only onto a free path, never over a third writer's fresh lock), and otherwise deletes it — so this is a report, not a repair. | Nothing, usually. Remove the directory only if nothing is writing. |
+| A warning names the `journal rotation lock` and `the publish journal` | Journal rotation takes the same kind of lock, `journal.ndjson.lock`, keyed on the journal rather than the env file. It waits only 2 s; past that the rotation is skipped (`could not rotate the publish journal; it keeps growing`) and the publish goes ahead. `doctor` reports the lock on its `publish journal` row (the `env lock` row checks `<envfile>.lock` only): an info line `rotation lock held right now (N old)` while it is younger than 15 s, a warning `a stale rotation lock has been held for …` once it is older. | Nothing, usually. A lock left by a crash is broken as stale automatically by the next rotation, which then succeeds. If the warning persists and no server is running, remove the directory with the `rm -rf` command the row prints. |
+| A warning `could not delete the remains of the stale … lock at <path>.stale-<uuid>` | Breaking a stale lock first renames it to a unique `.stale-<uuid>` tombstone, then deletes that. The lock itself is already clear; only the tombstone's delete failed. | Remove the named `.stale-<uuid>` directory by hand. |
 | `env_file_malformed`: `line N is not a comment and not a KEY=value assignment` | A hand-edit broke the file. Values may not span lines; comments start with `#` on their own line. | Fix or remove that line. |
 | `doctor` warns about duplicate or unknown `TT_*` keys | The file parses, but a key is set twice (last one wins) or misspelled — a misspelled key is silently inert, which is exactly how a setting "does not work". | Correct the file; [.env.example](../.env.example) lists every valid key. |
 | `config_schema_too_new`: writes refused | The env file was written by a newer version of this tool. Reads still work; writes are refused so an older build cannot corrupt a newer layout. | Update the package. |
@@ -205,7 +221,7 @@ retrying is sane.
 | Code | Where it comes from | What to do |
 | ---- | ------------------- | ---------- |
 | `local_rate_limited` | This server's own token bucket for publish inits: 6 per profile, refilling one every 10 seconds. Rejected locally, zero network. The error carries `retry_after_s` and an absolute `retry_at`. | Wait until `retry_at`. A preview never consumes a token and never refuses, so you can still prepare the post. |
-| `rate_limited` | TikTok answered 429. On a publish init this is **terminal for that attempt** — the init is never retried automatically, because a blind retry risks a duplicate post. | Wait the interval the error names, then start a fresh preview/apply. |
+| `rate_limited` | TikTok answered 429 — whatever the body, so an empty or HTML page from a proxy in front of TikTok lands here too. On a publish init this is **terminal for that attempt** — the init is never retried automatically, because a blind retry risks a duplicate post. | Wait the interval the error names, then start a fresh preview/apply. |
 | `daily_post_cap` | Upstream `spam_risk_too_many_posts`: the account hit its daily posting limit (~15 posts/24 h, shared across every app posting via the API). | Do not retry today. It clears as the 24 h window rolls. |
 | `active_user_cap` | Upstream `reached_active_user_cap`: an unaudited app served its maximum of 5 posting users in 24 h. | Do not retry today. The permanent fix is passing TikTok's app audit. |
 | `pending_share_cap` | Upstream `spam_risk_too_many_pending_share`: 5 unpublished API drafts already waiting on the account. | The user opens TikTok's inbox notifications and publishes or discards the pending drafts. |
@@ -237,17 +253,17 @@ slow** — that creates a second post.
 | Code | What it means | What to do |
 | ---- | ------------- | ---------- |
 | `plan_not_found` | The `plan_id` is unknown, already used, or expired (single-use, `TT_PLAN_TTL_S`, 10 min default). | Call the tool again *without* `plan_id`, show the fresh preview, then apply. |
-| `plan_mismatch` | The arguments, the account, or the file on disk changed since the preview. A plan applies exactly the previewed payload — including the file's size, mtime and identity. | Preview again and apply the new `plan_id`. |
-| `possible_duplicate` | The journal already holds an attempt with an identical payload — same media, text and settings — on this account. The guard matches the whole resolved request, not any single field, so editing the caption is not a way past it: it produces a *different* payload, which posts. | Verify with `tiktok_get_publish_status` and `tiktok_list_publish_journal` that no post exists. Only then re-preview and apply with `force: true`. |
+| `plan_mismatch` | The arguments, the account, or the file on disk changed since the preview. A plan applies exactly the previewed payload — including the file's size, mtime and identity; the upload opens the file once and refuses a descriptor that is not that same file. | Preview again and apply the new `plan_id`. |
+| `possible_duplicate` | The journal already holds an attempt with an identical payload — same media, text and settings — on this account. The guard matches the whole resolved request, not any single field, so editing the caption is not a way past it: it produces a *different* payload, which posts. With `details.in_flight: true`, the identical attempt is being sent by another call in this server right now and has not been journaled yet. | Verify with `tiktok_get_publish_status` and `tiktok_list_publish_journal` that no post exists (for `in_flight`, wait for the other attempt to finish first). Only then re-preview and apply with `force: true`. |
 | `media_root_not_configured` | `TT_MEDIA_ROOT` is unset (file uploads are fail-closed) or points somewhere unreadable. | Set it to a dedicated directory — never `$HOME` — and restart the client. |
 | `file_outside_media_root` | The path resolves outside `TT_MEDIA_ROOT` after `realpath`, so a symlink out of the tree is caught too. | Move the file under the media root. |
 | `file_not_found`, `file_empty`, `file_too_large` | Local pre-flight, before any byte leaves the machine. | Fix the file. Size limits are in [docs/TIKTOK-API.md § 6](TIKTOK-API.md). |
 | `url_prefix_unverified` | Either the local prefix allow-list or TikTok itself (`url_ownership_unverified`) refused the URL's host. Domain verification is a platform rule, not a server setting. | Host the media under a verified domain ([§ 8](SETUP-TIKTOK-APP.md#8-verify-a-domain-for-url-posting)), or upload a local file instead. |
 | `privacy_level_unavailable` | The requested privacy level is not among the ones `creator_info` offered — typically an unaudited app, where only `SELF_ONLY` exists. | Use one of the offered levels. The audit gate is TikTok's, and this server does not work around it. |
 | `branded_content_privacy_conflict` | TikTok forbids that combination of branded-content flags and privacy level. | Change one of the two. |
-| `upload_interrupted` | Chunks failed after the automatic retries, or all chunks were accepted and TikTok never confirmed. The upload cannot be resumed. | Check `tiktok_get_publish_status` for that `publish_id` first. If the post is genuinely missing, a fresh preview + apply creates a **new** attempt. |
+| `upload_interrupted` | Chunks failed after the automatic retries, or all chunks were accepted and TikTok never confirmed, or the file was rewritten in place mid-transfer ("the media file was modified during the upload" — its size or mtime changed; the upload reads a pinned descriptor, so a rename is harmless but an in-place edit is not). Repeated per-chunk timeouts usually mean a slow uplink: `TT_UPLOAD_TIMEOUT_MS` (120 s) applies to each chunk PUT attempt, and a chunk can reach ~128 MB, which needs about 1.07 MB/s sustained. The upload cannot be resumed. | Check `tiktok_get_publish_status` for that `publish_id` first. If the post is genuinely missing, a fresh preview + apply creates a **new** attempt — after leaving the file untouched, or raising `TT_UPLOAD_TIMEOUT_MS` on a slow uplink. |
 | `network_unsent` | The request provably never left the machine. Safe to retry. | Retry. |
-| `network_ambiguous` | The connection broke after the request may have been sent. **Not** safe to retry blindly. | Check `tiktok_list_publish_journal` and `tiktok_get_publish_status`, then decide. |
+| `network_ambiguous` | The connection broke or timed out after the request may have been sent, or a publish init was answered by a gateway rather than TikTok (a `2xx`/`5xx` that is not TikTok's JSON envelope, or a `5xx` without an error code). Either way the post may exist. **Not** safe to retry blindly. | Check `tiktok_list_publish_journal` and `tiktok_get_publish_status`, then decide. |
 | `publish_not_found` | TikTok has no record of that `publish_id` — expired status window, or another app's id. | Look for the attempt in `tiktok_list_publish_journal` and for the result in `tiktok_list_videos`. |
 | `journal_unreadable` | The local journal file exists but cannot be read or parsed. | Check permissions on `journal.ndjson` beside the env file. Publishing keeps working; only the journal read fails. |
 
@@ -264,6 +280,7 @@ if you set it. `doctor` prints the exact paths in its `env file` and
 | `.env` | Client key, client secret, access and refresh tokens, your `TT_*` settings |
 | `journal.ndjson` (+ `journal.ndjson.1`) | Append-only record of publish attempts: timestamp, profile, `open_id`, tool, title excerpt, `publish_id`, outcome. No media, no tokens |
 | `.env.lock` | The cross-process write lock. Transient — present only while a write is in flight, or left behind by a crash |
+| `journal.ndjson.lock` | The journal's rotation lock. Transient — present only while a rotation is in flight, or left behind by a crash |
 | `.env.pre-schema<N>` | Backup written by a schema migration. Holds credentials |
 
 Removing everything, in the order that leaves nothing behind:
@@ -276,7 +293,9 @@ Removing everything, in the order that leaves nothing behind:
 
    This asks TikTok to revoke the token and clears it from the env file. The
    publish journal is deliberately kept; add `--purge-journal` to delete it in
-   the same step.
+   the same step. If the env file cannot be rewritten, the command says the
+   credentials were **not** cleared, exits `1` and purges nothing — fix the
+   file and run it again.
 2. **Revoke in the TikTok app as well** if you want to be certain — TikTok's
    account settings list the apps a user has authorized, and removing the entry
    there is independent of anything this server can do.

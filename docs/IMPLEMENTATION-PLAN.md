@@ -74,19 +74,23 @@ CI already exists (WP-0.2); this phase is release engineering only.
 
 | WP | Scope | Effort | Corner cases |
 |---|---|---|---|
-| WP-3.1 | Publish pipeline: npm **trusted publishing (OIDC) + provenance**, release-guard (git tag == package.json == server.json == CHANGELOG), pack-audit tarball snapshot | M | — |
+| WP-3.1 | Publish pipeline: npm **trusted publishing (OIDC) + provenance**, release-guard (git tag == package.json == server.json == CHANGELOG), pack-audit tarball snapshot. OIDC cannot publish the package's *first* version — see § Road to v1.0 → First release bootstrap (G-14) | M | — |
 | WP-3.2 | CodeQL + dependabot + root `SECURITY.md` (disclosure policy) | S | — |
 | WP-3.3 | MCP registry `server.json` + publish sequencing; Claude Code plugin manifest (`.claude-plugin/`) | M | — |
-| WP-3.4 | npm `0.x` release; submit TikTok content-sharing **audit**; document the audit journey (requirements, demo video, timeline) | M | — |
+| WP-3.4 | npm `0.x` release; submit TikTok content-sharing **audit**; document the audit journey (requirements, demo video, timeline) — the playbook, the preconditions incl. G-4, the demo shot list and the log are **docs/AUDIT.md** | M | — |
 | WP-3.5 | Scope/`[UNAVAILABLE]` lifecycle v2: credential-store watch + `tools/list_changed` (per round-2 AI/DX contract) | M | CC-A7 |
 
 **Exit gate:** installable via `npx tiktok-mcp-ai` from npm with provenance;
 registry listing live; audit submitted.
 
-## Phase 4 — Ergonomics (demand-driven, unchanged)
+## Phase 4 — Ergonomics (demand-driven)
 
-MCP resources/prompts, webhooks ingestion, packaging — only when usage
-justifies. Research API package only if access is granted.
+MCP resources, prompts and argument completion **shipped 2026-09-19** in three
+slices (TOOLS.md § 7; ROADMAP Phase 4); none of them added write or network
+surface — a resource is a read-only tool at a URI, a prompt renders text, and
+every completion source is local data. Webhooks ingestion and desktop packaging
+remain demand-driven; the VS Code extension was pulled forward and shipped in
+Phase 3. Research API package only if access is granted.
 
 ---
 
@@ -169,29 +173,84 @@ passed":
   wait on TikTok's review queue.
 
 **Gap list** — needed for 1.0 but absent from the WPs above. Each gap is
-scheduled as a concrete task in `docs/TASK-BREAKDOWN.md` ("Lands in").
+scheduled as a concrete task in `docs/TASK-BREAKDOWN.md` ("Lands in"). The
+**Status** column is an audit of the tree, not a restatement of intent: every
+row below was checked against the file, code path, test or workflow that is
+supposed to close it (audited 2026-09-01). Four values are used — **closed**
+(delivered and verifiable in the repo), **closed pending an owner action** (the
+repo's half is done, a human step outside it remains), **partial** (with the
+shortfall named), **open**. The **Gap** column keeps its original wording — it
+states each gap as it was *opened*, which is history worth keeping; where it
+reads in the present tense ("README says 'MIT (planned)'"), the Status column
+is the current fact.
 
-| ID | Gap | Lands in |
-|---|---|---|
-| G-1 | `LICENSE` file (MIT) — README says "MIT (planned)"; no WP creates the file | TB-1 |
-| G-2 | Unofficial-status/trademark disclaimer in README + npm package description ("not affiliated with TikTok/ByteDance") | TB-1, TE-4 |
-| G-3 | `docs/SETUP-TIKTOK-APP.md` — operator walkthrough of the developer portal: app creation, Login Kit + Content Posting products, redirect URI registration, sandbox setup, domain verification | TE-4 |
-| G-4 | Privacy Policy + Terms of Service at live URLs — hard prerequisite for the TikTok audit; external deliverable (cannot be closed inside the repo, only tracked) | TE-5 |
-| G-5 | `login --revoke` (logout/disconnect) implementation + tests — mentioned in AUTH.md, absent from every WP; includes § 2.10 semantics (revoke keeps the journal; purge only with explicit `--purge-journal`) | TC-2 |
-| G-6 | `docs/CLIENTS.md` — per-client configuration: Claude Code, Claude Desktop, VS Code, Cursor | TE-4 |
-| G-7 | `docs/TROUBLESHOOTING.md` — top failure modes, doctor-first diagnostic flow | TE-4 |
-| G-8 | Uninstall / data-removal story: what to delete (env file, journal), how to revoke access | TE-4 |
-| G-9 | `CONTRIBUTING.md` — how to file bugs with redacted `doctor` output | TE-4 |
-| G-10 | CHANGELOG policy (keep-a-changelog) wired into the release guard from the first release | TE-1 |
-| G-11 | Deprecation policy for tools and env vars (grace period + hints channel) | TE-1 |
-| G-12 | RC checklist: `npx tiktok-mcp-ai` install smoke on ubuntu/macos/windows before tagging — **closed**, and automated rather than a checklist item: `scripts/smoke-pack.ts` (`npm run smoke:pack`) packs, installs the tarball into a temp prefix and drives the installed binary through a real MCP handshake; it runs as the `smoke-pack` CI job on all three OSes and again in `publish.yml` before `npm publish` (TESTING.md § CI matrix and gates) | TE-5 |
-| G-13 | Spec-doc reconciliation (SYNTHESIS § 4 backlog items 1–9) — the docs must state the synthesis outcomes directly so implementation agents build from a consistent spec, not review archaeology | Wave A (TA-1..TA-8) |
+| ID | Gap | Lands in | Status |
+|---|---|---|---|
+| G-1 | `LICENSE` file (MIT) — README says "MIT (planned)"; no WP creates the file | TB-1 | **closed** — `LICENSE` (MIT, © 2026 Ivan Baev), `"license": "MIT"` in `package.json`, README's license badge links to the file; no "MIT (planned)" text survives in README |
+| G-2 | Unofficial-status/trademark disclaimer in README + npm package description ("not affiliated with TikTok/ByteDance") | TB-1, TE-4 | **closed** — README callout at the top + § Trademark; `package.json` `description` opens with "Unofficial" and a `trademark` field carries the full text; `extension/package.json` `description` — the one line Marketplace search shows — opens with "Unofficial:" and closes with the disclaimer, and `extension/README.md` § Trademark carries it into the listing body; the three site pages each carry it too (`site/index.html` hero, footer and two FAQ answers; `site/privacy.html` and `site/terms.html` in both the meta description and the body) |
+| G-3 | `docs/SETUP-TIKTOK-APP.md` — operator walkthrough of the developer portal: app creation, Login Kit + Content Posting products, redirect URI registration, sandbox setup, domain verification | TE-4 | **closed** — `docs/SETUP-TIKTOK-APP.md` §§ 1–9 covers every item the gap names: app creation (§ 1), both products (§ 2), redirect URI (§ 3), sandbox vs. production (§ 6), the audit gate (§ 7), domain verification (§ 8) |
+| G-4 | Privacy Policy + Terms of Service at live URLs — hard prerequisite for the TikTok audit. No longer external: since the Pages site landed (`site/`, deployed by `pages.yml`), the two pages are in-repo deliverables — `site/privacy.html` and `site/terms.html`, served at `https://ivanbbaev.github.io/tiktok-mcp/privacy.html` and `…/terms.html`. They describe this project's own distribution and the software's data behavior; a developer running the server registers **their own** TikTok app and owes the portal their own policy URLs (SETUP-TIKTOK-APP.md § 1). One step is outside the repo: GitHub Pages must be enabled on the repository with Source = GitHub Actions — no workflow and no commit can do that, and until it is done the whole site 404s | TE-5 | **closed pending an owner action** — both pages are written (`site/privacy.html`, `site/terms.html`), carry the right canonical URLs and are linked from `site/index.html` and `site/sitemap.xml`; `pages.yml` deploys `site/`. Two things outside the repo's reach remain: the two files are still **untracked** (`git status`), and Pages is not enabled, so both URLs return 404 (`docs/AUDIT.md` § 2.1, re-checked 2026-09-01). Owner steps: commit the pages, enable Pages with Source = GitHub Actions, run `pages.yml` (it auto-triggers only on `site/**` pushes), confirm both URLs in a browser |
+| G-5 | `login --revoke` (logout/disconnect) implementation + tests — mentioned in AUTH.md, absent from every WP; includes § 2.10 semantics (revoke keeps the journal; purge only with explicit `--purge-journal`) | TC-2 | **closed** — `runRevoke` in `src/cli/login.ts` revokes upstream, clears the profile's tokens and states that the journal was kept; purge happens only under `--purge-journal`, which `parseLoginArgs` rejects on its own. Tests in `test/login.test.ts`: `--revoke clears the tokens but keeps the journal`, `--revoke --purge-journal deletes the journal and its rotation`, `--purge-journal without --revoke is rejected` |
+| G-6 | `docs/CLIENTS.md` — per-client configuration: Claude Code, Claude Desktop, VS Code, Cursor | TE-4 | **closed** — `docs/CLIENTS.md` has a section per named client (Claude Code, Claude Desktop, VS Code, Cursor) plus MCP Inspector, a launch-command decision table and a "confirm the wiring" step |
+| G-7 | `docs/TROUBLESHOOTING.md` — top failure modes, doctor-first diagnostic flow | TE-4 | **closed** — `docs/TROUBLESHOOTING.md` opens with § Run doctor first (incl. `--json` for CI), then a row per check and the failure modes grouped by area (setup, login, scopes, env lock, rate limits, publishing) |
+| G-8 | Uninstall / data-removal story: what to delete (env file, journal), how to revoke access | TE-4 | **closed** — `docs/TROUBLESHOOTING.md` § Uninstall and data removal: a table of every file written (`.env`, `journal.ndjson*`, `.env.lock`, `.env.pre-schema<N>`) and a six-step removal that revokes first and clears the npx cache last; summarized in README § Uninstall |
+| G-9 | `CONTRIBUTING.md` — how to file bugs with redacted `doctor` output | TE-4 | **closed** — `CONTRIBUTING.md` § Reporting a bug leads with `npx tiktok-mcp-ai doctor`, states why the output is shareable (allowlist redaction in `cliIo`) and cites `docs/SECURITY.md` § Redaction as the guarantee |
+| G-10 | CHANGELOG policy (keep-a-changelog) wired into the release guard from the first release | TE-1 | **closed** — `checkChangelog` in `scripts/release-guard.ts` enforces it: a released topmost section, no entries stranded above it under `[Unreleased]`, tag ⇄ heading agreement, an ISO date, a non-empty body and a compare link. Tested in `test/release.test.ts` (§ keep a changelog); `publish.yml` runs `release:guard` as its first gate. Policy text: `docs/SECURITY.md` § Compatibility and deprecation policy |
+| G-11 | Deprecation policy for tools and env vars (grace period + hints channel) | TE-1 | **closed** — `docs/SECURITY.md` § Compatibility and deprecation policy: what the published surface is, breaking vs. minor, a grace period of at least one minor release and 90 days (the floor starting at 1.0.0), and the channels — `Deprecated:` in the tool description and TOOLS.md entry, the same notice as a `hint` on the result, a once-at-startup stderr warning plus a `doctor` row for env vars, replacement shipping in the same release. Security changes are exempt. Linked from `CHANGELOG.md` and root `SECURITY.md`. The gap asked for a policy and the policy is here; note that it is so far unexercised — nothing is deprecated today (`grep -i deprecat src/**/*.ts` is empty), there is no rename registry behind the startup-warning promise, and the hint vocabulary in `src/mcp/result.ts` has no deprecation type, so the notice rides as a `note`. Those become due at the first deprecation, not before |
+| G-12 | RC checklist: `npx tiktok-mcp-ai` install smoke on ubuntu/macos/windows before tagging — automated rather than kept as a checklist item: `scripts/smoke-pack.ts` (`npm run smoke:pack`) packs, installs the tarball into a temp prefix and drives the installed binary through a real MCP handshake; it runs as the `smoke-pack` CI job on all three OSes and again in `publish.yml` before `npm publish` (TESTING.md § CI matrix and gates) | TE-5 | **closed** — `scripts/smoke-pack.ts` exists and is black-box by construction (expected strings duplicated as literals, child env built from nothing); `.github/workflows/ci.yml` runs it on the ubuntu/macos/windows matrix with `fail-fast: false`, and `publish.yml` repeats it as the last gate before `npm publish` |
+| G-13 | Spec-doc reconciliation (SYNTHESIS § 4 backlog items 1–9) — the docs must state the synthesis outcomes directly so implementation agents build from a consistent spec, not review archaeology | Wave A (TA-1..TA-8) | **closed**, one deviation recorded — items 1–9 all landed (spot-checked one anchor each: TOOLS.md § "There is no `apply` parameter" + the normative error texts; ARCHITECTURE.md §§ 7–8; TIKTOK-API.md V1–V8 + the 416 resync row; TESTING.md striking the "every chunk is 5–64 MB" invariant + the ratchet; SECURITY.md P-15 deferral + the sink table; CONFIGURATION.md `TT_PLAN_TTL_S`/`TT_CONFIG_SCHEMA`/`%LOCALAPPDATA%`; AUTH.md's pinned hex-PKCE vector + the loopback rules; README/ROADMAP Node ≥ 22). Deviation: item 8's "doctor 15-check list becomes the normative doctor spec" landed in `docs/CONTRACTS.md` § `cli/doctor.ts` rather than AUTH.md, and the registry holds **14** checks, not 15 |
+| G-14 | First-release bootstrap: npm trusted publishing cannot publish a package's *first* version, so the initial `npm publish` is manual and must happen — together with the trusted-publisher configuration — **before** any `v*` tag is pushed. See below | TE-5 | **open** — an owner action with nothing left for the repo to contribute. The pipeline is as designed (`publish.yml` holds no `NPM_TOKEN`, requests `id-token: write`, omits `registry-url`) and the package has never been published, so the bootstrap below has not happened. The tag is no longer a trap: only `publish.yml` runs on `tags: ['v*']`; `publish-mcp.yml` and `publish-vscode.yml` both follow it (`workflow_run` on *Publish*, gated on a successful, push-started `publish.yml` run of this repository), so a premature tag fails at `npm publish` and ships nothing anywhere. It still does not release anything either — do the manual publish before the first `v*` tag |
+
+**Where that leaves 1.0.** Twelve of the fourteen gaps are closed in the
+repository. Neither of the two that remain is code: G-4 needs its two pages
+committed and GitHub Pages enabled so the URLs the audit requires resolve, and
+G-14 needs the one manual `npm publish` described next. Both are the owner's to
+perform, and G-14 is what lets the first `v*` tag actually ship a release.
+
+**First release bootstrap (G-14).** WP-3.1 authenticates to npm by trusted
+publishing and deliberately holds no `NPM_TOKEN`: `publish.yml` requests
+`id-token: write`, omits `registry-url` so nothing writes an `_authToken` line,
+and lets the registry recognize the repository and workflow filename over OIDC.
+That is the right design and it has one property the plan did not state.
+
+**A trusted publisher cannot publish a package's first version.** The
+configuration is per package and lives on the package's settings page on
+npmjs.com — or behind `npm trust` (npm ≥ 11.15.0), which is the same
+configuration from a terminal, not a way around it: its prerequisites include
+"the package you're configuring must already exist on the npm registry"
+(npm/cli#8544 tracks lifting this and is open). `registry.npmjs.org/tiktok-mcp-ai`
+is a 404 today, so a tag pushed now would run the guard, `npm run check` and
+`smoke:pack` green and then fail at authentication, having proved everything
+except the one thing that mattered.
+
+The failure stays contained, because a `v*` tag triggers only one workflow and
+the other two follow it. `publish.yml` runs on the tag; `publish-mcp.yml` and
+`publish-vscode.yml` wait on `workflow_run` of *Publish* and proceed only when
+that run concluded `success`, ran `.github/workflows/publish.yml`, was started
+by a `push` and belongs to this repository (or on a manual `workflow_dispatch`
+from a `v*` tag, which runs `release:guard` itself before publishing).
+`publish.yml` creates its GitHub release only after `npm publish` succeeds, so a
+premature tag leaves no npm version, no VS Code Marketplace version, no MCP
+Registry entry and no GitHub release — only a failed run and a pushed tag, which
+can be deleted and pushed again once the bootstrap is done. (Before the
+chaining, `publish-vscode.yml` fired on the same tag with its own `VSCE_PAT` and
+would have **succeeded**, shipping a Marketplace release whose entire behavior
+is launching `npx -y tiktok-mcp-ai` against a package the registry does not have
+— a spent, unreusable Marketplace version.) The trap is defused, but the tag
+still releases nothing until G-14 is done.
+
+The first release is therefore a one-time manual sequence: `npm publish
+--access public` from a logged-in machine, then configure the trusted publisher
+for `IvanBBaev/tiktok-mcp` + workflow `publish.yml`, and only then push the tag.
+Every release after that is a tag push. `release-guard` cannot substitute for
+this — it compares the tag against the five version fields and the changelog and
+knows nothing about what the registry holds.
 
 ## Risk register
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| TikTok audit delayed/rejected | Publishing stuck at SELF_ONLY + 5 users | Ship reader MVP first (Phase 1 has standalone value); document audit path; SELF_ONLY is fully exercisable meanwhile |
+| TikTok audit delayed/rejected | Publishing stuck at SELF_ONLY + 5 users | Ship reader MVP first (Phase 1 has standalone value); document the audit path (**docs/AUDIT.md** — playbook, demo shot list, journey log); SELF_ONLY is fully exercisable meanwhile |
 | Platform docs drift vs reality | Rework in `api/` | Sandbox checklist per phase; `(verify at implementation time)` markers resolved by probes; error-catalog mapping isolated in one module |
 | Duplicate posts despite design | User-visible spam | plan_id + journal + never-retry-inits (three independent layers); CC-E7 demonstrated in the Phase-2 exit gate |
 | Cross-process races rarer than tests | Bricked profiles in the field | Lock manager is Phase 0 with a dedicated multi-process test harness (round-2 QA); doctor reconciliation as backstop |

@@ -100,6 +100,11 @@ export const silentLogger: Logger;
 ```ts
 /** Allowlist-based deep redaction — unknown keys are redacted by default. */
 export function redactValue(value: unknown): unknown;
+/** `redactValue` for a plain record, typed record-in, record-out: the same
+ *  walk (nested default-deny, depth limit, cycle marking, key rules), so
+ *  `redactRecord(r)` deep-equals `redactValue(r)` for every plain object `r`.
+ *  What `core/log` applies to a record's fields. */
+export function redactRecord(record: Record<string, unknown>): Record<string, unknown>;
 
 /** Register an exact secret value (tokens, client_secret, upload_token —
  *  upload_token is a secret sink per SYNTHESIS § 2.5). */
@@ -179,6 +184,27 @@ export const systemClock: Clock;
 Every time-dependent module takes an injectable `Clock` (CC-H4 — tests never
 sleep).
 
+## core/net.ts
+
+```ts
+/** `AddressInfo.port` when the server bound one; `fallback` for the string and
+ *  `null` arms `Server.address()` is typed for but a host:port bind never yields. */
+export function boundPortOf(
+  address: AddressInfo | string | null, fallback: number,
+): number;
+```
+
+The one listener-side helper both servers this package binds share — the MCP
+HTTP transport (`mcp/http`) and the login loopback callback (`cli/login`). It
+lives in `core/` because `mcp/` may not import `cli/`: until 2026-09-18 the same
+one-liner existed in both layers (`mcp/http`'s `boundPortOf`, `cli/login`'s
+`effectivePort`). Each caller binds a `host:port` and reads the address after
+the awaited bind, so only the `AddressInfo` arm is ever taken in practice; the
+type cannot say so, and the other two arms answer with the asked-for port
+rather than with a port nothing is listening on. Split out as an ordinary
+function so all three arms are decided by `test/net.test.ts` rather than
+excluded from coverage.
+
 ## core/settings.ts
 
 ```ts
@@ -217,6 +243,14 @@ export function settingVarName(field: string): string;
 
 /** Every TT_ name this build understands, for "did you mean" diagnostics. */
 export function knownSettingVars(): ReadonlySet<string>;
+
+/** A bare host name in the form the WHATWG URL parser gives it — lowercased,
+ *  IPv6 compressed and unbracketed, numeric IPv4 shorthands expanded
+ *  (`127.1` → `127.0.0.1`). `undefined` for anything that is not a bare host:
+ *  a port, a path, userinfo, an IPv6 zone id (`fe80::1%eth0`), or a name the
+ *  parser rejects. TT_HTTP_ALLOWED_HOSTS entries are stored in this form, and
+ *  mcp/http canonicalizes the `Host` hostname through it before comparing. */
+export function canonicalHostName(value: string): string | undefined;
 ```
 
 ## core/config.ts (env file + profiles)
@@ -245,15 +279,35 @@ export interface EnvLine {
 }
 
 /** A snapshot: reads never observe a later write (CC-F2 overlay applies on
- *  top of it, not inside it). */
-export interface EnvFileSnapshot {
+ *  top of it, not inside it). Discriminated on `exists`: `readEnvFile` builds
+ *  exactly two literals, and each either has a mode or cannot have one, so a
+ *  caller that wants `mode` narrows on `exists` first — the one question that
+ *  decides whether a mode exists at all. (An optional `mode?` on a single shape
+ *  only ever manufactured guards nothing could reach — TESTING.md § What to do
+ *  with an uncovered branch, verdict 5.) */
+export type EnvFileSnapshot = ExistingEnvFile | MissingEnvFile;
+
+/** The file was there and was read; `mode` came off the SAME handle as the
+ *  bytes (one `open`, not `readFile` + `stat`), so it describes the file those
+ *  bytes came from and is never absent. */
+export interface ExistingEnvFile extends EnvFileSnapshotBase {
+  readonly exists: true;
+  readonly mode: number;                // st_mode & 0o777 — meaningful on POSIX only (CC-F3)
+}
+
+/** No file yet — legal, not an error: the process environment may carry
+ *  everything (CC-F1). No mode, so this arm declares none. */
+export interface MissingEnvFile extends EnvFileSnapshotBase {
+  readonly exists: false;
+}
+
+/** What both arms carry (not exported). */
+interface EnvFileSnapshotBase {
   readonly path: string;
-  readonly exists: boolean;             // false ⇒ "no file yet", not an error
   readonly values: ReadonlyMap<string, string>;
   readonly declaredSchema?: number;     // as written in the file, if present
   readonly schema: number;              // effective (defaults to 1)
-  readonly mode?: number;               // POSIX permission bits, if statable
-  readonly warnings: readonly string[]; // duplicate keys, loose mode, …
+  readonly warnings: readonly string[]; // duplicate keys, unknown TT_* keys, …
   readonly lines: readonly EnvLine[];
   readonly eol: "\n" | "\r\n";          // the file's own dominant EOL
 }
@@ -277,6 +331,11 @@ export function resolveEnvFilePath(
  *  error), "config_schema_too_new". */
 export function readEnvFile(path: string): Promise<EnvFileSnapshot>;
 
+/** The spelling a caller-given `account` is compared by: trimmed and
+ *  upper-cased, not validated — so `work`, ` Work ` and `WORK` name one
+ *  profile. */
+export function canonicalProfileName(name: string): string;
+
 /** Upper-cased, validated profile name; the sole gate on what may become part
  *  of an env key. Error code: "invalid_profile_name". */
 export function normalizeProfileName(name: string): string;
@@ -288,9 +347,11 @@ export function listProfiles(
   snapshot: EnvFileSnapshot, env?: NodeJS.ProcessEnv,
 ): readonly string[];
 
-/** Read profile after presence-based process-env overlay (CC-F2). Error codes:
- *  "unknown_profile" (listing the ones that exist), "missing_credentials",
- *  "invalid_timestamp" (CC-H2). */
+/** Read profile after presence-based process-env overlay (CC-F2). A per-profile
+ *  key is found in any case, as listProfiles declares it (TT_PROFILE_work_* is
+ *  profile WORK): in each source the exact spelling wins, and process env still
+ *  wins over the file. Error codes: "unknown_profile" (listing the ones that
+ *  exist), "missing_credentials", "invalid_timestamp" (CC-H2). */
 export function readProfile(
   name: string, snapshot: EnvFileSnapshot, env?: NodeJS.ProcessEnv,
 ): ProfileCredentials;
@@ -304,7 +365,13 @@ export interface PersistOptions {
 }
 
 /** Atomic write (temp + rename), fs.chmod(0o600) unconditionally (no-op on
- *  win32, asserted POSIX-only); EPERM/EBUSY/EACCES rename retried ×3
+ *  win32, asserted POSIX-only). A symlinked env file is written through to its
+ *  canonicalPath target (the link is kept, not replaced by a regular file); a
+ *  dangling link, or a chain of them, is followed too — the final target's
+ *  parent directory is created and the file lands where the chain ends, with
+ *  every link in it kept. The
+ *  temp file is opened exclusively ('wx') so nothing pre-existing at the temp
+ *  name is followed or reused; EPERM/EBUSY/EACCES rename retried ×3
  *  (50/100/200 ms) then degrade to in-memory + warn (CC-H3). The *read* half of
  *  read-merge-write degrades identically: a document this process cannot read is
  *  one it must not overwrite. Callers MUST hold withEnvLock — this function does
@@ -327,6 +394,10 @@ export interface EnvLockOptions {
   clock?: Clock;
   logger?: Logger;       // where the stale-break warning goes; no global sink
   random?: () => number; // [0,1) jitter seam; out-of-range values are clamped
+  /** What the messages call the lock and the file it guards; default the env
+   *  file's wording ("env-file" lock, "the credential file"). Journal rotation
+   *  passes { lock: "journal rotation", guards: "the publish journal" }. */
+  label?: { lock: string; guards: string };
 }
 
 /** The lock directory for an env file: `<envfile>.lock`, a sibling so it
@@ -334,13 +405,28 @@ export interface EnvLockOptions {
  *  `doctor`, which reports stale locks. */
 export function envLockDir(envFilePath: string): string;
 
+/** The one spelling of a file every writer agrees on: symlinks resolved
+ *  (realpath), a dangling chain followed hop by hop (a relative target read
+ *  against the link's real directory) to the path it will create, and a file
+ *  that does not exist yet placed under its parent's real directory. Up to
+ *  MAX_LINK_HOPS (40, Linux's SYMLOOP_MAX) links are followed; a loop has no
+ *  end, so the path is returned as given (resolved) and the read that follows
+ *  reports the loop. Every link in a chain therefore resolves to the same
+ *  spelling — one lock, and no link mid-chain is replaced by a regular file. withEnvLock
+ *  keys the lock directory on it, core/config's atomic write targets it, and
+ *  doctor reports the lock at envLockDir(canonicalPath(file)) — so a symlink
+ *  and its target share ONE lock (two names would exclude nothing while
+ *  writing the same bytes). */
+export function canonicalPath(path: string): Promise<string>;
+
 /** Cross-process mutex around the env file (SYNTHESIS § 2.2):
- *  fs.mkdir("<envfile>.lock") acquisition (atomic on every platform/FS);
+ *  fs.mkdir("<canonicalPath(envfile)>.lock") acquisition (atomic on every platform/FS);
  *  a JSON {pid,hostname,createdAt} file inside is diagnostic only —
  *  liveness is mtime-only. Timeout ⇒ TikTokError code "env_file_busy".
  *  Caller obligation (oauth): on timeout re-read the env once and adopt a
- *  rotated token before surfacing the error. The journal does NOT use this
- *  lock (O_APPEND).
+ *  rotated token before surfacing the error. Journal appends do NOT take
+ *  this lock (O_APPEND); journal rotation uses the same mutex keyed on the
+ *  journal path (journal.ndjson.lock), never the env file's.
  *
  *  Degradation (CC-H3 — lock trouble never costs a valid token):
  *   - a duration option that is not a usable number ⇒ documented default +
@@ -384,7 +470,9 @@ the other.
 ```ts
 export type RetryClass = "read" | "init" | "chunk";
 // read:  retry 429/5xx/network with backoff + Retry-After (CC-B3)
-// init:  NEVER retried (CC-B4/B5); upstream 429 on init is terminal (CC-B8)
+// init:  NEVER retried (CC-B4/B5); upstream 429 on init is terminal (CC-B8);
+//        a 2xx/5xx without a readable envelope, or a 5xx without error.code,
+//        is "network_ambiguous" like a timeout (CC-B2/B5)
 // chunk: 1 + settings.chunkRetries attempts, identical Content-Range (CC-B7).
 //        In-call only for a replayable (Uint8Array) body; a streamed body
 //        cannot be re-read, so putChunk makes ONE attempt and api/upload owns
@@ -414,7 +502,10 @@ export interface TtRequestOptions {
 export type OauthRequestOptions = Omit<TtRequestOptions, "retryClass">;
 
 /** {data,error} envelope decoder; error.code !== "ok" ⇒ TikTokError kind:"api"
- *  (CC-B1); non-JSON tolerated (CC-B2); redirect:"error" (CC-B6). */
+ *  (CC-B1); non-JSON tolerated (CC-B2) — for the init class it is
+ *  "network_ambiguous" on a 2xx/5xx; an "ok" envelope whose `data` is null,
+ *  a scalar or an array ⇒ "network_ambiguous" for the init class,
+ *  "upstream_error" (not retried) otherwise (CC-B2); redirect:"error" (CC-B6). */
 export function ttRequest<T>(opts: TtRequestOptions): Promise<T>;
 
 /** Flat OAuth-shape decoder (error/error_description/log_id) — the envelope
@@ -460,10 +551,15 @@ export function putChunk(opts: PutChunkOptions): Promise<ChunkPutResult>;
 **Failure codes (contract — callers and `mcp/result` branch on them).**
 `egress_blocked` (kind `validation`, never retryable — also raised when a
 redirect is refused, CC-B6); `network_ambiguous` (an `init` whose transport
-failed or timed out — CC-B4/B5, terminal, remediation points at the publish
-journal); `network_error` and `timeout` (retryable, `read`/`chunk` only);
+failed or timed out — CC-B4/B5 — or that was answered without TikTok's
+envelope: a `2xx`/`5xx` whose body is not JSON or not a JSON object, or a `5xx`
+envelope without `error.code` — CC-B2/B5 — or an `ok` envelope whose `data`
+is `null`, a scalar or an array — CC-B2; terminal, remediation points at the
+publish journal, and the tool layer journals it `send_ambiguous`; a `4xx` and
+an explicit `error.code` keep their normal mapping); `network_error` and `timeout` (retryable, `read`/`chunk` only);
 `rate_limited` (CC-B8, carries the wait hint); `upstream_error` (a 5xx on a
-chunk PUT); `invalid_params` (a non-positive duration option, a `GET` with a
+chunk PUT; an `ok` envelope whose `data` is not an object on a non-init call,
+CC-B2 — not retried); `invalid_params` (a non-positive duration option, a `GET` with a
 body, an unencodable OAuth body).
 
 **Retry ladder.** A failure that never produced a response — a blocked DNS
@@ -526,14 +622,29 @@ export type RevokeDeps = CallSeams & {
 /** Single-flight per profile in-process + withEnvLock across processes.
  *  Rotated refresh token persisted BEFORE first use of the new access token
  *  (CC-A1/A2). invalid_grant: re-read env once under the lock, adopt + retry
- *  once, else terminal re-login error (SYNTHESIS § 2.2). */
+ *  once, else terminal re-login error (SYNTHESIS § 2.2). No refresh token on
+ *  file and none in the process env (another process ran `login --revoke`):
+ *  the in-memory one is NOT spent — that would resurrect the profile — the
+ *  adopted set is dropped and `auth_expired` is thrown. */
 export function ensureFreshAccessToken(
   profile: string, deps?: RefreshDeps,
 ): Promise<string>;
 
 /** Revocation KEEPS the journal (SYNTHESIS § 2.10); purge is a separate,
- *  explicit CLI flag. Clears the six token keys and the in-process cache. */
-export function revokeToken(profile: string, deps?: RevokeDeps): Promise<void>;
+ *  explicit CLI flag. Clears the six token keys and the in-process cache. The
+ *  access token is registered as a secret before the revoke request is sent.
+ *  Under the env lock the profile is re-read; an access token a concurrent
+ *  refresh rotated in since the first read is revoked as well (with the
+ *  re-read client credentials), and `upstream` reports that second call.
+ *  A failed local clear is returned (`cleared: false`), not thrown, so the CLI
+ *  can still say what happened upstream (AUTH.md § 4). */
+export interface RevokeOutcome {
+  readonly profile: string;
+  readonly envFilePath: string;
+  readonly upstream: 'none' | 'revoked' | 'unconfirmed';
+  readonly cleared: boolean;
+}
+export function revokeToken(profile: string, deps?: RevokeDeps): Promise<RevokeOutcome>;
 
 /** Drops the in-process credential cache (adopted set + spent-token memo).
  *  Test seam: module state is per-process by design. */
@@ -541,10 +652,12 @@ export function resetTokenCache(): void;
 ```
 
 Two pieces of per-process state sit behind these functions. The **adopted set** is
-the credential cache single-flight hands out. The **spent-token memo** records the
-refresh token each profile last sent to TikTok: CC-F2 makes a `TT_REFRESH_TOKEN`
-pinned in the MCP client's config win over the file forever, so without the memo
-every refresh after the first would spend the same dead token. `revokeToken`
+the credential cache single-flight hands out. The **spent-token memo** records
+every refresh token each profile has sent to TikTok: CC-F2 makes a
+`TT_REFRESH_TOKEN` pinned in the MCP client's config win over the file forever, so
+without the memo every refresh after the first would spend the same dead token
+(every value, not only the last — after two rotations the pinned token is no
+longer the latest spend, yet still dead). `revokeToken`
 clears both — a memo left next to no credentials would make the next login's
 first refresh look like a replay.
 
@@ -626,11 +739,15 @@ is terminal.
 export const USER_FIELDS: readonly UserField[];              // the documented vocabulary
 export type UserField = (typeof USER_FIELDS)[number];
 export const USER_FIELD_SCOPES: Readonly<Record<UserField, string>>;  // field → scope
+/** A payload whose `user` is absent or `null` is `malformedPayload` (`upstream_error`). */
 export function getUserInfo(
   ctx: ApiContext, fields: string[], opts?: { signal?: AbortSignal },
 ): Promise<UserInfo>;
 
 // api/video.ts
+// A `videos` value that is not an array, or an entry that is not an object
+// with a string `id`, is `malformedPayload(<endpoint>, …)` (`upstream_error`)
+// on both endpoints — `id` is what pagination and CC-C7 key on.
 export const VIDEO_FIELDS: readonly VideoField[];
 export type VideoField = (typeof VIDEO_FIELDS)[number];
 export const DEFAULT_VIDEO_FIELDS: readonly VideoField[];
@@ -712,7 +829,28 @@ export function validatePhotoSource(
   photoUrls: readonly string[], photoCoverIndex: number,
 ): void;                                    // CC-E9
 
-export interface PublishInitResult { publishId: string; uploadUrl?: string }
+/** How TikTok gets the video: it pulls it from a verified URL, or the client
+ *  PUTs the bytes to the `upload_url` the init returns. */
+export interface PullFromUrlSource { source: "PULL_FROM_URL"; videoUrl: string }
+export interface FileUploadSource {
+  source: "FILE_UPLOAD"; videoSize: number; chunkSize: number; totalChunkCount: number;
+}
+export type VideoSource = PullFromUrlSource | FileUploadSource;
+/** `S` is the source the init is asked for, and it decides the result shape:
+ *  a call site that hands over a FILE_UPLOAD gets an `uploadUrl` it does not
+ *  have to check for. Left unspecified, the union over both kinds. */
+export interface VideoPostInit<S extends VideoSource = VideoSource> {
+  postInfo: Record<string, unknown>; source: S; signal?: AbortSignal;
+}
+export interface DraftUploadInit<S extends VideoSource = VideoSource> {
+  source: S; signal?: AbortSignal;
+}
+export interface PublishInitResults {
+  PULL_FROM_URL: { publishId: string; uploadUrl?: string };   // passed through if sent anyway
+  FILE_UPLOAD:   { publishId: string; uploadUrl: string };    // carries the upload_token
+}
+export type PublishInitResult<S extends VideoSource = VideoSource> =
+  PublishInitResults[S["source"]];
 /** All three inits use retryClass "init": a publish attempt is spent on the
  *  first call, so a retry could duplicate a post. `uploadUrl` never leaves the
  *  api layer, and its `upload_token` is registered as a secret on the way out.
@@ -721,11 +859,18 @@ export interface PublishInitResult { publishId: string; uploadUrl?: string }
  *  endpoint>, "upload_url string for a FILE_UPLOAD init")` rather than
  *  returning a result whose caller would only discover the hole one layer up,
  *  after the publish attempt was already spent. A PULL_FROM_URL init has no
- *  upload URL and is not checked. */
-export function initVideoPost(ctx: ApiContext, req: VideoPostInit):
-  Promise<PublishInitResult>;
-export function initDraftUpload(ctx: ApiContext, req: DraftUploadInit):
-  Promise<PublishInitResult>;
+ *  upload URL and is not checked. The result type says the same thing: a
+ *  FILE_UPLOAD caller's `PublishInitResult` carries `uploadUrl: string`.
+ *  A 2xx payload without a non-empty string `publish_id` (all three inits)
+ *  throws `network_ambiguous` (kind "network", `cause` = the malformedPayload
+ *  error), not `upstream_error`: the init may have been accepted, so it is
+ *  journaled send_ambiguous and the duplicate guard holds (CC-G4). */
+export function initVideoPost<S extends VideoSource>(
+  ctx: ApiContext, req: VideoPostInit<S>,
+): Promise<PublishInitResult<S>>;
+export function initDraftUpload<S extends VideoSource>(
+  ctx: ApiContext, req: DraftUploadInit<S>,
+): Promise<PublishInitResult<S>>;
 export function initPhotoPost(ctx: ApiContext, req: PhotoPostInit):
   Promise<{ publishId: string }>;
 export function getPublishStatus(
@@ -787,12 +932,25 @@ export function verifyMediaFile(
   previous: MediaFile, mediaRoot: string | undefined,
 ): Promise<MediaFile>;
 
-/** Streams each chunk with `fs.createReadStream(path, { start, end })` and owns
- *  the 1 + TT_CHUNK_RETRIES loop itself, passing `chunkRetries: 0`: `putChunk`
+/** Opens the media file ONCE (`pinFile`) and streams each chunk from that
+ *  descriptor as a `ReadableStream` fed by positional `handle.read` calls in
+ *  1 MiB slices — not `handle.createReadStream`, whose destroy/cancel closes
+ *  the handle even with `autoClose: false` (breaking every later retry) and
+ *  which leaves a `close` listener per stream. A file truncated mid-chunk
+ *  fails the body; the re-stat after it skips the retries and reports
+ *  `upload_interrupted` ("modified during the upload"). Owns the
+ *  1 + TT_CHUNK_RETRIES loop itself, passing `chunkRetries: 0`: `putChunk`
  *  disables its in-call retries for a stream body it cannot replay and defers
  *  to "the caller re-reads the byte range and calls again". Every attempt opens
- *  a fresh stream over a byte-identical `Content-Range`, which is what keeps
- *  RSS bounded on a 128 MB final chunk while still honouring CC-B7/CC-D6.
+ *  a fresh stream on the pinned descriptor over a byte-identical
+ *  `Content-Range`, which is what keeps RSS bounded on a 128 MB final chunk
+ *  while still honouring CC-B7/CC-D6 — and a rename/replace of the path
+ *  mid-upload cannot splice another file's bytes in. The pinned file's size
+ *  must equal the plan total and, when `identity` is given, its (size,
+ *  mtimeMs, dev, ino) must equal what `verifyMediaFile` confirmed, else
+ *  `plan_mismatch` before any PUT. Before each chunk the descriptor is
+ *  re-stat'ed; a size or mtime change (an in-place rewrite) fails with
+ *  `upload_interrupted` ("the media file was modified during the upload").
  *  `contentType` overrides the extension map (.mp4/.m4v ⇒ video/mp4,
  *  .mov/.qt ⇒ video/quicktime, .webm ⇒ video/webm, anything else video/mp4):
  *  no doc prescribes one, and TikTok validates the container by content (CC-D9)
@@ -800,14 +958,32 @@ export function verifyMediaFile(
  *  file_format_check_failed, so refusing locally would invent a catalog code
  *  that does not exist. `onProgress` fires once per chunk AFTER TikTok accepts
  *  it, with a 0-based `chunkIndex` — `ToolCtx.progress` is (done, total), so
- *  the tool layer passes `(i, n) => progress(i + 1, n)`. */
+ *  the tool layer passes `(i, n) => progress(i + 1, n)`. A 416 resyncs the
+ *  cursor to where TikTok says progress is and, whenever the position moved,
+ *  calls `onProgress(index - 1, n)` for the chunks it says it holds — also
+ *  backwards, so the position a later failure reports is the right chunk; the
+ *  tool layer drops a value that does not exceed the last one it notified, so
+ *  MCP progress never decreases. A resync to the end of the file (progress ≥
+ *  total) completes the upload — that 416 is the lost 201. A FINAL-chunk 416
+ *  whose progress equals the last byte index (total − 1) throws
+ *  `network_ambiguous`: until probe P-11 pins the unit it is every byte or all
+ *  but one. A transport failure (`network_error` / `timeout`) on the FINAL
+ *  chunk throws `network_ambiguous` rather than `upload_interrupted`: its
+ *  arrival is what completes the upload, so the bytes may have landed with
+ *  only the answer lost (CC-G4). Once such an attempt was replayed, any later
+ *  failure of the final chunk — `5xx` retries exhausted, or a terminal
+ *  403/404/400 — is `network_ambiguous` too, never `upload_interrupted`. */
 export function uploadFile(ctx: ApiContext, opts: {
   filePath: string; plan: ChunkPlan; uploadUrl: string;
   contentType?: string;
   signal?: AbortSignal;
   onProgress?: (chunkIndex: number, totalChunks: number) => void;
   random?: () => number;            // backoff jitter seam (TESTING determinism rule 4)
+  identity?: FileIdentity;          // what verifyMediaFile confirmed; the descriptor must be that file
 }): Promise<void>;
+
+/** What a file is pinned by: the fields `verifyMediaFile` compares. */
+export type FileIdentity = Pick<MediaFile, 'size' | 'mtimeMs' | 'dev' | 'ino'>;
 ```
 
 ## mcp/define.ts (tools-as-data)
@@ -856,7 +1032,7 @@ export const accountArg: z.ZodOptional<z.ZodString>;
  *  it (the § 2.2 filter exception, e.g. `tiktok_list_publish_journal`). */
 export function toolInput<Shape extends z.ZodRawShape>(
   shape: Shape,
-): z.ZodObject<Shape & { account: typeof accountArg }, "strict">;
+): z.ZodObject<{ account: typeof accountArg } & Shape, z.core.$strict>;
 ```
 
 `defineTool` rejects at import time: a name outside lowercase-snake
@@ -866,7 +1042,8 @@ empty scopes, an input schema that accepts unknown keys (CC-G1), and
 
 `src/tools/index.ts` is the manifest-in-code: the ordered `PACKAGES` array is
 the ONE source consumed by (1) server registration, (2) the manifest snapshot
-test, (3) README generation, (4) `server.json` generation.
+test, (3) README generation, (4) the `server.json` sync check (the file is
+hand-curated; only its "N tools" claim is compared).
 
 ```ts
 export interface ToolPackageSpec { name: PackageName; tools: readonly AnyToolSpec[] }
@@ -903,6 +1080,20 @@ export type HintType =
   | "reauth"
   | "note";
 
+/** Closed vocabulary — the operator-side steps a `user_action` hint may name,
+ *  derived from the frozen `USER_ACTIONS` below so the list is enumerable at
+ *  runtime. Membership answers TOOLS.md § 5.1's question — a step only the
+ *  human/operator can take *next, before this call can proceed*. The
+ *  unaudited-app case is NOT here: it is a standing condition of the
+ *  installation, reported alongside a flow that continues, and TOOLS.md § 4
+ *  (flow 2) and § 5.1 both report it as `note`. `move_file` and `host_media`
+ *  are: they ride on non-retryable refusals that end the call with nothing
+ *  created, and only past an init are they withheld (the attempt exists
+ *  upstream, CC-B4, so the next step is a status poll). */
+export type UserAction =
+  | "login" | "open_tiktok_app" | "move_file"
+  | "host_media" | "configure_server";
+
 export interface Hint {
   type: HintType;
   text: string;                  // model-facing sentence(s), ≤ 300 chars (TOOLS.md § 5.2)
@@ -915,9 +1106,7 @@ export interface Hint {
   poll_after?: string;           // poll — absolute ISO-8601 UTC (SYNTHESIS § 2.3)
   plan_id?: string;              // approval_required
   expires_at?: string;           // approval_required — absolute ISO-8601 UTC
-  action?:                       // user_action
-    | "login" | "open_tiktok_app" | "move_file"
-    | "host_media" | "configure_server" | "wait_for_audit";
+  action?: UserAction;           // user_action
   command?: string;              // reauth — exact CLI line
   profile?: string;              // reauth
 }
@@ -945,9 +1134,12 @@ export interface TruncationInfo {
   // char_budget is stamped by the truncator; the other two by the tool itself —
   // item_cap = its own ceiling (resumable), cursor_stuck = upstream stopped
   // paginating (CC-C3), which is why that one never carries a resume_cursor.
+  // char_budget never carries one either: it replaces the tool's marker and
+  // drops meta.next_cursor, since any cursor points past the whole fetched
+  // page and would skip the elided items (the note says to narrow instead).
   reason: "char_budget" | "item_cap" | "cursor_stuck";
   returned: number;                     // items still present in the elided array
-  resume_cursor?: string;               // only when the tool supplied one
+  resume_cursor?: string;               // item_cap only, when the tool supplied one
 }
 
 export interface TruncateOptions { pretty?: boolean }   // TT_PRETTY_JSON=1
@@ -962,7 +1154,8 @@ export interface TruncatedResult {
 /** Redact → serialize → fit. Every string value goes through `redactText`
  *  first (§ 2.5); the ladder then elides the largest top-level array in `data`
  *  item by item, falls back to `data.meta` alone, and finally to the
- *  ok/error/hints/journal floor (CC-G7). Every rung is valid JSON (CC-G2) and
+ *  ok/error/hints/journal floor (CC-G7). The first two rungs stamp a
+ *  `char_budget` marker with no `resume_cursor` and delete `meta.next_cursor`. Every rung is valid JSON (CC-G2) and
  *  never cuts a surrogate pair. Throws `result_not_serializable` when the
  *  envelope cannot be stringified at all. */
 export function truncateResult(
@@ -979,7 +1172,45 @@ export function toToolContent(
 ): string;
 
 export const HINT_TYPES: readonly HintType[];                    // frozen, six entries
+export const USER_ACTIONS: readonly UserAction[];                // frozen, five entries
 export const RESULT_JSON_SCHEMA: Readonly<Record<string, unknown>>;  // outputSchema
+
+export const MAX_HINTS = 3;               // TOOLS.md § 5.2 rule 4
+/** TOOLS.md § 5.2 rule 1, measured on `text` alone. Enforced at *runtime* in
+ *  exactly one place — the pagination-cursor note, whose resume cursor is the
+ *  only value reaching a hint that is neither a fixed template nor bounded by
+ *  `hintToken`/`hintEnum`. Everywhere else an over-long hint is a bug in this
+ *  server rather than upstream data, so `test/result.test.ts` walks the
+ *  constructors for it instead. A general runtime clamp was declined: the clip
+ *  lands on the end of the sentence, which is where the negative imperative
+ *  lives ("Do not re-post."). */
+export const MAX_HINT_CHARS = 300;
+export const MAX_HINT_TOKEN_CHARS = 64;   // § 5.2 rule 3 — longest inlinable identifier
+
+/** § 5.2 rule 3 (the trust boundary) in code, so that no constructor
+ *  interpolates an upstream-originated value on its own terms.
+ *  `hintToken` returns the value only while it still looks like an opaque
+ *  identifier — 1..MAX_HINT_TOKEN_CHARS chars, leading alphanumeric, then
+ *  `[A-Za-z0-9._~-]`. It never truncates and never escapes: `undefined` means
+ *  "do not name it in the text".
+ *  `hintEnum` returns the member of a *server-owned* vocabulary that an
+ *  upstream string selects, so what reaches the text is this server's literal.
+ *  It validates nothing upstream — `api/publish` still reports an unrecognized
+ *  status rather than rejecting it.
+ *  `quotedHintToken` is the rendering the three `poll` hints share:
+ *  `publish_id "…"` on a pass, `this hint's publish_id` on a refusal, with the
+ *  unfiltered value one field away in the hint's own `publish_id` or in
+ *  `data`.
+ *  The three guard the *error* channel too, not only hints: TOOLS.md § 3.0
+ *  "Upstream values in error and recovery text" holds `error.message` and
+ *  `data.fail_recovery` to the same two classes, because both are prose a model
+ *  reads as instruction. Same helpers, same refuse-don't-truncate remedy. */
+export function hintToken(value: string | undefined): string | undefined;
+export function hintEnum<T extends string>(
+  value: string | undefined,
+  vocabulary: readonly T[],
+): T | undefined;
+export function quotedHintToken(label: string, value: string | undefined): string;
 ```
 
 ## mcp/errors.ts
@@ -1000,6 +1231,13 @@ export function unknownAccountError(
   defaultProfile: string,
 ): ToolError;
 export function missingScopeError(profile: string, scope: string): ToolError;
+/** `missing_scope` for a profile with NO stored credentials — not listed at
+ *  all, or `ProfileInfo.authorized === false` (DEFAULT before the first login,
+ *  a profile holding only app keys): "authorized without scope X" would
+ *  be false, and `--scopes X` would grant X alone, so the text asks for a plain
+ *  login. `details: { profile, missing_scope, configured: false }`; the server
+ *  pairs it with a `reauth` hint whose command carries no `--scopes`. */
+export function unconfiguredProfileScopeError(profile: string, scope: string): ToolError;
 
 /** The single catch-site mapping. A `TikTokError` keeps its code, kind,
  *  retryability, `log_id` and `api_code`, with `remediation` appended to the
@@ -1026,11 +1264,24 @@ installed on the **low-level `Server`**, not on `McpServer.registerTool`: the
 latter installs its own argument validator that renders a schema failure as an
 `McpError` with no `structuredContent`, which contradicts TOOLS.md §§ 2.1/2.3/3.0
 (a rejected argument is a normal envelope with `ok: false`, not a protocol
-error). `zod-to-json-schema` converts `ToolSpec.input` for advertisement.
+error). zod's own `z.toJSONSchema(input, { target: 'draft-7', io: 'input' })`
+converts `ToolSpec.input` for advertisement (`$schema` dropped; `io: 'input'`
+describes what a caller sends, so defaulted fields are optional). The
+prompt and resource handlers (TOOLS.md § 7) sit beside the tool handlers on the
+same `Server`, look their specs up by name or URI through the same package gate,
+and — for a read — run the bound tool through `callTool` below.
 
 ```ts
 /** A configured profile as the server sees it at call time. */
-export interface ProfileInfo { name: string; scopes: readonly string[] }
+export interface ProfileInfo {
+  name: string;
+  scopes: readonly string[];
+  /** false ⇔ the profile stores neither an access nor a refresh token, or its
+   *  record cannot be read. Absent ⇒ unknown, treated as authorized. A scoped
+   *  tool on an unlisted OR `authorized: false` profile gets the unconfigured
+   *  `missing_scope` form (`unconfiguredProfileScopeError`). */
+  authorized?: boolean;
+}
 
 /** Everything the handlers need from the outside world, behind one seam. */
 export interface ServerRuntime {
@@ -1050,6 +1301,22 @@ export function enabledTools(
   packages: readonly ToolPackageLike[],
   settings: Settings,
 ): readonly AnyToolSpec[];
+
+/** The enabled prompts, manifest order: a prompt is kept only when its
+ *  `package` **and** every package in its `requires` are enabled — so
+ *  `prompts/list`, `prompts/get` and prompt completion all see the same set. */
+export function enabledPrompts(
+  prompts: readonly PromptSpec[],
+  settings: Settings,
+): readonly PromptSpec[];
+
+/** The enabled resources, manifest order: a resource follows its tool, so it
+ *  is listed exactly when `tools/list` lists the tool it reads through.
+ *  Membership is by tool *name*, the key `tools/call` resolves. */
+export function enabledResources(
+  resources: readonly ResourceSpec[],
+  tools: readonly AnyToolSpec[],
+): readonly ResourceSpec[];
 
 /** The `[UNAVAILABLE: ...]` description prefix (§ 6.1), or undefined when at
  *  least one profile covers the scopes. Advisory — callTool decides. */
@@ -1083,32 +1350,102 @@ export interface ServerOptions {
   name: string;
   version: string;
   packages: readonly ToolPackageLike[];
+  /** TOOLS.md § 7 — default `[]` for both. Listed through the package gate. */
+  prompts?: readonly PromptSpec[];
+  resources?: readonly ResourceSpec[];
   runtime: ServerRuntime;
 }
 
 export interface McpServerHandle {
   server: Server;
-  /** Recompute descriptions and tell connected clients (§ 6.3). */
-  notifyToolListChanged(): Promise<void>;
+  /** Tell connected clients the tool and resource lists may have moved
+   *  (§ 6.3): `tools/list_changed` and `resources/list_changed`. Both are
+   *  attempted even when the first fails; the first failure is then rethrown.
+   *  Descriptions are recomputed per list request, so there is nothing to
+   *  refresh here. */
+  notifyListChanged(): Promise<void>;
 }
 
 export function createServer(opts: ServerOptions): McpServerHandle;
 
 /** stdout carries JSON-RPC frames and nothing else (CC-G3). */
-export async function connectStdio(handle: McpServerHandle): Promise<StdioServerTransport>;
+export async function connectStdio(handle: McpServerHandle): Promise<StdioSession>;
+
+/** A connected stdio transport and the drain its shutdown awaits. */
+export interface StdioSession {
+  readonly transport: StdioServerTransport;
+  /** Resolves once every request received so far has been answered (or
+   *  cancelled via notifications/cancelled), once budgetMs has passed on
+   *  clock, or once signal aborts (the client went away) — whichever is
+   *  first. Requests are counted per id, so a reused id still in flight keeps
+   *  the drain open until its last answer; a cancel settles every request
+   *  under its id. From the first call on, a new request is refused with
+   *  JSON-RPC -32000 "Service Unavailable: the server is shutting down"
+   *  instead of started (the HTTP transport answers 503). src/index.ts calls
+   *  it with 10 s (STDIO_DRAIN_MS, like the HTTP transport's DEFAULT_DRAIN_MS)
+   *  on SIGINT/SIGTERM before server.close(), which aborts every handler, and
+   *  passes a signal that stdin EOF aborts: an EOF before the drain makes it
+   *  return at once, one during the drain ends it at once — nobody is left to
+   *  receive an answer. */
+  drain(budgetMs: number, clock: Clock, signal?: AbortSignal): Promise<void>;
+}
 ```
 
 Call-pipeline rules that are contract, not implementation detail:
 
 - The profile comes from the **parsed** `account`, not the raw arguments — a
   schema may trim or default it.
-- An unknown `account` fails locally with `unknown_account`; no request is sent.
+- `account` is compared as `canonicalProfileName(account)` (trim + upper-case),
+  so `work` resolves profile `WORK`; the same rule applies to the
+  `TT_LOCK_PROFILE` comparison, the `tiktok_list_publish_journal` filter and the
+  `publish_id` completion's account context.
+- An unknown `account` fails locally with `unknown_account`, echoing the
+  caller's spelling as given; no request is sent.
 - `TT_LOCK_PROFILE` is both the fallback profile and the only accepted one.
+  The `account` argument stays in every schema; any other name answers
+  `unknown_account`. The locked profile also bounds the two journal readers
+  that take `account` as a filter — `tiktok_list_publish_journal` (and so
+  `tiktok://publish/journal`) and the `publish_id` completion — to its own
+  attempts; another filter value narrows them to nothing.
+- `ServerRuntime.profiles()` failing is not a protocol fault on the listing
+  surface: `src/index.ts` wraps the store read (`listingProfiles`) so an env
+  file that cannot be read or parsed yields **no profiles** — every scoped tool
+  and resource lists `[UNAVAILABLE: …]` and a scoped call answers the
+  unconfigured `missing_scope` — instead of `tools/list` failing with `-32603`
+  and the absolute env-file path. The credential watch keeps reading the store
+  itself, so the failure is still what it logs.
+- `completion/complete`: once the ref and argument are validated (those stay
+  `-32602`), any failure computing candidates is logged as a
+  `completion failed` warning and answered with the empty completion — never a
+  JSON-RPC error carrying a local path.
 - The scope check runs **before** `createContext`, so a denied call never
   touches the credential store.
 - `data.meta.account` is stamped with the profile actually used, and a value the
   handler already set is never overwritten.
-- An unknown tool name is a protocol error (`McpError`), not an envelope.
+- An unknown tool name is a protocol error (`McpError`), not an envelope. So
+  are an unknown prompt name (`Unknown prompt: <name>`), an invalid prompt
+  argument, an unknown or malformed resource URI (`Unknown resource:
+  <uri as sent>`), and a `completion/complete` ref that names none of the
+  enabled prompts or resources, or an argument the ref does not declare —
+  all `InvalidParams`, TOOLS.md § 7.
+- `completion/complete` (TOOLS.md § 7.3) resolves the ref to a
+  `CompletionSource` — `promptCompletion(enabledPrompt, argument.name)` for
+  `ref/prompt`, `resourceCompletion(matchResourceRef(enabled, ref.uri),
+  argument.name)` for `ref/resource` — and answers
+  `complete(source, runtime, { value: argument.value, context:
+  context?.arguments })`. The enabled lists are the same the list handlers
+  serve, so a prompt or resource gated out with its package is unknown here
+  too. Nothing is called and nothing is sent: every source is local.
+- `resources/list` carries the enabled *concrete* specs; `resources/templates/list`
+  carries every enabled spec (a `{name}` path parameter makes a spec a
+  template, `mcp/resources.ts`). `resources/read` is `matchResource(enabled,
+  parsed.uri)` — concrete equality first, then the templates, both in manifest
+  order — then `callTool(match.spec.tool, resourceArgs(match, parsed), runtime,
+  { signal })` followed by `resourceContents` — no second pipeline. A path no
+  spec matches is `Unknown resource`. Capabilities are `{ tools: { listChanged:
+  true }, prompts: {}, resources: { listChanged: true }, completions: {},
+  logging: {} }` — `completions` because the SDK refuses a
+  `completion/complete` handler without it.
 
 ## mcp/http.ts
 
@@ -1126,8 +1463,18 @@ export const MCP_PATH = "/mcp";
 
 /** What the Host/Origin check compares against. `loopbackOnly` is true only
  *  when the bind stays on the machine — past loopback the name in `Host`
- *  belongs to the TLS terminator in front, not to us. */
-export interface OriginPolicy { loopbackOnly: boolean; port: number }
+ *  belongs to the TLS terminator in front, not to us. `allowedHosts` is
+ *  `TT_HTTP_ALLOWED_HOSTS` (bare host names in WHATWG URL canonical form —
+ *  lowercased, IPv6 compressed and unbracketed, numeric IPv4 expanded; see
+ *  core/settings `canonicalHostName`): when present, a `Host` hostname or an
+ *  `Origin` hostname not in it is rejected — on any bind, before the loopback
+ *  rules run. The `Host` hostname is canonicalized the same way before the
+ *  comparison (an `Origin` already is, by the URL parser). */
+export interface OriginPolicy {
+  loopbackOnly: boolean;
+  port: number;
+  allowedHosts?: ReadonlySet<string>;
+}
 
 /** Which header failed the DNS-rebinding check, or undefined when neither did.
  *  Exported so the off-box policy is testable without binding off-box. */
@@ -1141,6 +1488,17 @@ export interface HttpTransportOptions {
   log: Logger;
   /** One runtime per session: an SDK `Server` binds exactly one transport. */
   createHandle: (sessionId: string) => McpServerHandle | Promise<McpServerHandle>;
+  /** Called exactly once per handle createHandle returned, when its transport
+   *  closes — DELETE, close(), or a non-initialize POST that never became a
+   *  session. The owner drops the handle from whatever it keeps them in. */
+  releaseHandle?: (handle: McpServerHandle) => void;
+  /** Live-session cap, default 128. A test seam, not a setting. */
+  maxSessions?: number;
+  /** Idle age after which a session is closed, default 30 min. A test seam. */
+  sessionIdleMs?: number;
+  /** How long close() waits for requests in flight, default 10 s
+   *  (DEFAULT_DRAIN_MS). A test seam. */
+  drainMs?: number;
   clock?: Clock;                       // default systemClock (CC-H4)
 }
 
@@ -1149,7 +1507,10 @@ export interface HttpTransportHandle {
   port: number;                        // differs from TT_PORT only when it was 0
   url: string;                         // where a client points its transport
   sessions(): number;                  // a diagnostic, never a protocol input
-  close(): Promise<void>;              // ends every session; idempotent
+  /** Refuses new requests, drains the ones in flight (up to drainMs), then
+   *  ends every session and releases the port. Idempotent: a second call
+   *  returns the first call's promise. */
+  close(): Promise<void>;
 }
 
 /** Binds TT_HTTP_HOST:TT_PORT and serves MCP on it. Resolves once the socket is
@@ -1189,6 +1550,59 @@ Rules that are contract, not implementation detail:
   (initialization, pending requests, progress tokens) is exactly what must not
   leak between callers. `DELETE` ends one session, `close()` ends all of them,
   and a POST that never completes initialization leaves no session behind.
+  Every created handle is handed to `releaseHandle` exactly once when its
+  transport closes, whichever of those three paths closed it; `src/index.ts`
+  uses it to drop the handle from the credential-watch set, so that set tracks
+  live sessions instead of growing with every dead one.
+- **Once `close()` begins, nothing new is accepted.** Any request that
+  arrives after it — including one for an existing session — is answered
+  `503` with JSON-RPC `-32000` `Service Unavailable: the server is shutting
+  down`.
+- **`close()` drains, then tears down.** In-flight non-`GET` requests (`POST`,
+  `DELETE`), and every JSON-RPC request whose handler has not yet sent its
+  result or error, get up to `drainMs` (default 10 s) to finish; a request
+  accepted before the shutdown — an `initialize` whose handle was still being
+  created included — may complete during the drain. Counting requests, not
+  only open responses, is what keeps a client that disconnected mid tool call
+  from letting shutdown abort a running publish. A request stops being waited
+  for when it is answered, when the client sends `notifications/cancelled` for
+  its id, or when its transport closes. `GET` SSE streams are not waited
+  for: they have no end. When the budget runs out a warning is logged
+  (`pending`, `drain_ms`) and whatever is still in flight is aborted with its
+  transport. Then the sessions are closed and the server is closed; a session
+  whose creation finished after the teardown is closed again and answered
+  `503`, and one whose `initialize` completes after the teardown emptied the
+  session map is closed right away instead of registered. A `connect` failure
+  releases the handle (no `onclose` runs for a transport that never
+  connected), so `releaseHandle` still sees every handle exactly once.
+  `close()` is idempotent and returns the same promise.
+- **Bounded input and state** (module constants, not settings). A POST body
+  is read here, capped at **4 MiB**: past it — or when a declared
+  `content-length` already exceeds it, before any byte is read — the answer is
+  `413` JSON-RPC `-32000` `Payload Too Large` with `connection: close`. A body
+  that is not JSON is `400` `-32700` `Parse error: Invalid JSON`. At most
+  **128** sessions are live; one more `initialize` is `503` `-32000`
+  `Service Unavailable: too many open sessions`, refused, not queued. A
+  session counts against the cap from the moment its `initialize` is admitted
+  (`openSession` reserves the slot before `openReservedSession` awaits the
+  handle and `connect`), so concurrent `initialize` requests cannot together
+  open more than `maxSessions`. The reservation is released exactly once: as
+  soon as the session is registered in the live map (from
+  `onsessioninitialized`, before the `initialize` response is written — from
+  then on the map counts it, so it is never counted twice), or on any earlier
+  exit. A session
+  with no request in flight and no open stream for **30 minutes** is closed
+  lazily — when the next session is opened, with no timer — and its handle is
+  released like any other close.
+- **Known limits.** Without `allowedHosts`, off loopback the `Origin` check
+  pins only the hostname to `Host`, and a rebound name makes both agree, so it
+  does not stop DNS rebinding there — the bearer is the remaining layer. With
+  `TT_HTTP_ALLOWED_HOSTS` set, a rebound name is not on the list and its
+  `Host` is refused; `src/index.ts` warns at startup, and `doctor`'s
+  `transport` check warns, when `TT_HTTP_INSECURE=1` runs without it on a
+  non-loopback bind (on loopback neither `TT_HTTP_INSECURE=1` warning fires:
+  the flag is redundant there). A request still in flight when the drain
+  budget runs out is aborted.
 - Session ids are **never logged as fields** — they are capability-bearing for
   the life of the session, and `core/redact`'s default-deny allowlist has no
   entry for them. The listening URL carries no credential and is safe to log.
@@ -1208,6 +1622,12 @@ export interface PlanRecord {
   tool: string;
   createdAt: number;    // clock.now()
   used: boolean;
+  /** CC-D3: the local file's identity at preview time (`size:mtimeMs:dev:ino`,
+   *  one opaque string), absent for a payload with no local file. Bound to the
+   *  plan, NOT folded into `digest` — the digest is also the duplicate guard's
+   *  key, and a re-copied file with the same bytes is the same post — and
+   *  never sent upstream. */
+  fileIdentity?: string;
 }
 
 /** "plan_" + 32 lowercase hex chars (16 crypto.randomBytes). */
@@ -1226,19 +1646,23 @@ export const DEFAULT_PLAN_MAX_OUTSTANDING: 32;
 /** In-process Map only — NEVER persisted; restart ⇒ re-plan is the designed
  *  recovery. Bounded on both axes: expired entries are swept first (using
  *  rec.createdAt as "now", so no clock is needed), then the oldest survivor is
- *  evicted until the cap has room. Re-storing a known id replaces it. The
+ *  evicted until the cap has room — the oldest *used* plan first (it can only
+ *  answer plan_not_found), a live one only when none is used. Re-storing a known id replaces it. The
  *  record is copied — the caller cannot reach in later and flip `used`. */
 export function storePlan(id: string, rec: PlanRecord, options?: PlanStoreOptions): void;
 
 export type ConsumeFailure =
   | "unknown" | "expired" | "already_used"
-  | "payload_mismatch" | "account_mismatch" | "tool_mismatch";
+  | "payload_mismatch" | "account_mismatch" | "tool_mismatch"
+  | "file_changed";
 // Surfaced to callers as exactly two codes: "plan_not_found"
-// (unknown/expired/already_used) and "plan_mismatch" (the rest).
+// (unknown/expired/already_used) and "plan_mismatch" (the rest);
+// "file_changed" keeps the code but gets its own text (`fileChangedError`).
 
 /** What the apply call claims the plan approved. */
 export interface PlanExpectation {
   digest: string; profile: string; openId: string; tool: string;
+  fileIdentity?: string;  // re-resolved at apply, compared verbatim
 }
 export type ConsumeResult = { ok: true } | { ok: false; reason: ConsumeFailure };
 
@@ -1246,7 +1670,8 @@ export type ConsumeResult = { ok: true } | { ok: false; reason: ConsumeFailure }
  *  pipeline verifies at step 5 but consumes at step 7 (TOOLS.md § 2.6.3), so a
  *  `possible_duplicate` refusal in between leaves the plan appliable with
  *  `force: true`. Check order: unknown → expired (drops the record) →
- *  already_used → tool → account → digest. */
+ *  already_used → tool → account → digest → file identity (last, because a
+ *  changed digest already says more; both absent is equal). */
 export function verifyPlan(
   id: string, expect: PlanExpectation, clock: Clock, options?: PlanStoreOptions,
 ): ConsumeResult;
@@ -1388,6 +1813,13 @@ export interface JournalAttempt {
   outcome_ts?: string;
   publish_id?: string; error_code?: string; fail_reason?: string; chunk?: number;
 }
+// `chunk` is written by `classifyDispatch` onto every post-init failure outcome
+// (`upload_interrupted` and the rest: only a chunked sender ever reports, and it
+// reports its `position`) and survives the fold onto `JournalAttempt`. It is deliberately
+// NOT projected into the `JournalEntry` that `tiktok_list_publish_journal`
+// returns: it is a forensic field for a direct read of the journal file, not
+// part of that tool's output contract (TOOLS.md § 3.7). Adding it there widens
+// published surface and needs its own decision.
 
 /** Every entry point takes the same options bag; each field defaults to what
  *  the resolved env file / settings say, so tests inject a sandbox path and
@@ -1402,17 +1834,39 @@ export interface JournalOptions {
 }
 export function resolveJournalPath(opts?: JournalOptions): string;
 
+/** The one journal wiring every reader and writer shares: `settings.envFile`
+ *  (when set), `settings.journalMaxBytes`, `logger`. `tools/publish.ts`'s
+ *  `journalOptions(ctx)` and `mcp/completions.ts` both call it, so the tool
+ *  that appends an intent, the tool that lists it and the completion that
+ *  offers its id can never read different files. */
+export function journalOptionsFor(settings: Settings, logger: Logger): JournalOptions;
+
 /** journal.ndjson, 0600 in a 0700 dir beside the resolved env file;
  *  O_APPEND (no env lock). Intent append is fsync'd and happens BEFORE init
  *  dispatch; rotation (settings.journalMaxBytes, one .1 generation) is
- *  checked only before intent appends. Append failure ⇒ warn + mark the tool
- *  result journal:"unavailable" — never fail the publish. */
+ *  checked only before intent appends, lock-free while under the cap. Over
+ *  it, rotation takes journal.ndjson.lock (withEnvLock keyed on the journal
+ *  path — distinct from the env-file lock; 2 s wait, ROTATE_LOCK_WAIT_MS;
+ *  env-lock stale rules, 15 s) and re-checks the size under it, so two
+ *  processes cannot both rotate and discard a generation. Wait exceeded or
+ *  lock unusable ⇒ warn "could not rotate the publish journal; it keeps
+ *  growing", skip the rotation, append anyway. The directory is fsync'd after a
+ *  rotation's rename and after an fsync'd append that created the file —
+ *  best-effort, skipped with a debug log where the platform cannot (win32).
+ *  Append failure — including a short write (bytesWritten < line length) —
+ *  ⇒ warn + mark the tool result journal:"unavailable" — never fail the
+ *  publish. An append to a file whose last byte is not "\n" (a torn line)
+ *  first writes "\n", so the fragment cannot swallow the new record. */
 export function appendIntent(rec: IntentRecord, opts?: JournalOptions): Promise<{ ok: boolean }>;
 export function appendOutcome(rec: OutcomeRecord, opts?: JournalOptions): Promise<{ ok: boolean }>;
 
-/** Duplicate guard (SYNTHESIS § 2.7): bounded tail of the active generation;
+/** Duplicate guard (SYNTHESIS § 2.7): bounded 256 KiB tail of the active
+ *  generation, extended into the newest part of `.1` within the remaining
+ *  budget when the whole active file fits (a rotated intent still counts);
  *  same digest with ok or unknown (incl. send_ambiguous) outcome within
  *  10 minutes ⇒ duplicate, unless force. error/upload_failed are exempt.
+ *  Per profile: only attempts whose profile equals `profile` in canonical
+ *  spelling (CC-F4) count — the same video on two accounts is two posts.
  *  The whole matched attempt travels with the verdict, because
  *  `possible_duplicate` (TOOLS.md § 3.0) has to name the profile, timestamp,
  *  outcome and publish_id — none of which an attempt id carries. */
@@ -1422,7 +1876,7 @@ export interface DuplicateCheck {
   matched?: JournalAttempt;      // set iff `duplicate`
 }
 export function checkDuplicate(
-  payloadDigest: string, clock: Clock, opts?: JournalOptions,
+  payloadDigest: string, profile: string, clock: Clock, opts?: JournalOptions,
 ): Promise<DuplicateCheck>;
 
 /** Merges both generations; torn tail lines are skipped and counted.
@@ -1430,6 +1884,14 @@ export function checkDuplicate(
 export function readMerged(opts?: JournalOptions & { limit?: number }): Promise<{
   records: JournalRecord[]; skippedLines: number;
 }>;
+
+/** `foldAttempts(readMerged(opts).records)`, reused per resolved journal path
+ *  while a `stat` signature of both generations (size, mtime, inode; `-` for
+ *  an absent file) is unchanged — an append from any process or a rotation
+ *  changes it and forces a re-read. The result is shared between callers and
+ *  frozen (Object.freeze), not just typed readonly. The `publish_ids`
+ *  completion source reads through it. */
+export function foldedAttemptsCached(opts?: JournalOptions): Promise<readonly JournalAttempt[]>;
 ```
 
 ## mcp/lifecycle.ts
@@ -1440,7 +1902,8 @@ on every request, so an `[UNAVAILABLE: …]` marker is never stale *when asked* 
 but nothing asks, so a `login` in a second terminal stays invisible to a running
 client. This module notices, and hands the verdict to a plain callback: it never
 touches a `Server`, and the composition root is what turns a change into
-`McpServerHandle.notifyToolListChanged()`.
+`McpServerHandle.notifyListChanged()` (which also covers the resource list,
+TOOLS.md § 7.2 — a resource is only ever as available as its tool).
 
 ```ts
 /** TOOLS.md § 6.3's debounce floor, and the default poll period. */
@@ -1491,7 +1954,9 @@ export interface CredentialWatcher {
   /** Reads once, now. `true` iff this poll notified. Concurrent calls share
    *  one read, so a change can never be reported twice. */
   poll(): Promise<boolean>;
-  /** Idempotent; awaits a poll already in flight and leaves no pending timer. */
+  /** Idempotent; awaits a poll already in flight — the loop's or one started
+   *  through `poll()` — and leaves no pending timer. A `poll()` after `stop()`
+   *  resolves `false` without reading. */
   stop(): Promise<void>;
 }
 
@@ -1519,6 +1984,278 @@ Rules that are contract, not implementation detail:
 - Wiring order is part of the contract: start **after** `connectStdio`
   (`sendToolListChanged()` throws `Not connected` without a transport) and stop
   **before** `server.close()`.
+
+## mcp/completions.ts
+
+The mechanism behind `completion/complete` (TOOLS.md § 7.3): the sources a
+prompt argument or a resource path parameter can complete from, and the one
+function that turns a source and a typed prefix into the protocol's answer. A
+source is **data on the spec** (`PromptArgumentSpec.completion`,
+`ResourceSpec.completions`), so `tools/` declares what completes and never
+codes how; the three kinds are all local — the credential store's profile
+names, a fixed vocabulary, the write-ahead journal — and none reaches TikTok.
+`account` splits the two sides: a prompt's `account` argument declares the
+`profiles` source like any other argument, while on a resource the server owns
+it — `defineResource` refuses a spec that names it and `resourceCompletion`
+answers the `{?account}` variable of every resource from the profiles itself.
+Nothing here touches a `Server`; `mcp/server` resolves the ref through
+`promptCompletion` / `resourceCompletion` and calls `complete`. Imports
+`core/` types and `mcp/journal.ts` only, so `mcp/prompts.ts` and
+`mcp/resources.ts` can import the source type without a cycle.
+
+```ts
+/** The protocol's cap on `values`. */
+export const COMPLETION_MAX = 100;
+
+export type CompletionSource =
+  | { readonly kind: 'profiles' }                              // the configured profile names, store order
+  | { readonly kind: 'values'; readonly values: readonly string[] }  // a fixed vocabulary, declared order
+  | { readonly kind: 'publish_ids' };                          // journal ids, newest first, each once
+
+/** The structural subset of ServerRuntime the sources need. */
+export interface CompletionRuntime {
+  readonly settings: Settings;
+  readonly log: Logger;
+  profiles(): Promise<readonly { readonly name: string }[]>;
+}
+
+export interface CompletionRequest {
+  readonly value: string;                                       // the typed prefix; '' offers everything
+  readonly context?: Readonly<Record<string, string>> | undefined;  // `context.arguments` of the request
+}
+
+/** Exactly the wire shape; all three always set. */
+export interface Completion {
+  readonly values: readonly string[];   // at most COMPLETION_MAX
+  readonly total: number;               // every match, capped or not
+  readonly hasMore: boolean;            // total > values.length
+}
+
+/** Why a `values` source is unusable — `a "values" completion lists no values`,
+ *  `a "values" completion repeats "<value>"` — or undefined; the other kinds
+ *  have nothing to check. definePrompt / defineResource throw it in their
+ *  spec errors. */
+export function completionSourceProblem(source: CompletionSource): string | undefined;
+
+/** The candidates of `source`, filtered by case-insensitive prefix of
+ *  `request.value`, in the source's own order, cut at COMPLETION_MAX.
+ *  `undefined` (an argument declaring no source) ⇒ `{ values: [], total: 0,
+ *  hasMore: false }` — never an error. `profiles` under `settings.lockProfile`
+ *  is the locked name alone (the only name a call would accept, § 2.2).
+ *  `publish_ids` takes the folded attempts from
+ *  `foldedAttemptsCached(journalOptionsFor(settings, log))`, walks them newest first, skips attempts without a
+ *  `publish_id`, keeps each id once and — when `context.account` is present
+ *  and not blank — only attempts whose `profile` equals
+ *  `canonicalProfileName(account)` (the filter of
+ *  `tiktok_list_publish_journal`); under `settings.lockProfile` only the
+ *  locked profile's attempts; a missing journal is no ids. The fold is reused
+ *  while neither generation's size, mtime or inode changed. */
+export function complete(
+  source: CompletionSource | undefined,
+  runtime: CompletionRuntime,
+  request: CompletionRequest,
+): Promise<Completion>;
+```
+
+## mcp/prompts.ts
+
+The mechanism behind `prompts/list` and `prompts/get` (TOOLS.md § 7.1). A prompt
+is data the same way a tool is: a frozen spec with a pure `render`, gated with
+the package of the tools it steers to, advertised through `describePrompt` and
+answered through `getPrompt`. Nothing here touches a `Server`; `mcp/server`
+installs the two handlers and looks the spec up by name. The specs themselves
+live in `tools/prompts.ts` — `mcp/` must not import `tools/`.
+
+```ts
+export interface PromptArgumentSpec {
+  readonly name: string;          // snake_case, unique within the prompt
+  readonly description: string;
+  readonly required: boolean;
+  /** What `completion/complete` offers for this argument (mcp/completions.ts);
+   *  absent ⇒ it completes to nothing. Never sent by describePrompt. */
+  readonly completion?: CompletionSource;
+}
+
+/** Validated arguments: trimmed, blank optionals dropped, every key declared. */
+export type PromptArgs = Readonly<Record<string, string>>;
+
+export interface PromptSpec {
+  readonly name: `tiktok_${string}`;      // snake_case; shares the tool prefix
+  readonly title: string;
+  readonly description: string;
+  readonly package: ToolPackage;          // the package the flow steers to
+  /** Packages whose tools the flow's steps also name. Listed, served and
+   *  completed only while `package` and every one of these are enabled. */
+  readonly requires?: readonly ToolPackage[];
+  readonly arguments: readonly PromptArgumentSpec[];
+  /** Pure. Called only with the output of validatePromptArgs. */
+  render(args: PromptArgs): readonly PromptMessage[];
+}
+
+/** Validates and freezes (spec and `arguments`). A bad name, blank title or
+ *  description, unknown package or `requires` entry, a non-snake-case / duplicate / undescribed
+ *  argument, or a `values` completion that lists nothing or repeats a value
+ *  (`completionSourceProblem`) throws TikTokError `invalid_prompt_spec` (kind
+ *  `internal`) — a server bug, thrown at module load, never at request time. */
+export function definePrompt(spec: PromptSpec): PromptSpec;
+
+/** The `prompts/list` entry: name, title, description, arguments. */
+export function describePrompt(spec: PromptSpec): Prompt;
+
+/** Unknown argument name, or a required argument missing or blank after trim,
+ *  throws McpError(InvalidParams, `Invalid arguments for prompt <name>: …`) —
+ *  a protocol error, mirroring the SDK's own McpServer. */
+export function validatePromptArgs(
+  spec: PromptSpec,
+  raw: Readonly<Record<string, string>> | undefined,
+): PromptArgs;
+
+/** The declared argument's `completion` (undefined when it declares none);
+ *  an undeclared name throws the same McpError(InvalidParams,
+ *  `Invalid arguments for prompt <name>: unknown argument "<argument>"`) as
+ *  validatePromptArgs. */
+export function promptCompletion(spec: PromptSpec, argument: string): CompletionSource | undefined;
+
+/** `{ description, messages: spec.render(validatePromptArgs(spec, raw)) }`. */
+export function getPrompt(
+  spec: PromptSpec,
+  raw: Readonly<Record<string, string>> | undefined,
+): GetPromptResult;
+```
+
+## mcp/resources.ts
+
+The mechanism behind `resources/list`, `resources/templates/list` and
+`resources/read` (TOOLS.md § 7.2). A resource is a **read-only tool exposed at a
+URI** with a fixed argument set; the account rides in the query (`?account=`),
+which is the only query key. A URI may also carry **path parameters** —
+`{name}` segments after the host segment, `tiktok://publish/{publish_id}/status`
+— and each one is a tool argument the read cannot default: a spec with one is a
+*template*, listed by `resources/templates/list` only, and `resources/read`
+binds the matching segment of the requested path to the argument of that name.
+Nothing here calls anything: `mcp/server` parses the URI, matches it against the
+enabled specs, runs the bound tool through `callTool` — the same pipeline as
+`tools/call`, so gating, account resolution, scope check, redaction and
+truncation are not duplicated — and hands the envelope to `resourceContents`.
+The specs live in `tools/resources.ts`.
+
+```ts
+export const RESOURCE_SCHEME = 'tiktok://';
+export const RESOURCE_MIME_TYPE = 'application/json';
+
+export interface ResourceSpec {
+  readonly uri: `tiktok://${string}`;     // lowercase segments, `{name}` after the host; no query, no trailing slash
+  readonly name: string;                  // `tiktok_` snake_case
+  readonly title: string;
+  readonly description: string;
+  readonly tool: AnyToolSpec;             // must be readOnlyHint: true
+  readonly args: Readonly<Record<string, unknown>>;   // fixed; may not name `account` or a path parameter
+  /** Completion sources by path parameter (mcp/completions.ts); never
+   *  `account`, which the server completes from the profiles on every
+   *  resource; only names the URI carries. Absent ⇒ a parameter completes
+   *  to nothing. Never sent by describeResource / describeResourceTemplate. */
+  readonly completions?: Readonly<Record<string, CompletionSource>>;
+}
+
+/** What `resources/read` resolved a requested path to. */
+export interface ResourceMatch {
+  readonly spec: ResourceSpec;
+  /** Path-parameter values by name, percent-decoded; `{}` for a concrete URI. */
+  readonly params: Readonly<Record<string, string>>;
+}
+
+export interface ParsedResourceUri {
+  readonly uri: string;                   // canonical `tiktok://host/path`, query stripped
+  readonly account?: string;
+}
+
+/** Validates and freezes (spec, `args` and `completions`); a violation throws
+ *  TikTokError `invalid_resource_spec` (kind `internal`) at module load. A
+ *  `{name}` segment must be a valid argument name
+ *  (`[a-z][a-z0-9]*(_[a-z0-9]+)*`), may not sit in the host segment, may not
+ *  repeat, may not be `account`, and may not be fixed by `args` too. A
+ *  `completions` key must be a `{name}` of the URI and not `account`, and a
+ *  `values` source must list something and repeat nothing
+ *  (`completionSourceProblem`). */
+export function defineResource(spec: ResourceSpec): ResourceSpec;
+
+/** The `{name}` segments of `spec.uri`, in path order; `[]` for a concrete URI. */
+export function resourceParams(spec: ResourceSpec): readonly string[];
+
+/** `resourceParams(spec).length > 0` — listed by `resources/templates/list` only. */
+export function isResourceTemplate(spec: ResourceSpec): boolean;
+
+/** The `resources/list` entry; `marker` (§ 6.1's `[UNAVAILABLE: …]`, from
+ *  unavailableMarker(spec.tool, profiles)) is prefixed to the description. */
+export function describeResource(spec: ResourceSpec, marker?: string): Resource;
+
+/** The `resources/templates/list` entry: `uriTemplate` = `${uri}{?account}` —
+ *  RFC 6570 as it stands, `tiktok://publish/{publish_id}/status{?account}` for
+ *  a template. */
+export function describeResourceTemplate(
+  spec: ResourceSpec,
+  marker?: string,
+): ResourceTemplate;
+
+/** The spec a `completion/complete` resource ref names: `uri` equal to
+ *  `spec.uri` or to `describeResourceTemplate(spec).uriTemplate` — the
+ *  resource as either list advertises it, with or without `{?account}`; a
+ *  read URI with a bound value, a query, or a spec not in `specs` is
+ *  undefined. Manifest order; no percent-decoding. */
+export function matchResourceRef(
+  specs: readonly ResourceSpec[],
+  uri: string,
+): ResourceSpec | undefined;
+
+/** `{ kind: 'profiles' }` for `account` on every spec; the declared source
+ *  (or undefined) for a `{name}` of the URI; any other name — a fixed
+ *  argument, a tool input the URI does not carry — throws
+ *  McpError(InvalidParams, `Invalid arguments for resource <spec.uri>: unknown
+ *  argument "<argument>"`). */
+export function resourceCompletion(
+  spec: ResourceSpec,
+  argument: string,
+): CompletionSource | undefined;
+
+/** undefined for anything that is not `tiktok://…` with at most one non-blank
+ *  `account` query parameter and no `#` at all (an empty trailing fragment,
+ *  which `URL` reports as none, included) — and for anything `URL` would
+ *  repair: userinfo, a port, a tab/CR/LF, a `.`/`..` segment (plain or
+ *  `%2e`), a query key not literally `account`, `account` without `=`, an
+ *  empty pair. The value is percent-decoded only (`+` stays a plus). A
+ *  trailing slash survives into `uri` and therefore misses the lookup — one
+ *  canonical spelling per resource. */
+export function parseResourceUri(raw: string): ParsedResourceUri | undefined;
+
+/** The spec `parsed.uri` names, or undefined. A concrete `uri` equal to the
+ *  path wins, in manifest order; then the templates, in manifest order — a
+ *  template matches when every `{name}` segment is one non-empty path segment
+ *  and every other segment is equal; each value is percent-decoded, and a
+ *  malformed escape is no match. `tiktok://publish//status` matches nothing;
+ *  the template read verbatim matches itself, with `publish_id: '{publish_id}'`
+ *  (the URL parser percent-encodes the braces) — the tool answers for it. */
+export function matchResource(
+  specs: readonly ResourceSpec[],
+  uri: string,
+): ResourceMatch | undefined;
+
+/** `{ ...match.spec.args, ...match.params, account? }` — the arguments callTool
+ *  is given. */
+export function resourceArgs(
+  match: ResourceMatch,
+  parsed: ParsedResourceUri,
+): Record<string, unknown>;
+
+/** Envelope → one text content under the *requested* uri: the same
+ *  truncateResult(result, settings.resultCharBudget, { pretty }) text that
+ *  toCallToolResult mirrors (CC-G2/CC-G7). `ok: false` is still a read, never a
+ *  protocol error. */
+export function resourceContents(
+  uri: string,
+  result: ToolResult<unknown>,
+  settings: Settings,
+): ReadResourceResult;
+```
 
 ## tools/publish-common.ts
 
@@ -1561,7 +2298,8 @@ export interface AppliedData {
   mode: "applied";
   publish_id: string;
   status: string;                          // `initialStatus(source)` before any poll
-  public_post_id?: string;                 // only once published, public posts only
+  public_post_id?: string;                 // only once published, public posts only;
+                                           // exact decimal (int64 past 2^53 kept as source digits)
   journal: "recorded" | "unavailable";
 }
 
@@ -1621,15 +2359,33 @@ export function urlPrefixUnverifiedError(field: string, fileAlternative?: boolea
  *  toward `network_ambiguous`. This is for failures the tools can prove never
  *  left the process. */
 export function networkUnsentError(): ToolError;
-/** `network_ambiguous` — the post MAY exist. Never auto-retry through this. */
-export function networkAmbiguousError(): ToolError;
+/** `network_ambiguous` — the post MAY exist. Never auto-retry through this.
+ *  `publishId` is set only for a caller abort that landed after the init
+ *  (CC-G4): it rides in `details.publish_id`; the message is unchanged. */
+export function networkAmbiguousError(publishId?: string): ToolError;
+/** `plan_mismatch` with `details.reason: "file_changed"` (CC-D3): the file at
+ *  `file_path` no longer matches the identity bound to the plan. Message,
+ *  verbatim: "The file changed since plan: the file at file_path no longer
+ *  matches the size, modification time and identity captured when the preview
+ *  was generated. Generate a fresh preview and apply again." */
+export function fileChangedError(): ToolError;
 /** `upload_interrupted` (CC-D5). The init succeeded, so the caller must be told
- *  which `publish_id` to check; recovery is a NEW attempt, never a resume. */
+ *  which `publish_id` to check; recovery is a NEW attempt, never a resume.
+ *  The id is upstream-originated and the message instructs, so it reaches both
+ *  of its grammatical slots through `hintToken` (§ 3.0): a refused id is
+ *  dropped from the sentence, which then points at `details.publish_id` — the
+ *  field carries the raw value either way. `detail` is the transport cause and
+ *  never enters the sentence; it lives in `details.reason`. */
 export function uploadInterruptedError(
   publishId: string, chunk: number, total: number, detail: string,
 ): ToolError;
 /** `possible_duplicate`. Takes the whole matched attempt because the normative
- *  text names the profile, timestamp, outcome and publish_id. */
+ *  text names the profile, timestamp, outcome and publish_id. `profile` is
+ *  server configuration and `matched.ts` a timestamp this server wrote;
+ *  `matched.publish_id` is upstream, replayed out of the journal, so it reaches
+ *  the message through `hintToken` (§ 3.0) and a refused id drops the clause
+ *  exactly as an absent one already does. `details.publish_id` still carries
+ *  it. */
 export function possibleDuplicateError(profile: string, matched: JournalAttempt): ToolError;
 
 // --- hints (TOOLS.md § 5) --------------------------------------------------
@@ -1688,21 +2444,27 @@ export function runPlanGuards(
 /** Where the bytes stand when a dispatch fails — for `upload_interrupted`. */
 export interface ChunkPosition { chunk: number; total: number }
 
+/** What a sender reports once its init has returned and more can still fail:
+ *  the `publish_id` TikTok minted, and where the bytes stand at any later moment. */
+export interface InitialisedUpload { publishId: string; position: () => ChunkPosition }
+
 export interface DispatchOptions {
   toolName: string;
   mode: string;                  // journalled `mode` = the upstream post_mode (§ 2.6.2)
   source: IntentSource;
   title: string;                 // what the journal's title_excerpt is cut from — a human
                                  // reading it, not the guard, which matches on digest;
-                                 // "" for the two draft tools, which have no title
+                                 // "" for the video draft, which has no title; the
+                                 // photo tools pass title and description joined
   digest: string;
   planId: string;                // "" only under TT_WRITE_MODE=apply with no token
   openId: string;
-  /** The upstream half. MUST call `report` the moment an init returns a
-   *  `publish_id`: that call is the whole failure classification. */
-  send: (report: (publishId: string) => void) => Promise<string>;
-  /** Consulted only when an `upload_interrupted` has to name its chunk. */
-  position?: () => ChunkPosition;
+  /** The upstream half. Calls `report` the moment an init returns a
+   *  `publish_id` a later step can still fail behind (the chunk upload): that
+   *  call is the whole failure classification. A sender whose init is its last
+   *  throwable step (URL video, photos) never reports — its publish_id is the
+   *  resolved value, and every failure it can raise is honestly pre-init. */
+  send: (report: (started: InitialisedUpload) => void) => Promise<string>;
 }
 
 /** Everything after the plan is consumed: journal intent (fsync'd) → dispatch
@@ -1713,23 +2475,41 @@ export interface DispatchOptions {
  *  `journal: "unavailable"` with a note hint instead of failing the publish. */
 export function dispatchWrite(
   ctx: ToolCtx, opts: DispatchOptions,
-): Promise<ToolResult<AppliedData>>;
+): Promise<DispatchResult>;
+
+/** A dispatch that reached TikTok, as a type that says so. The pair exists so
+ *  that `ok` and the presence of `data` are one fact rather than two: the
+ *  success arm carries `data` non-optionally, the failure arm forbids it, and
+ *  `waitIfAsked` reads the discriminant instead of testing `data === undefined`
+ *  and excluding the impossible half from coverage. */
+export type AppliedResult = ToolResult<AppliedData> & { ok: true; data: AppliedData };
+export type FailedDispatch = ToolResult<AppliedData> & { ok: false; data?: undefined };
+export type DispatchResult = AppliedResult | FailedDispatch;
+
+/** What `waitIfAsked` returns: a success arm whose `hints` are guaranteed
+ *  present (it always attaches at least the `poll` hint), and the failure arm
+ *  passed through untouched. */
+export type WaitedResult = (AppliedResult & { hints: Hint[] }) | FailedDispatch;
 
 /** Attach the `poll` hint, optionally after waiting for a terminal status
  *  (TOOLS.md § 2.7). An accepted post stays accepted: a poll timeout and a
  *  status read that throws are both non-errors and neither downgrades `ok` —
  *  both fall back to the exact hint an immediate return would have carried. */
 export function waitIfAsked(
-  ctx: ToolCtx, result: ToolResult<AppliedData>, waitForCompletion: boolean,
-): Promise<ToolResult<AppliedData>>;
+  ctx: ToolCtx, result: DispatchResult, waitForCompletion: boolean,
+): Promise<WaitedResult>;
 ```
 
 **The apply path's step order is contract, not implementation detail**
 (TOOLS.md § 2.6.3): validate locally → **read** the local rate bucket without
 spending (before any network, § 2.8) → re-resolve through the preview's own code
 path against live `creator_info` → recompute the payload digest → `verifyPlan` →
-duplicate guard → **take** the rate token → `consumePlan` → journal the intent
-(fsync'd) → dispatch → journal the outcome. The bucket is read early and spent
+duplicate guard → **peek** the rate token again → `consumePlan` → **take** the
+rate token → journal the intent (fsync'd) → dispatch → journal the outcome. The
+three calls of step 7 run with no `await` between them: the peek refuses an
+emptied bucket with the plan still unspent, the consume comes before the take so
+a plan lost to a concurrent apply during the duplicate guard's file read costs
+no token, and the take cannot refuse what the peek allowed. The bucket is read early and spent
 late on purpose: it exists to protect the *account* from too many real publishes,
 and a call refused for a stale `plan_id`, a changed payload or a suspected
 duplicate never reaches TikTok — burning a token on it would let a caller retrying
@@ -1750,7 +2530,20 @@ failure into `network_ambiguous` (journal `send_ambiguous`), and any remaining
 `network` failure provably never left the process, so it is `network_unsent`
 (journal `error`). After `report`, the attempt exists upstream whatever happened
 to the bytes: the outcome is `upload_failed`, never `error`, which a reader would
-take as "nothing was created" (CC-B4).
+take as "nothing was created" (CC-B4). A **caller cancellation** is the exception
+on both sides (CC-G4): when the signal fires while the send is in flight — the
+init or mid-upload — the init or the last chunk may have completed anyway, so it
+is `network_ambiguous`, journaled `send_ambiguous` (after `report` with the
+`publish_id` and `chunk`, and `details.publish_id` on the error), which the
+duplicate guard counts and so blocks a blind retry. A signal that had already
+fired before the send began carried no live request and stays `error`. The
+second exception after `report` is a `network_ambiguous` thrown by
+`uploadFile` — a transport failure on the final chunk, any later failure of a
+final chunk one of whose attempts lost its answer, or a final-chunk `416`
+reporting progress of exactly `total − 1` bytes, each of which may have
+completed the upload: `classifyDispatch` records it as `send_ambiguous` with
+`error_code: "network_ambiguous"`, the `publish_id` and the chunk, never
+`upload_failed`.
 
 ## tools/publish-write.ts
 
@@ -1843,10 +2636,82 @@ re-send — and with `fileAlternative: false`, since photos have no `source:
 **What the digest binds:** `{ media_type: "PHOTO", post_mode, post_info,
 source_info: { source: "PULL_FROM_URL", photo_images, photo_cover_index } }`,
 built by the same function on both the preview and the apply path so the two
-digests can differ only if the payload really did. The duplicate guard's
-`title` is title **and** description joined: a carousel is frequently untitled
-with all its text in the description, and excerpting only the title would make
-every such post look identical to the guard.
+digests can differ only if the payload really did. The journal's
+`title_excerpt` is cut from title **and** description joined: a carousel is
+frequently untitled with all its text in the description, and excerpting only
+the title would make every such journal line look identical to the person
+reading it. (The duplicate guard matches on `payload_digest`, not the title.)
+
+## tools/prompts.ts
+
+The prompt manifest (TOOLS.md § 7.1): the three write flows, each one `user`
+text message, package `publish-write`; the array is what `src/index.ts` hands
+to `createServer`. The sentences the flows share — approval, the plan's life,
+the poll, the failure discipline — are module constants the three compose, so
+they cannot drift apart. Every `tiktok_*` name in the text is checked against
+`allTools()` by `test/tool-prompts.test.ts`.
+
+```ts
+/** `tiktok_post_video_guided`. Arguments: `video` (required — local path or
+ *  https URL), `title`, `privacy_level`, `account`. The § 4 item 1 flow with
+ *  § 3.8's failure discipline, arguments interpolated as sentences. All three
+ *  prompts declare `requires: ['publish']` and render every user value
+ *  JSON-quoted, so a quote or newline in it cannot inject a step. */
+export const postVideoGuidedPrompt: PromptSpec;
+
+/** `tiktok_post_photos_guided`. Arguments: `photo_urls` (required — one string,
+ *  split on commas and whitespace, blanks dropped), `title`, `description`,
+ *  `privacy_level`, `account`. The § 3.10 flow: creator info, preview with the
+ *  urls as an array and `photo_cover_index` 0 unless told otherwise, approval,
+ *  apply, poll to PUBLISH_COMPLETE; `url_prefix_unverified` names
+ *  `photo_urls[<i>]`. A value that names no URL renders a request for them and
+ *  no steps. */
+export const postPhotosGuidedPrompt: PromptSpec;
+
+/** `tiktok_upload_draft_guided`. Arguments, all optional: `video`,
+ *  `photo_urls`, `title`, `description`, `account` — exactly one of the two
+ *  media. Four renders: a video ⇒ the § 3.9 flow (`tiktok_upload_video_draft`;
+ *  a `title` and/or a `description` is stated as not sent — one sentence for
+ *  either or both); photos ⇒ the § 3.11 flow (`tiktok_upload_photos_draft`,
+ *  title and description passed when given); both ⇒ ask which one, no steps;
+ *  neither ⇒ ask for one, no steps. The valid flows say not to call
+ *  `tiktok_get_creator_info`, preview (always `mode: "plan"`), approval, apply,
+ *  poll to SEND_TO_USER_INBOX; `pending_share_cap` stops. */
+export const uploadDraftGuidedPrompt: PromptSpec;
+
+/** Frozen, in listing order: video, photos, draft. Each render stays under
+ *  2,500 characters for up to three URLs of realistic length. */
+export const PROMPTS: readonly PromptSpec[];
+```
+
+Completion sources (TOOLS.md § 7.3) are declared on the shared argument
+constants, never per prompt: every `account` argument carries
+`{ kind: 'profiles' }` and every `privacy_level` argument
+`{ kind: 'values', values: PRIVACY_LEVELS }` — the `api/publish.ts` tuple the
+write tools' schema is built from, so the completion and the schema cannot
+disagree. Every other argument is free text and declares nothing. The listed
+shape on the wire stays `name`, `description`, `required`.
+
+## tools/resources.ts
+
+The resource manifest (TOOLS.md § 7.2): six read tools, each exposed at a URI
+as its *default* answer — `args: {}` — except where the default would block:
+the status resource fixes `wait_for_completion: false`, because the tool's
+default polls for up to ~60 s and a snapshot must return at once. The one
+tool argument a read cannot default, `publish_id`, is a `{publish_id}` path
+parameter, which makes that entry the manifest's one template.
+
+```ts
+export const authStatusResource: ResourceSpec;     // tiktok://auth/status    → tiktok_get_auth_status
+export const userInfoResource: ResourceSpec;       // tiktok://user/info      → tiktok_get_user_info
+export const recentVideosResource: ResourceSpec;   // tiktok://videos/recent  → tiktok_list_videos (one default page)
+export const creatorInfoResource: ResourceSpec;    // tiktok://creator/info   → tiktok_get_creator_info
+export const publishJournalResource: ResourceSpec; // tiktok://publish/journal → tiktok_list_publish_journal; `?account=` is the tool's filter (§ 2.2)
+export const publishStatusResource: ResourceSpec;  // tiktok://publish/{publish_id}/status → tiktok_get_publish_status, args { wait_for_completion: false }, completions { publish_id: { kind: 'publish_ids' } }; a template
+
+/** Frozen, in that order — the template last; every uri and name unique. */
+export const RESOURCES: readonly ResourceSpec[];
+```
 
 ## cli/index.ts (dispatch + process seams)
 
@@ -1910,6 +2775,11 @@ export function overlayEnvFile(
 
 export function isCliInvocation(argv: readonly string[]): boolean;
 export function usageText(): string;
+/** The version declared by the `package.json` at `url`, else `'0.0.0-unknown'`:
+ *  a missing file, non-JSON, a non-object, or a `version` that is absent, empty
+ *  or not a string all degrade the same way — `--version` never crashes the CLI. */
+export function versionAt(url: URL): Promise<string>;
+/** `versionAt` of this build's own `package.json`, cached after the first read. */
 export function packageVersion(): Promise<string>;
 
 /** Subcommands are reached through `await import(...)` so the server path pays
@@ -1931,6 +2801,43 @@ export const PACKAGE_SCOPES: Readonly<Record<PackageName, readonly string[]>>;
  *  Also the typo gate: a requested scope outside it comes back from TikTok as a
  *  generic authorization failure. */
 export const SCOPE_ORDER: readonly string[];
+
+// cli/prompt.ts — the interactive prompt seam, shared by `login` (CC-A10,
+// CC-A11) and `doctor` (CC-F3). The split separates the decision a test can
+// make from the process binding it cannot: `readLine` is the reading over any
+// two streams, `promptOf` answers *which* prompt is in force and is asserted by
+// identity, and `defaultPrompt` binds the real `process.stdin`/`process.stderr`
+// and is the only line excluded from coverage. `ask` is the call both commands
+// make.
+export async function readLine(
+  question: string, input: NodeJS.ReadableStream, output: NodeJS.WritableStream,
+): Promise<string>;
+export const defaultPrompt: (question: string) => Promise<string>;
+export function promptOf(deps: CliDeps): (question: string) => Promise<string>;
+export async function ask(deps: CliDeps, question: string): Promise<string>;
+
+// cli/login.ts — the browser seam, split the same way: `browserCommand` and
+// `spawnDetached` are the testable halves, `openBrowserOf` the observable
+// choice, `defaultOpenBrowser` the one excluded binding of `process.platform`.
+export function browserCommand(
+  url: string, platform: NodeJS.Platform,
+): { command: string; args: string[] };
+export async function spawnDetached(
+  opener: { readonly command: string; readonly args: readonly string[] },
+): Promise<void>;
+export const defaultOpenBrowser: (url: string) => Promise<void>;
+export function openBrowserOf(deps: CliDeps): (url: string) => Promise<void>;
+
+// cli/login.ts — the loopback listener's undecidable request line, split out of
+// the listener so it is an ordinary function rather than an excluded branch
+// (the listener's port comes from core/net's `boundPortOf`, § core/net.ts):
+export function callbackRequest(
+  method: string | undefined, url: string | undefined,
+): CallbackRequest;
+
+/** The journal and its single rotation, both siblings of the resolved env file.
+ *  A fixed pair, not a list — `--purge-journal` needs exactly these two. */
+export function journalPaths(envFilePath: string): readonly [string, string];
 ```
 
 **`CliIo.errRaw` is a deliberate, single-call-site hole in redaction.**
@@ -2270,3 +3177,50 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-08-13 | § `cli/doctor.ts` and § `cli/index.ts`: `DoctorContext` gained `readonly modulePath: string` and `CliDeps` an optional `modulePath?: string` (additive), carrying a 14th check — `install` — at the end of the runtime-surface group. It warns when the CLI is running out of the npx cache, because npx re-runs its own cached copy and `npm cache clean` does not touch it, so an operator can chase a bug the published version fixed weeks ago; the remediation spells out the cache-clear command for `ctx.platform` verbatim (`rm -rf ~/.npm/_npx`, `rd /s /q "%LOCALAPPDATA%\npm-cache\_npx"`) since neither path is derivable from the other. `modulePath` is a seam for rule 3's reason — `import.meta.url` is not overridable, so both branches would otherwise be reachable only from a real `npx` run on the matching platform. The match is on a path *segment*, so a project directory named `my_npx_tools` is not the cache, and a non-npx install answers `ok` rather than silently: "where is this running from" is the first thing a stale-install bug report has to establish (raised by SYN-38) | integrator (round-2 finding) |
 | 2026-08-22 | Added § Extended harness `fixtures.ts` and recorded two deviations from TESTING.md's original fixture sketch, both in `scripts/lib/fixtures.ts`. **`response.headers` is part of the on-disk format**, which the sketch (status + body) did not call for: the chunked-upload path answers with a bare status, a `Content-Range` and no body at all, so a body-only fixture cannot express the one interaction most worth recording, and `Retry-After` is the same story on the retry path. **Replay goes through `globalThis.fetch`, not "the `api/` parsers"** — no standalone parser is exported and `core/http` reads the global at call time, so driving the api function against a scripted stub is the only seam; it is also what makes the request half of the contract free, which the sketch wanted as a separate mechanism. Two areas are exempt from replay by name with a reason (`auth`: form-encoded and outside the `{data,error}` envelope; `upload`: a pre-signed PUT on another origin) and still recorded, sanitized and secret-scanned — an unrouted endpoint inside a replayable area remains a loud failure, since a recorded interaction nobody replays looks exactly like a verified one (raised by the recorded-fixtures spine) | integrator (approved deviation) |
 | 2026-08-22 | `core/redact`: `SENSITIVE_PARAM_RE`'s prefix class gained `"` and `'`. It required `?`, `&`, whitespace or `;` before the parameter name, so in the position a form body actually reaches a log line — quoted, as a JSON string or interpolated into a message — the *first* parameter was the one place the rule could not see, and a serialized OAuth body puts `client_key` and `code` exactly there. No signature change; the replacement still preserves the prefix, so `"access_token=…` stays well-formed. Found by the fixtures leak detector, which had the same gap and the same fix (raised by the recorded-fixtures spine) | integrator (defect fix) |
+| 2026-08-31 | `mcp/result`: `wait_for_audit` removed from the `user_action` action vocabulary, which is now the runtime-enumerable `USER_ACTIONS` with `UserAction` derived from it (`Hint.action?: UserAction`, same five remaining members — every emitter and every existing call form still compiles). No code path ever emitted the member and none was meant to: the case it named is an unaudited app, and TOOLS.md § 4 (flow 2) already says that preview shows `privacy_level_options: ["SELF_ONLY"]`, `audit_restrictions_active: true` **and a `note` hint**, while § 5.1's `note` row lists "unaudited explanation" among what a note carries. `auditRestrictionsNote()` is therefore right as it stands, and retyping it to `user_action` would have been wrong twice over: it rides *alongside* the `approval_required` hint of a preview and next to a successful post, so a `user_action` there would tell a model to halt a flow that should continue, and passing TikTok's audit is a developer process of weeks rather than the next step in the call at hand. The package has never been published, so no client held the union. § 5.1's `user_action` row is reworded in the same change to state what separates the two types, and `test/result.test.ts` now walks `USER_ACTIONS` and fails on a member no `src/` path emits — the check whose absence let this survive. It exempts two members by name, `move_file` and `host_media`, which are the same shape of gap and are left as they are: unwired, but their cases are live in the § 3.0 catalog (`file_outside_media_root`, `url_prefix_unverified`), whose normative texts already say "move the file there" and "host the media under a verified prefix", so wiring or dropping them is a separate decision with its own evidence | integrator (defect fix) |
+| 2026-09-01 | `tools/publish-common`: `move_file` and `host_media` are **wired**, not dropped — the two members the row above left exempt. New exports `moveFileHint(toolName)`, `hostMediaHint(toolName)`, `userActionHint(error, toolName)` and `localRefusal(error, toolName)`; no existing signature changed, `USER_ACTIONS` is unchanged in all three copies, and `test/result.test.ts` now walks it with an **empty** exemption map. Two adjacent rows reach opposite outcomes because § 5.1's test — "a step only the human/operator can take *next*, before this call can proceed" — is asked of the **flow the hint rides on**, not of how human the step sounds. `wait_for_audit` failed it: an unaudited app rides alongside a preview or a successful post, a flow that continues, and a `user_action` there tells a model to halt. These two pass it: `file_outside_media_root` and `url_prefix_unverified` are `retryable: false` refusals that end the call with nothing created, and neither moving a file nor re-hosting media is a branch the model can take for itself. That the catalog message already states the step is not an argument against the hint — § 5.2 rule 5 defines exactly that division of labour ("the error states cause + recovery, the hint operationalizes the recovery"), § 6 point 2 already mandates a `reauth`/`user_action` hint beside a `missing_scope` message that carries the whole recovery command, and the hint adds the machine-readable `action` a model branches on without parsing prose. The same test draws the boundary: the hint is attached at every tool-layer site where such a refusal becomes a result — the four `resolveSource` consumers and the two `checkSourceArgs` handlers in `tools/publish-write`, the two `checkCarousel` handlers in `tools/publish-photos`, and `dispatchWrite`'s **pre-init** branch, where an upstream `url_ownership_unverified` remaps to `url_prefix_unverified` — and deliberately **not** past an init, where the attempt exists upstream, the journal says `upload_failed` (CC-B4) and the next step is `tiktok_get_publish_status`, not a human. Layering forced the placement: `file_outside_media_root` is raised in `api/upload.ts`, which `import-x/no-restricted-paths` forbids from importing `Hint` at all, so the hint is keyed off the stable catalog code where the `ToolError` becomes a `ToolResult` — no error moved layers. Hint text names `TT_MEDIA_ROOT` and `TT_VERIFIED_URL_PREFIXES` but never the resolved path or the URL: § 5.2 rule 3 whitelists env-var names as server-owned template text and whitelists neither of those, which stay in `error.message`. TOOLS.md § 5.3 gains both renderings | integrator (contract decision) |
+| 2026-09-01 | `core/settings`: `Settings.maxConcurrent` and the `TT_MAX_CONCURRENT` variable are **removed**. Breaking on the settings shape, observable to nobody: the field was parsed, defaulted to 4, type-checked and documented in four places (README env table, CONFIGURATION.md, `.env.example` via `scripts/gen-env-example.ts`, ARCHITECTURE.md § Transport item 4) as a "per-host concurrency semaphore" that was never built, and read by no line of `src/`. There is no `Promise.all`/`allSettled`/`race`/`any` anywhere in `src/api/` or `src/core/`, chunk PUTs run sequentially, and the only two in `src/` are shutdown paths (`index.ts`, `mcp/http.ts`) — so wiring the knob would have meant inventing a subsystem to justify a default, which is the wrong direction for a v1 contract. The knob goes; the truth stays. What actually bounds upstream pressure is the per-profile publish token bucket (`mcp/plan`, `TT_PUBLISH_RPM`), and ARCHITECTURE.md item 4 now says so — including the sentence a semaphore row let the document avoid: on the HTTP transport two sessions can have calls in flight at once, and v1 leaves that unbounded on purpose. `test/settings.test.ts` drops the field from the full-defaults object and substitutes `TT_PUBLISH_RPM` (also `decimalInt({ min: 1 })`, so `'0'` still fails) into the `cc-f6` aggregate, keeping four distinct invalid variables behind the `4 problems` assertion. | integrator (contract decision) |
+| 2026-09-01 | Documentation brought in line with the parsers it describes, in the two places a reader would have been misled into a wrong call. (a) `TT_TOOL_PACKAGES` is **comma-separated**: `splitList` in `core/settings` splits on `,` and trims, so the "comma/space list" README stated in two places (env table and the packages section) promises a space-separated value that parses as one nonexistent package name and fails the whole config. CONFIGURATION.md already said "comma list"; README now agrees with it and with the code. (b) AUTH.md § Flow listed six default scopes including `video.upload`. The request is derived, not fixed: `PACKAGE_SCOPES` in `cli/login` unions the enabled packages' scopes in `SCOPE_ORDER`, and the default `TT_TOOL_PACKAGES=core` (`auth,user,video,publish`) yields **five** — `video.upload` arrives only with `publish-write`. `test/login.test.ts` has pinned the derived five since the scope selection landed, so the six-scope line was the only text in the repository that disagreed — and the one an operator reads before creating the app, which would have had them asking a sandbox for a scope its enabled packages cannot use. Both are wording fixes: no signature, no default and no code path changed. | integrator (contract decision) |
+| 2026-09-02 | `mcp/result`: added `MAX_HINT_TOKEN_CHARS`, `hintToken`, `hintEnum` and `quotedHintToken`, and recorded `MAX_HINTS` / `MAX_HINT_CHARS`, which were exported but never declared here. Additive — no existing signature changed. TOOLS.md § 5.2 rule 3 forbade upstream interpolation absolutely while § 5.3's normative `poll` rendering inlines an upstream `publish_id`, and five hint constructors interpolated upstream-controlled values (`publish_id`, a deliberately unvalidated `status`, the whole `privacy_level_options` array) with nothing bounding their length: `MAX_HINT_CHARS` bound at exactly one runtime site, the pagination note, so the 300-character rule held only for fixtures that happened to be short. Rule 3 now states the two admissible classes and the condition on each — an opaque identifier that passes a shape check and is re-emitted as a structured field, and a member of a vocabulary this server owns *selected by* the upstream value — and these helpers are the single place both are enforced. `api/publish`'s "report an unrecognized status, never reject it" posture is untouched; the narrowing happens at the hint boundary. `docs/TOOLS.md` § 5.2 updated in the same change | integrator (post-0.7.0 defect fix) |
+| 2026-09-02 | The § 5.2 rule 3 trust boundary is **extended past `hint.text`** to the two other channels a model reads as instruction: `error.message` and `data.fail_recovery`. No new admissible class, no new helper, no signature change — `tools/publish`'s `failRecovery`, and `tools/publish-common`'s `uploadInterruptedError` and `possibleDuplicateError`, now pass their upstream-originated values through `hintToken` exactly as a hint does. The defect was not that the rule was missing: § 3.0's Notes and `mcp/errors.ts`'s module docblock already claimed the boundary for `error.message`, and three tool-layer constructors quietly did not honour it — `failRecovery`'s *(unknown value)* branch quoted an unrecognized `fail_reason` into recovery prose, `uploadInterruptedError` inlined `publish_id` in two slots, `possibleDuplicateError` inlined `matched.publish_id` — with nothing that could notice. Extending it rather than leaving the error channel alone survives the strongest counter-argument, that an error is diagnostic and one which refuses to name the failure it complains about is worse: § 5.2 rule 5's division of labour ("the error states cause + recovery, the hint operationalizes the recovery") is about *content*, not trust, and all three values are name-shaped — an id, a failure code — never free prose, so nothing diagnostic is lost by dropping a value that is not name-shaped while the raw one stays one field away in `details.publish_id` or `data.fail_reason`, which the sanctioned variant points at by name. Refusal, not truncation, on this channel too: a clipped `publish_id` quoted back yields `invalid_publish_id`, and a clipped `fail_reason` would still render injected prose *inside* the server's own recovery sentence, which is the whole failure mode. The rule is written where a reader of the error catalog finds it — a new § 3.0 subsection "Upstream values in error and recovery text" with the three sanctioned variants, cross-referenced from § 5.2 rules 3 and 5 and from Appendix A — not smuggled into § 5.2, which governs § 5 only. `test/result.test.ts` gains a source walk over the `src/tools/` catalog messages that fails on an interpolated value no allow-list entry vouches for; `test/hint-guard.test.ts` gains poisoned-value sweeps for all three sites. The walk is scoped to `src/tools/` on purpose: two sites below the tool layer diverge — `core/http` appends up to `UPSTREAM_TEXT_MAX` (200) characters of upstream text to `upstream_error`/`oauth_error`, and `api/publish` joins the upstream privacy-option list into `privacy_level_unavailable` — and a repo-wide walk would have had to allow-list them, i.e. bless them. They are recorded as divergences in § 3.0 and in the walk's own docblock, and left as they are | integrator (post-0.7.0 defect fix) |
+| 2026-09-02 | `mcp/result`: `MAX_HINT_CHARS` stays enforced at **one** runtime site — `elisionNote`, the pagination-cursor hint — and nowhere else; a general runtime clamp on `Hint.text` was considered and declined. Now that every hint text is a server template plus `hintToken`/`hintEnum`-admitted values, the resume cursor is the only unbounded value that reaches a hint, so an over-long hint anywhere else is a bug in *this server* rather than a length upstream chose, and CI can see it: `test/result.test.ts` walks the constructors and holds each under the cap. The counter-argument — nothing structurally stops a future constructor — was weighed against what a clamp would have to do with the over-long hint, and every answer is worse than the bug it prevents. Truncation cuts the *end* of the sentence, which is exactly where the negative imperative lives ("Do not re-post.", "Do not post again."), so a clamped hint reads as permission to do the one thing it was written to forbid; dropping the hint silently strands a model that was about to be told to poll; throwing turns an already-succeeded post into an error result. The decision and its reason are recorded on the constant's docblock and in TOOLS.md § 5.2 rule 1. The one real gap the question exposed is closed instead: `stillProcessingHint` was absent from the "widest hint" test, so `test/hint-guard.test.ts` now builds it end-to-end at `MAX_HINT_TOKEN_CHARS` and asserts the fit | integrator (contract decision) |
+| 2026-09-09 | `tools/publish-common`: new exported types `AppliedResult`, `FailedDispatch`, `DispatchResult` and `WaitedResult`; `dispatchWrite` returns `DispatchResult` and `waitIfAsked` now takes one and returns `WaitedResult`. Additive at every call site — both were already `ToolResult<AppliedData>` and the new types are subtypes of it — so no caller changed and no test was rewritten. The change is a **coverage honesty** fix, not a feature: `ok` and the presence of `data` were two independent facts the type system could not relate, so `waitIfAsked` had to test `data === undefined` on a value that always had one, and the resulting dead arm was excluded with a `c8 ignore` rather than tested. Four exclusions across `tools/publish-write` and `tools/publish-photos` came from the same shape (`?? ''` and `?? []` on values a check upstream had already proved present) and are removed by the same reasoning; `checkSourceArgs` returns the narrowed `CheckedSource` (module-private, so not listed above) for the two `resolveSource` sites. **A branch that cannot be taken is a claim about the type, and the fix is to make the type say it** — an exclusion moves the branch out of the denominator and leaves the wrong type in place, which is how a 100% report and an untested line coexist. No zod schema, no `docs/tool-manifest.json` entry and no error text changed; error strings are byte-identical (raised by the ignore-hint census) | integrator (contract decision) |
+| 2026-09-10 | `core/config`: added a private `errnoFor(err: unknown): string` beside `errnoOf`, and routed every warning and message site through it. **No exported signature changes** and no test was rewritten. The six sites each wrote the same `errnoOf(...) ?? 'unknown'` chain out by hand, and five of the six could not reach the fallback — `fs` always answers with an errno — so five whole lines were excluded from coverage with `c8 ignore`. The exclusions were wider than the claim: the line at the `saveEnvFile` catch also carried `errnoOf(cause) ?? errnoOf(err)`, and **both of those arms are driven by tests** (`cc-h3` ENOTDIR takes the cause arm, `cc-h3` `env_file_malformed` takes the own-code arm) — the hint was hiding covered code alongside the uncovered fallback. Written once, the chain has exactly one fallback and every arm sits on a path a test takes: the injected `rename` seam can reject with anything (CC-H3), and `test/login.test.ts:1414` already rejects with a codeless `Error`. The one arm nothing reached — a rejection that is not an `Error` at all — is now a test rather than an exclusion (`cc-h3 a rejection with no errno at all still warns with a code`), using the house `prefer-promise-reject-errors` disable that six other test files already use for the same reason. `config.ts` goes from six `c8 ignore` hints to **zero** at 100% branch coverage. The only behavioural difference is in text that was previously unreachable: the `env_file_unreadable` message's fallback reads `(unknown)` rather than `(unknown error)`, and it is now reachable. Same principle as the 2026-09-09 row: **a branch that cannot be taken is a claim about the code's shape, and the fix is to change the shape** — an exclusion moves the branch out of the denominator and leaves the duplication in place. | integrator (coverage honesty) |
+| 2026-09-10 | `cli/login`: the § above gains the seam-split exports — `readLine`, `defaultPrompt`, `promptOf`, `spawnDetached`, `defaultOpenBrowser`, `openBrowserOf`, `callbackRequest`, `effectivePort` — and `journalPaths`, whose return type is now the tuple `readonly [string, string]` rather than `readonly string[]`. All additive except the tuple, which narrows a type nobody could widen: the function has always returned exactly the journal and its one rotation, and `--purge-journal` indexes both. The exports exist for the same reason `PACKAGE_SCOPES` does (2026-08-07 row) — a property a test cannot otherwise observe. Specifically: `deps.prompt ?? defaultPrompt` written inline has a fallback arm reachable only by *entering* it, which means reading the test runner's own stdin; returned by `promptOf` it is an identity `assert.equal` settles, and the exclusion shrinks from the whole `??` to the one line that binds `process.stdin`. Same split for the browser opener against `process.platform`. `cli/login.ts` goes from four `c8 ignore` hints to **two**, both correctly verdict-4 (`production seam default, replaced by injection in every test`), each naming its injection point in `test/login.test.ts`. No behaviour, no error text and no exit code changed. | integrator (coverage honesty) |
+| 2026-09-18 | § `cli/index.ts`: new § entry `cli/prompt.ts` — `readLine`, `defaultPrompt`, `promptOf` move there from `cli/login.ts` and gain `ask`. Not a contract change for any caller: `login` and `doctor` still reach the prompt through `CliDeps.prompt`, and the three moved exports had existed for eight days. What changed is that the 2026-09-10 rows were written by two workers with exclusive file ownership, and each reduced the same seam the same way — `cli/doctor.ts` ended up with a byte-identical `readLine`, `defaultPrompt` and `ask`, its own excluded line, and its own copy of the `readLine` test. One seam, one home: `cli/doctor.ts` goes from two `c8 ignore` hints to **none**, `cli/login.ts` from two to **one** (the browser binding), and the prompt's single exclusion lives in the module that owns it. `test/prompt.test.ts` is the suite for the seam; the duplicate tests left `login.test.ts` and `doctor.test.ts`. | integrator (coverage honesty) |
+| 2026-09-18 | § `cli/index.ts`: `packageVersion` gains its testable half, `versionAt(url)`. The last `c8 ignore start`/`stop` block in `src/` sat over `packageVersion`'s `catch`, with a docblock arguing — correctly — that the fallback is unreachable in a checked-out or an installed tree. The argument was right and the exclusion was still the wrong tool: what made the `catch` unreachable was not the code but the *choice of file*, which was fixed to `import.meta.url` inside the same function. With the URL as a parameter the read-and-parse is ordinary code, and `test/cli.test.ts` drives every degrading shape (missing file, not JSON, an array, `null`, no `version`, an empty one, a number) plus the one that carries a version. Same principle as the 2026-09-10 `core/config` row: a branch that cannot be taken is a claim about the code's shape, and the fix is to change the shape. `src/` now carries **15** hints and **0** block lines, down from 47 and 74 at the start of the round; `--version`'s output, cache and fallback value are unchanged. | integrator (coverage honesty) |
+| 2026-09-18 | `api/publish` + `tools/publish-common`: the init result is now keyed on the source kind — `PublishInitResult<S extends VideoSource>` resolves to `{ publishId; uploadUrl: string }` for a FILE_UPLOAD and to `{ publishId; uploadUrl?: string }` for a PULL_FROM_URL, with `VideoPostInit<S>` / `DraftUploadInit<S>` and `initVideoPost<S>` / `initDraftUpload<S>` generic over the same `S` (`VideoSource` is unchanged as the union `PullFromUrlSource | FileUploadSource`, both now exported). Every existing call site compiles unchanged: the type parameter is inferred from `req.source`. The 2026-08-09 row made a FILE_UPLOAD init *throw* without an `upload_url`; the type now says so too, so the file branch of `videoSender` reads `started.uploadUrl` instead of `?? ''` behind an exclusion. In `DispatchOptions`, `send`'s `report` takes an `InitialisedUpload { publishId; position }` and the optional `position?` is gone: only a sender with chunks still to send ever reports (the URL video branch and `photoSender` resolve straight out of their init, which is their last throwable step), so an initialised failure always has a position to name and `classifyDispatch` no longer carries an unreachable `{ chunk: 0, total: 0 }` default. Journal records are unchanged (`chunk` was written on every real post-init path before). One test added, pinning behaviour that existed unpinned: an unwritable journal after an interrupted upload names the `publish_id` in its note (CC-B4). | integrator (coverage honesty) |
+| 2026-09-18 | `core/redact`: additive export `redactRecord(record: Record<string, unknown>): Record<string, unknown>` — `redactValue`'s walk entered at the plain-object step, so it is the same nested default-deny, depth limit, cycle marking and key rules, and `redactRecord(r)` deep-equals `redactValue(r)` for every plain object `r` (pinned by an explicit fixture and a fast-check property). `core/log` applies it to a record's fields; the `else` arm that assigned a non-record result to `record.fields` was a backstop for a return type of `unknown`, not for any value the walk can produce, and is gone with its exclusion. `redactValue` is untouched. | integrator (coverage honesty) |
+| 2026-09-18 | `core/oauth`: `isFresh`'s `Number.isFinite` guard removed as dead, not as unreachable. `Date.parse` yields a finite number or `NaN`, and `NaN - nowMs > skewS * 1_000` is already `false` — the guard's own answer — so input → output was identical with and without it, and the old docblock's claim that the bare subtraction "would say fresh for ever" was wrong. The invariant it guarded (every `TokenSet` expiry parses: `toTokenSet` renders with `toISOString`, `toCachedSet` copies a value `readProfile`'s `timestamp` guard has already parsed, CC-H2; no exported entry point takes a `TokenSet` from outside) is now stated in the docblock and pinned at the oauth boundary by a test that a stored `'tomorrow'` is `invalid_timestamp` before any request. `TokenSet` is unchanged. | integrator (coverage honesty) |
+| 2026-09-18 | `mcp/http`: new export `boundPortOf(address: AddressInfo \| string \| null, fallback: number): number` — the bound-port narrowing split out of the bind so its two type-only arms (a pipe path, `null`) are decided by an ordinary function and tested directly, the same shape as `cli/login.ts`'s `effectivePort` (2026-09-10 row); the two are the same one-liner in two layers because `mcp/` may not import `cli/`, and a `core/` home for both is a later, separate move. Rejected: a `createServer?` injection on `HttpTransportOptions`, which nothing but that one arm would use. `requestPath` now takes `String(req.url)` under the same comment as `String(req.method)` five lines below. `core/http`: `assertAllowedUrl` keeps its signature over a module-private `checkAllowedUrl(url, kind): URL \| TikTokError`, so the egress logging wrapper narrows on `isTikTokError` instead of on a `catch (error: unknown)`; `withRetries` is a `while` over a failed outcome with `return outcome.value` after it. `mcp/journal`'s two readers and `core/http`'s fetch attempt nest `try { try … catch … } finally` — V8 leaves an uncovered continuation on a single-statement `try/catch/finally` whose catch always throws, and the nesting has the same semantics. No behaviour, log line, error or record changed anywhere in this row. `src/` now carries **2** hints (both `production seam default`) and **0** block lines. | integrator (coverage honesty) |
+| 2026-09-18 | `core/config`: § above brought back into line with the code — `EnvFileSnapshot` has been `ExistingEnvFile \| MissingEnvFile`, discriminated on `exists`, since 2026-09-10 (`src/core/config.ts:161-207`, pinned by `test/config.test.ts:261`), and this document still showed the flat shape with `exists: boolean` and `mode?: number`. **The type is the change, recorded late**: `readEnvFile` builds exactly two literals and each either has a mode or cannot have one, so the optional field only ever manufactured the guard at `cli/doctor.ts`'s permissions check that nothing could reach (TESTING.md verdict 5 — fix the type, not the coverage). For a caller the difference is that `snapshot.mode` is a `number` once `snapshot.exists` has been narrowed and does not exist on the other arm; nobody read `mode` without checking `exists` first, so no call site changed. The two worklog notes that still listed this as an open verdict-2 item were stale. | integrator (docs drift) |
+| 2026-09-18 | `core/net`: new module with one export, `boundPortOf(address: AddressInfo \| string \| null, fallback: number): number` — the bound-port narrowing that `mcp/http` (its 2026-09-18 row above) and `cli/login` (2026-09-10 row, as `effectivePort`) each carried as its own copy with its own docblock and its own three-arm test. **`mcp/http.boundPortOf` and `cli/login.effectivePort` are removed**: breaking on the export surface, observable to nobody but the two test files, which now leave the three-arm assertions to `test/net.test.ts` and keep their surface tests (an ephemeral bind advertises the OS-assigned port; `cc-a8` is still named by nine `login` tests). Body, both call sites and behaviour unchanged. The duplicate existed only because `mcp/` may not import `cli/`; `core/` is the layer both may import. `src/` still carries 2 hints. | integrator (dedup) |
+| 2026-09-19 | `mcp/prompts`: new module (TOOLS.md § 7.1) — `PromptArgumentSpec`, `PromptArgs`, `PromptSpec` (a `tiktok_`-prefixed `name`, `package: ToolPackage`, `arguments`, `render(args): readonly PromptMessage[]`), `definePrompt` (rejects a malformed spec with `TikTokError` code `invalid_prompt_spec` at module load, like `defineTool`), `describePrompt` (the `prompts/list` entry), `validatePromptArgs` (an unknown or missing-required argument is `McpError` / `InvalidParams`, `Invalid arguments for prompt <name>: …`) and `getPrompt` (validate, then render). Mechanism only: no prompt is defined here. | integrator (Phase 4 slice 1) |
+| 2026-09-19 | `mcp/resources`: new module (TOOLS.md § 7.2) — `RESOURCE_SCHEME` (`tiktok`), `RESOURCE_MIME_TYPE` (`application/json`), `ResourceSpec` (a `tiktok://` URI bound to one read-only `AnyToolSpec` plus fixed `args`), `ParsedResourceUri`, `defineResource` (`invalid_resource_spec`), `describeResource(spec, marker?)` / `describeResourceTemplate` (`${uri}{?account}`), `parseResourceUri` (`undefined` for any other scheme or query key), `resourceArgs` (the spec's `args` plus the optional `account`) and `resourceContents(uri, result, settings)` (the tool envelope, redacted and truncated by the same `truncateResult` as `tools/call`, as one JSON text content). A resource is a tool read through the unchanged `callTool` pipeline, never a second one. | integrator (Phase 4 slice 1) |
+| 2026-09-19 | `tools/prompts` and `tools/resources`: new data modules — `postVideoGuidedPrompt` + `PROMPTS`, and `authStatusResource` / `userInfoResource` / `recentVideosResource` / `creatorInfoResource` + `RESOURCES`. Both frozen arrays are the one ordered source for `prompts/list`, `resources/list` and the TOOLS.md § 7 tables; entries are appended, never re-sorted. `tools/` depends on `mcp/`, never the reverse (layer map unchanged). | integrator (Phase 4 slice 1) |
+| 2026-09-19 | `mcp/server`: additive `ServerOptions.prompts?` / `resources?` (default `[]`), new exports `enabledPrompts(prompts, settings)` and `enabledResources(resources, tools)` (the package gate applied to the two manifests, membership by tool *name*), the five `prompts/*` and `resources/*` handlers on the same low-level `Server`, and capabilities `{ tools: { listChanged: true }, prompts: {}, resources: { listChanged: true }, logging: {} }`. **`McpServerHandle.notifyToolListChanged()` is renamed `notifyListChanged()`** — breaking on the handle surface, observable to `src/index.ts` and the `server` / `lifecycle` tests only: one cause (a credential change) moves both lists, because a resource description carries its tool's `[UNAVAILABLE: …]` marker, so the handle emits `tools/list_changed` then `resources/list_changed` from one call. `mcp/lifecycle` is unchanged in code; its docblock names the new method. `src/` still carries 2 hints. | integrator (Phase 4 slice 1) |
+| 2026-09-19 | `mcp/resources`: path parameters (TOOLS.md § 7.2, Phase 4 slice 2) — `ResourceSpec.uri` may carry `{name}` segments after the host segment, each a tool argument the read cannot default; `defineResource` rejects a `{name}` outside the argument-name grammar, in the host, repeated, named `account`, or fixed by `args` too (all `invalid_resource_spec`). New exports `ResourceMatch`, `resourceParams(spec)`, `isResourceTemplate(spec)` and `matchResource(specs, uri)` (concrete equality first, then the templates, both in manifest order; a `{name}` binds one non-empty segment, percent-decoded, a malformed escape is no match). **Signature change:** `resourceArgs(match: ResourceMatch, parsed)` replaces `resourceArgs(spec, parsed)` — `{ ...spec.args, ...params, account? }`. `describeResourceTemplate` is unchanged in code and now yields RFC 6570 proper for a template (`tiktok://publish/{publish_id}/status{?account}`). The braces of a template read verbatim are percent-encoded by the URL parser and decoded back, so that read reaches the tool with `publish_id: '{publish_id}'` — the tool, not the router, answers for an id TikTok does not know; pinned by a test rather than special-cased | integrator (Phase 4 slice 2) |
+| 2026-09-19 | `mcp/server`: `resources/list` lists the enabled *concrete* specs only; `resources/templates/list` lists every enabled spec; `resources/read` resolves through `matchResource` over the enabled specs (kept as the ordered list `enabledResources` returns, not a map, because a template is matched, not looked up) and hands `resourceArgs(match, parsed)` to `callTool`. A path no spec matches — an empty segment, a malformed escape — is `Unknown resource: <uri as sent>` like any other unknown URI. No new option, no new export | integrator (Phase 4 slice 2) |
+| 2026-09-19 | `tools/prompts` and `tools/resources`: two prompts and two resources appended — `postPhotosGuidedPrompt` (`tiktok_post_photos_guided`: `photo_urls` required as one comma/whitespace-separated string, `title`, `description`, `privacy_level`, `account`) and `uploadDraftGuidedPrompt` (`tiktok_upload_draft_guided`: `video`, `photo_urls`, `title`, `account`, all optional — exactly one of the two media, the other two situations render a question and no steps); `publishJournalResource` (`tiktok://publish/journal`, `args: {}`, where `?account=` is the tool's filter per § 2.2) and `publishStatusResource` (`tiktok://publish/{publish_id}/status`, the manifest's one template, `args: { wait_for_completion: false }` because the tool's default polls ~60 s). The shared sentences of the three flows are module constants; `PROMPTS` is video, photos, draft and `RESOURCES` ends with the template | Workers P2 and R2 (Phase 4 slice 2) |
+| 2026-09-19 | `mcp/completions`: new module (TOOLS.md § 7.3, Phase 4 slice 3) — `COMPLETION_MAX` (100), `CompletionSource` (`profiles` \| `values` \| `publish_ids`), `CompletionRuntime` (the structural subset of `ServerRuntime`: `settings`, `log`, `profiles()`), `CompletionRequest`, `Completion` (`values`, `total`, `hasMore`, all three always), `completionSourceProblem(source)` and `complete(source, runtime, request)` — case-insensitive prefix, source order, cut at 100, `undefined` source ⇒ empty, locked profile alone under `TT_LOCK_PROFILE`, journal ids newest first and once, filtered by `context.account` exact-case. Every source is local; no TikTok call. Imports `core/` types and `mcp/journal` only | integrator (Phase 4 slice 3) |
+| 2026-09-19 | `mcp/journal`: additive `journalOptionsFor(settings, logger)` — the one journal wiring (`envFile` when set, `journalMaxBytes`, the logger). `tools/publish.ts`'s exported `journalOptions(ctx)` now delegates to it with `ctx.api.settings` / `ctx.log` (values unchanged) and `mcp/completions` calls it for `publish_ids`, keeping the 2026-08-09 rule — the wiring "must be identical" for every reader and writer — true with a third consumer | integrator (Phase 4 slice 3) |
+| 2026-09-19 | `mcp/prompts`: additive `PromptArgumentSpec.completion?: CompletionSource` (never on the wire); `definePrompt` also rejects a `values` source that lists nothing or repeats a value (`invalid_prompt_spec`); new export `promptCompletion(spec, argument)` — the declared source or `undefined`, an undeclared name throwing the `Invalid arguments for prompt <name>: unknown argument "…"` McpError of `validatePromptArgs` | integrator (Phase 4 slice 3) |
+| 2026-09-19 | `mcp/resources`: additive `ResourceSpec.completions?: Record<string, CompletionSource>` (frozen by `defineResource`; a key must be a `{name}` of the URI and not `account`; a `values` source must list something and repeat nothing — all `invalid_resource_spec`); new exports `matchResourceRef(specs, uri)` (the spec whose `uri` or `${uri}{?account}` template equals the ref — a read URI, a query or an unlisted spec is `undefined`) and `resourceCompletion(spec, argument)` (`{ kind: 'profiles' }` for `account` on every spec, the declared source for a `{name}`, any other name ⇒ McpError `Invalid arguments for resource <spec.uri>: unknown argument "…"`). | integrator (Phase 4 slice 3) |
+| 2026-09-19 | `mcp/server`: the `completion/complete` handler on the same low-level `Server` — `ref/prompt` through `promptCompletion` over the enabled prompts, `ref/resource` through `matchResourceRef` + `resourceCompletion` over the enabled resource specs, then `complete(source, runtime, { value, context: context?.arguments })`; an unknown or gated-out prompt is `Unknown prompt: <name>`, an unmatched ref uri `Unknown resource: <uri>`. Capabilities gained `completions: {}` (the SDK refuses the handler without it). No new option, no new export; `prompts/get` shares the prompt lookup | integrator (Phase 4 slice 3) |
+| 2026-09-19 | `tools/prompts` and `tools/resources`: the shared `ACCOUNT_ARGUMENT` declares `{ kind: 'profiles' }` and `PRIVACY_ARGUMENT` `{ kind: 'values', values: PRIVACY_LEVELS }` (`tools/prompts` now imports `api/publish` for the tuple — allowed by the layer map); `uploadDraftGuidedPrompt` gained an optional `description` after `title` (photo draft: stated and passed when given; video draft: stated as not sent, one sentence for title, description or both); `publishStatusResource` declares `completions: { publish_id: { kind: 'publish_ids' } }`. `PROMPTS` / `RESOURCES` order unchanged | Worker P3 and integrator (Phase 4 slice 3) |
+| 2026-09-23 | zod 3 → zod 4 (`^4.4.3`); `zod-to-json-schema` dropped (runtime dependencies 3 → 2). `mcp/server` advertises through zod's own `z.toJSONSchema(…, { target: 'draft-7', io: 'input' })`; `toolInput` now returns `z.ZodObject<…, z.core.$strict>` (the zod 4 spelling of the same strict object). No contract changed except two observable details: integer arguments now also advertise the safe-integer bound (`minimum`/`maximum` ±9007199254740991 in `docs/tool-manifest.json`), and the `invalid_params` detail reasons use zod 4's default wording, except a missing argument, which `mcp/errors`' `argumentErrorMap` renders as `required argument is missing` (was `Required`; zod 4's default `Invalid input: expected string, received undefined` read as a type mistake); the unknown-argument text is ours and unchanged. | integrator |
+| 2026-09-23 | `api/context`: `TT_MAX_RETRIES` semantics — the read-class HTTP client is now built with `maxAttempts: 1 + settings.maxRetries`, so each idempotent read is tried once plus up to `TT_MAX_RETRIES` retries, like `TT_CHUNK_RETRIES`. It was applied as an attempt cap (the default `3` meant 3 attempts, 2 retries); the default `3` now allows up to 4 attempts and `0` disables retries. `core/http`'s own `maxAttempts` option and its default are unchanged; publish inits are still never retried | integrator |
+| 2026-09-23 | `mcp/errors`: additive `unconfiguredProfileScopeError(profile, scope)` — the `missing_scope` a scoped tool returns when the profile has no stored credentials at all; `mcp/server`'s `checkScopes` uses it (with a `reauth` hint without `--scopes`) instead of `missingScopeError`, whose "authorized without scope" wording is false for a profile that was never authorized. Same code, not retryable; `details` gains `configured: false`. TOOLS.md § 3.0 gains the variant | integrator (round 4) |
+| 2026-09-23 | `api/upload`: `uploadFile` gains the additive `identity?: FileIdentity` and pins the media file — one descriptor for every chunk and retry, identity checked against the verified one (`plan_mismatch`), in-place modification between chunks ⇒ `upload_interrupted`. `mcp/journal`: `checkDuplicate` extends its 256 KiB scan into the newest part of `.1` when the whole active generation fits the budget. No existing parameter changed | integrator (round 4) |
+| 2026-09-23 | `mcp/server`: `ProfileInfo` gains the additive `authorized?: boolean` — `false` when the profile stores neither an access nor a refresh token or its record cannot be read; absent is treated as authorized. `checkScopes` now returns the unconfigured `missing_scope` form (plain `login --profile <p>`, `details.configured: false`) for such a profile too — DEFAULT before the first login, a profile with only app keys — not only for a name missing from the list. `api/upload`: chunk bodies are positional 1 MiB reads on the pinned descriptor instead of a FileHandle read stream (a destroyed stream closed the shared handle and broke retries; each stream leaked a `close` listener). `mcp/journal`: the `.1` extension of the duplicate scan is decided on raw bytes read versus the same descriptor's fstat size, not decoded text length, which failed open on invalid UTF-8 in a cut tail. No existing signature changed | integrator (round 4b) |
+| 2026-09-24 | `core/config`: additive `canonicalProfileName(name)` (trim + upper-case, no validation); `normalizeProfileName` is built on it. `mcp/server`'s `resolveAccount` (incl. the `TT_LOCK_PROFILE` check), the `tiktok_list_publish_journal` filter and the `publish_id` completion now compare a caller-given `account` through it, so matching is case-insensitive; `unknown_account` echoes the caller's spelling. `core/http`: `isPrivateAddress` also refuses `192.88.99.0/24`, SIIT `::ffff:0:0:0/96` (by embedded IPv4), the rest of `0000::/8`, `2001::/23`, `3fff::/20` and `5f00::/16`. No existing signature changed | integrator (round 5) |
+| 2026-09-24 | `mcp/prompts`: `PromptSpec` gains the additive `requires?: readonly ToolPackage[]`, validated by `definePrompt` (`invalid_prompt_spec`); `mcp/server`'s `enabledPrompts` keeps a prompt only when its `package` and every `requires` entry are enabled. `tools/prompts`: all three guided prompts declare `requires: ['publish']` and JSON-quote every rendered user value. `mcp/resources`: `parseResourceUri` also refuses userinfo, a port, tab/CR/LF, dot segments (plain or `%2e`), a non-literal query key, `account` without `=` and an empty pair; the value is percent-decoded only. `mcp/server`: `notifyListChanged` attempts both notifications and rethrows the first failure; a completion whose source fails is a warning plus the empty completion; `TT_LOCK_PROFILE` also bounds the journal filter and the `publish_id` completion. `mcp/http`: additive `HttpTransportOptions.maxSessions` / `sessionIdleMs` (test seams); 4 MiB body cap (413), `400 -32700` on unparsable JSON, 128-session cap (503), lazy 30-minute idle close. `mcp/lifecycle`: `stop()` also awaits a `poll()`-started read, and `poll()` after `stop()` resolves `false` — the documented contract now holds. `src/index.ts`: an unreadable env file lists as no profiles. No existing signature changed | integrator (round 5b) |
+| 2026-09-24 | `core/settings`: additive `Settings.httpAllowedHosts?: readonly string[]` (`TT_HTTP_ALLOWED_HOSTS` — comma-separated bare host names, lowercased; no scheme, port or wildcard). `mcp/http`: `OriginPolicy` gains the additive `allowedHosts?: ReadonlySet<string>`, and `dnsRebindingRejection` refuses a `Host` or `Origin` hostname outside it; `HttpTransportOptions` gains the additive `drainMs?` (test seam, default 10 s), and `close()` now drains — new requests `503`, in-flight non-`GET` requests get the budget, `GET` streams are not waited for, the rest is aborted with a warning — before tearing the sessions down; still idempotent, same promise. `mcp/journal`: additive `foldedAttemptsCached(opts?)` (fold reused under a size/mtime/inode signature of both generations), which the `publish_ids` completion now reads through; the directory is fsync'd best-effort after a rotation and after a creating fsync'd append. No existing signature changed | integrator (round 6) |
+| 2026-09-24 | `mcp/journal`: rotation now takes a cross-process lock of its own, `journal.ndjson.lock` — `withEnvLock` keyed on the journal path, so it never contends with the env-file lock and a publish never queues behind a token refresh. The unlocked size check stays the lock-free fast path; under the lock the size is re-checked, so a process that waited while another rotated does not rotate the fresh generation again. The wait is 2 s (`ROTATE_LOCK_WAIT_MS`); past it, or when the lock is unusable, the rotation is skipped with the existing `could not rotate the publish journal; it keeps growing` warning and the append proceeds. A crashed holder is reclaimed by env-lock's stale rule (15 s, mtime). Intent and outcome appends still take no lock. Closes the documented known limit that two processes rotating concurrently could discard one rotated generation. No signature changed | integrator (round 7) |
+| 2026-09-24 | `mcp/http`: the drain now also counts JSON-RPC requests from arrival to answer (`trackCalls`, wrapped around the transport after `connect`), so a client that disconnected mid tool call no longer lets `close()` abort its running handler; an answer, a `notifications/cancelled` for the id, or the transport closing settles it, and the whole drain stays bounded by `drainMs` (`DEFAULT_DRAIN_MS`, 10 s). A session initialized after the teardown emptied the map is closed at once, and a `connect` failure releases the handle. `core/settings`: additive `canonicalHostName(value)` — `TT_HTTP_ALLOWED_HOSTS` entries are stored in WHATWG URL canonical form (lowercase, IPv6 compressed, `127.1` → `127.0.0.1`), IPv6 zone ids rejected; `mcp/http`'s `parseAuthority` canonicalizes the `Host` hostname the same way. `src/index.ts` / `doctor`: both `TT_HTTP_INSECURE=1` warnings fire only on a non-loopback bind. `core/env-lock`: additive `EnvLockOptions.label?: { lock, guards }` for the messages; journal rotation reports as the "journal rotation" lock guarding "the publish journal". `mcp/journal`: `foldedAttemptsCached` returns a frozen array. No existing signature changed | integrator (round 7) |
+| 2026-09-25 | Round 8 fixes. **`mcp/plan-store`**: `PlanRecord` and `PlanExpectation` gain the additive `fileIdentity?: string` (`size:mtimeMs:dev:ino`, CC-D3) and `ConsumeFailure` gains `"file_changed"`, checked last — the identity is bound to the plan, never folded into the digest (the duplicate guard's key) and never sent upstream; `tools/publish-common` adds `fileChangedError()` (`plan_mismatch`, `details.reason: "file_changed"`, its own text). **`tools/publish-common`**: a caller cancellation that lands while the send is in flight — init or mid-upload — is `network_ambiguous` journaled `send_ambiguous` (mid-upload with `publish_id` and `chunk`; `networkAmbiguousError(publishId?)` is additive), so the duplicate guard blocks a blind retry (CC-G4); a cancel before the send began stays `error`. `runPlanGuards` step 7 is now peek the rate token → `consumePlan` → take the token, so a plan lost during the duplicate guard's file read costs no token. **`mcp/journal`**: `checkDuplicate(payloadDigest, profile, clock, opts?)` — the guard is per profile in canonical spelling (CC-F4) and `possible_duplicate` names the matched attempt's profile. **`mcp/server`**: `resolveAccount` treats a whitespace-only `account` as absent (the active or locked profile); `tiktok_list_publish_journal` with a blank `account` filters nothing. **`core/env-lock`**: breaking a stale lock renames it to a unique tombstone and deletes it only after verifying the tombstone is the directory whose age was measured, so a breaker that lost the race no longer deletes a successor's fresh lock. **`core/http`**: IPv6 egress refuses every address outside global unicast `2000::/3`. **`src/index.ts`**: the server's `createContext` reads the live `process.env` plus the env file for credentials instead of the startup overlay, so a rotated or revoked refresh token is never reused. **`cli/login`**: `login --revoke` exits 1 when the local clear fails. **`cli/doctor`**: reports the journal rotation lock (`journal.ndjson.lock`) and fails on an unreadable profile. **`core/config`**: the `.pre-schema<N>` backup is created 0600 (`open(…, 'wx', 0o600)`), never copied at the umask's mode then tightened. No frozen call form breaks | integrator (round 8) |
+| 2026-09-25 | Round 9 fixes. **`tools/publish-common`**: `runPlanGuards` registers the in-flight entry before the duplicate-journal read (also under `force`) and releases it on every later refusal — journal duplicate, rate bucket, plan consume — so two concurrent identical publishes can no longer both pass the journal check. **`api/upload`**: a transport failure (`network_error` / `timeout`) on the final chunk throws `network_ambiguous`, since TikTok may have received the whole file; `classifyDispatch` records it as `send_ambiguous` with `error_code: network_ambiguous` (CC-G4) instead of `upload_failed`. On a `416` resync, `onProgress` fires only when the position advanced, and a resync to the end completes the upload. **`core/config`**: `applyUpdates` rewrites an existing case-variant line of a per-profile key in place, in the canonical upper-case spelling, and drops the other variants (CC-F4). **`core/redact`** callers: `client_secret` is registered for exact-value redaction in `readProfile` and `exchangeCode`, and `revokeToken` registers the access token before the request; `revokeToken` returns `RevokeOutcome`. **`core/oauth`**: with no refresh token on file or in the environment, `ensureFreshAccessToken` does not spend the in-memory one — it drops the cached set and throws `auth_expired`, so a server process never resurrects a profile another process revoked. **`core/env-lock`**: the stale-lock identity also compares the measured mtime, so inode reuse on a file system without birth time cannot make the breaker delete a live lock. **`mcp/http`**: the idle sweep skips a session with unanswered calls; a `Host` with an invalid port is `403`, not a bare `400`; during the drain a `notifications/cancelled` for an existing session is still delivered; a `POST` whose body completes after the drain began is `503`, not `404`. No frozen call form breaks | integrator (round 9) |
+| 2026-09-25 | Round 10 fixes. **`api/upload`**: once an attempt at the final chunk lost its answer (`network_error` / `timeout`) and was replayed, any later failure of that chunk — `5xx` retries exhausted, or a terminal `403` / `404` / `400` — throws `network_ambiguous`, not `upload_interrupted` (CC-G4). A final-chunk `416` whose progress equals the last byte index (`total − 1`) throws `network_ambiguous` — until probe P-11 pins the unit it is every byte or all but one; progress ≥ `total` still completes. A `416` resync that moves the position calls `onProgress` for it even backwards, so a later failure names the right chunk; `tools/publish-write` keeps MCP progress monotonic. **`tools/publish-common`**: an exception thrown by the guards after the in-flight registration releases the entry. **`core/env-lock`**: a successor's lock moved aside by the stale-lock breaker is renamed back only onto a free path. **`mcp/http`**: a `Host` port with leading zeros is re-spelled canonically before the bound-port comparison. **`cli/login`**: the default profile is `TT_LOCK_PROFILE`, then `TT_ACTIVE_PROFILE`; a flag-looking separated value is a missing value; an invalid `--profile` is a usage error (exit 2) and the name is upper-cased; existing credentials with no TTY and no `--force` exit 2, a "no" at the prompt exits 1. **`core/config`**: the `unknown_profile` remediation names `tiktok-mcp-ai login --profile <name>`. **`core/settings`**: `TT_MAX_RETRIES` / `TT_CHUNK_RETRIES` max 10, `TT_TOKEN_REFRESH_SKEW_S` max 86400. **`api/user`**: `user: null` is a malformed payload. No signature changed | integrator (round 10) |
+| 2026-09-26 | Round 11 fixes. **`mcp/journal`**: `appendLine` treats a short write (`bytesWritten` below the line's byte length) as a failed append — warn, `journal: "unavailable"`, the publish proceeds; an append to a file whose last byte is not `\n` (a torn line) first writes `\n`, so the fragment stays its own skipped line instead of swallowing the next record. **`mcp/plan-store`**: at the `TT_PLAN_MAX_OUTSTANDING` cap the oldest *used* plan is evicted before any live one. **`api/publish`**: a `2xx` init (video, inbox or photo) without a readable `publish_id` throws `network_ambiguous` (kind `network`, `cause` = the `malformedPayload` error) instead of `upstream_error`, so it is journaled `send_ambiguous` and the duplicate guard holds (CC-G4). **`core/oauth`**: `revokeToken` re-reads the profile under the env lock and also revokes an access token a concurrent refresh rotated in since the first read; `RevokeOutcome.upstream` reports that second call. No signature changed | integrator (round 11) |
+| 2026-09-26 | Round 12 fixes. **`core/http`**: a publish init (retry class `init`) answered with a `2xx` or `5xx` whose body is not JSON or not a JSON object, or a `5xx` envelope without `error.code`, throws `network_ambiguous` (journaled `send_ambiguous`, like an init timeout); a `4xx` or an explicit error code keeps its mapping. **`api/video`**: a `videos[]` entry that is not an object with a string `id` is a malformed payload (`upstream_error`). **`core/settings`**: `TT_TOKEN_REFRESH_SKEW_S` max 43200. **`core/env-lock`**: new export `canonicalPath(path)`; the lock directory and the atomic write key on it, so a symlink and its target share one lock and a dangling link is written to its target (parent created, link kept); `doctor` reports the lock at the canonical path. **`mcp/server`**: `connectStdio` returns a `StdioSession` (`transport`, `drain(budgetMs, clock)`); `src/index` drains stdio calls in flight for up to 10 s on `SIGINT`/`SIGTERM` and closes at once on stdin EOF. **`cli/login`**: `--manual` with stdin ending before a paste exits 1. **`cli/doctor`**: `--profile` followed by a flag, or an invalid profile name, is a usage error (exit 2). **`tools/publish`**: `tiktok_list_publish_journal` `since` must be a date or a date-time with `Z` or an offset, else `invalid_params`. Signatures: `connectStdio` now returns `Promise<StdioSession>`; `canonicalPath` is a new, additive export | integrator (round 12) |
+| 2026-09-26 | Round 13 fixes. **`mcp/server`**: `StdioSession.drain` gains the additive `signal?: AbortSignal` — it resolves at once when the signal is already aborted and as soon as it aborts mid-drain; `src/index.ts` passes one that stdin EOF aborts. From the first `drain` call on, a new JSON-RPC request is answered `-32000` `Service Unavailable: the server is shutting down` instead of started (the HTTP transport's `503`). `trackStdioCalls` counts requests per id, so a reused id still in flight keeps the drain open until its last answer; a `notifications/cancelled` settles every request under its id. **`mcp/http`**: `openSession` reserves a slot before the handle and `connect` are awaited, so concurrent `initialize` requests cannot together exceed `maxSessions`. **`core/env-lock`**: `canonicalPath` follows a dangling symlink chain hop by hop to its end (up to 40 links), so every link in the chain shares one lock and none is replaced by a regular file; a loop returns the path as given. **`core/http`**: a `429` whose body is empty, not JSON, or JSON that is not an object is `rate_limited` with the wait hint (CC-B8), not `upstream_error`. **`core/oauth`**: a refresh that settles after `resetTokenCache` removes its in-flight entry only if it is still its own. No other exported signature changes. | integrator (round 13) |

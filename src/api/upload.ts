@@ -31,10 +31,9 @@
  * (plus the shared api context).
  */
 
-import { createReadStream } from 'node:fs';
-import { realpath, stat } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import { open, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
-import { Readable } from 'node:stream';
 
 import { isTikTokError, TikTokError } from '../core/errors.js';
 import { assertAllowedUrl, putChunk } from '../core/http.js';
@@ -82,12 +81,11 @@ export interface ChunkPlan {
   chunks: ChunkRange[];
 }
 
-function invalid(message: string, remediation?: string): TikTokError {
+function invalid(message: string): TikTokError {
   return new TikTokError({
     kind: 'validation',
     code: 'invalid_params',
     message,
-    ...(remediation === undefined ? {} : { remediation }),
   });
 }
 
@@ -272,8 +270,10 @@ export async function resolveMediaFile(
   // POSIX-hosted test of a Windows-shaped path cannot pass by accident.
   if (rel.startsWith('..\\')) throw outsideRoot(real, mediaRoot);
 
-  const stats = await stat(real);
-  if (!stats.isFile()) throw notFound(real, mediaRoot);
+  // The file can vanish between `realpath` and `stat`; that is the same
+  // answer as never having existed, not a raw errno.
+  const stats = await stat(real).catch(() => undefined);
+  if (stats === undefined || !stats.isFile()) throw notFound(real, mediaRoot);
   if (stats.size === 0) {
     throw new TikTokError({
       kind: 'validation',
@@ -334,17 +334,58 @@ export async function verifyMediaFile(
     current.mtimeMs === previous.mtimeMs &&
     current.dev === previous.dev &&
     current.ino === previous.ino;
-  if (!same) {
-    throw new TikTokError({
-      kind: 'policy',
-      code: 'plan_mismatch',
-      message:
-        `The file changed since plan: ${previous.path} no longer matches the ` +
-        'size, modification time and identity captured when the preview was ' +
-        'generated. Generate a fresh preview and apply again.',
-    });
-  }
+  if (!same) throw fileChanged(previous.path);
   return current;
+}
+
+function fileChanged(path: string, cause?: unknown): TikTokError {
+  return new TikTokError({
+    kind: 'policy',
+    code: 'plan_mismatch',
+    message:
+      `The file changed since plan: ${path} no longer matches the ` +
+      'size, modification time and identity captured when the preview was ' +
+      'generated. Generate a fresh preview and apply again.',
+    ...(cause === undefined ? {} : { cause }),
+  });
+}
+
+/** What a file is pinned by: the fields {@link verifyMediaFile} compares. */
+export type FileIdentity = Pick<MediaFile, 'size' | 'mtimeMs' | 'dev' | 'ino'>;
+
+/**
+ * Open the media file once for the whole transfer. Every chunk — and every
+ * retry — reads from this descriptor, so a file renamed or replaced at the
+ * path mid-upload cannot splice another file's bytes into the post; the
+ * descriptor keeps reading the inode that was verified. The size must equal
+ * the plan's total and, when given, the identity must equal the verified one.
+ */
+async function pinFile(
+  filePath: string,
+  total: number,
+  identity: FileIdentity | undefined,
+): Promise<{ handle: FileHandle; pinned: Stats }> {
+  let handle: FileHandle;
+  try {
+    handle = await open(filePath, 'r');
+  } catch (cause) {
+    throw fileChanged(filePath, cause);
+  }
+  try {
+    const pinned = await handle.stat();
+    const same =
+      pinned.size === total &&
+      (identity === undefined ||
+        (pinned.size === identity.size &&
+          pinned.mtimeMs === identity.mtimeMs &&
+          pinned.dev === identity.dev &&
+          pinned.ino === identity.ino));
+    if (!same) throw fileChanged(filePath);
+    return { handle, pinned };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +446,36 @@ function interrupted(
   });
 }
 
+/** The transport failures after which a PUT's bytes may have arrived unanswered. */
+const LOST_RESPONSE: ReadonlySet<string> = new Set(['network_error', 'timeout']);
+
+/**
+ * The final chunk may have completed the upload without TikTok saying so
+ * (CC-G4): the outcome is unknown, not failed.
+ */
+function lostFinal(
+  chunk: ChunkRange,
+  chunkCount: number,
+  detail: string,
+  cause?: unknown,
+): TikTokError {
+  return new TikTokError({
+    kind: 'network',
+    code: 'network_ambiguous',
+    message:
+      `The final chunk ${String(chunk.index + 1)}/${String(chunkCount)} ` +
+      `(bytes ${String(chunk.start)}-${String(chunk.end)}) may have reached TikTok, ` +
+      `but no answer confirmed it (${detail}). The upload may have completed.`,
+    remediation: AMBIGUOUS,
+    ...(cause === undefined ? {} : { cause }),
+  });
+}
+
+const AMBIGUOUS =
+  'Check the publish status for this publish_id before doing anything else: the ' +
+  'post may exist. Only if it does not should a fresh preview and apply create a ' +
+  'NEW publish attempt.';
+
 /** The recovery every terminal upload failure shares: a new attempt, not a resume. */
 const REPLAN =
   'The upload cannot be resumed and this attempt must not be re-initialized ' +
@@ -421,10 +492,18 @@ export interface UploadFileOptions {
   /** Overrides {@link contentTypeFor}. */
   contentType?: string;
   signal?: AbortSignal;
-  /** Fired after TikTok accepts chunk `chunkIndex` (0-based), so `+1` are done. */
+  /**
+   * Fired after TikTok accepts chunk `chunkIndex` (0-based), so `+1` are done.
+   * A `416` resync can move it backwards — to `-1` when TikTok holds nothing.
+   */
   onProgress?: (chunkIndex: number, totalChunks: number) => void;
   /** Jitter source. Test seam. */
   random?: () => number;
+  /**
+   * The identity {@link verifyMediaFile} just confirmed. When given, the
+   * descriptor the transfer reads from must be that same file.
+   */
+  identity?: FileIdentity;
 }
 
 /**
@@ -434,9 +513,9 @@ export interface UploadFileOptions {
  * itself only when it was handed a replayable `Uint8Array`; a stream forces a
  * single attempt, because re-sending a half-consumed stream would put a
  * truncated range on the wire. Streaming is not negotiable here — the final
- * chunk can reach 128 MB — so the loop lives on this side: a retry re-opens the
- * file at the same offsets and sends a byte-identical `Content-Range`, which is
- * exactly what makes a re-PUT safe (CC-D6).
+ * chunk can reach 128 MB — so the loop lives on this side: a retry re-reads the
+ * same offsets of the pinned descriptor (`pinFile`) and sends a byte-identical
+ * `Content-Range`, which is exactly what makes a re-PUT safe (CC-D6).
  *
  * Status handling follows § 4.8: `206` continues, `201` completes, `416` resyncs
  * from the reported progress, and every other 4xx is terminal on this URL —
@@ -455,105 +534,148 @@ export async function uploadFile(
   const contentType = opts.contentType ?? contentTypeFor(opts.filePath);
   const random = opts.random ?? Math.random;
   const attempts = 1 + Math.max(0, ctx.settings.chunkRetries);
-  const log = ctx.log.child({ upload_chunks: chunkCount });
+  const log = ctx.log.child({ total_chunks: chunkCount });
 
-  let index = 0;
-  // A 416 moves the cursor wherever TikTok says progress actually is, including
-  // backwards. That is legitimate, but it is also the one way this loop can fail
-  // to terminate: a server that keeps re-reporting the same progress would have
-  // us re-send the same chunks forever. Every chunk is allowed to trigger one
-  // resync, no more (`resyncBudget`); past that the upload is failed instead of
-  // spun on.
-  const resyncBudget = chunkCount;
-  let resyncs = 0;
-  while (index < chunkCount) {
-    opts.signal?.throwIfAborted();
+  const { handle, pinned } = await pinFile(opts.filePath, total, opts.identity);
+  try {
+    let index = 0;
+    // A 416 moves the cursor wherever TikTok says progress actually is, including
+    // backwards. That is legitimate, but it is also the one way this loop can fail
+    // to terminate: a server that keeps re-reporting the same progress would have
+    // us re-send the same chunks forever. Every chunk is allowed to trigger one
+    // resync, no more (`resyncBudget`); past that the upload is failed instead of
+    // spun on.
+    const resyncBudget = chunkCount;
+    let resyncs = 0;
+    while (index < chunkCount) {
+      opts.signal?.throwIfAborted();
 
-    const chunk = opts.plan.chunks[index];
-    if (chunk === undefined) {
-      throw invalid(`uploadFile: chunk ${String(index)} is missing from the plan`);
-    }
-    const contentRange = `bytes ${String(chunk.start)}-${String(chunk.end)}/${String(total)}`;
-
-    let result;
-    try {
-      result = await putChunkWithRetries(ctx, {
-        chunk,
-        chunkCount,
-        contentRange,
-        contentType,
-        attempts,
-        random,
-        filePath: opts.filePath,
-        uploadUrl: opts.uploadUrl,
-        ...(opts.signal === undefined ? {} : { signal: opts.signal }),
-      });
-    } catch (cause) {
-      if (!isTikTokError(cause)) throw cause; // an abort unwinds verbatim (CC-G4)
-      throw interrupted(
-        chunk,
-        chunkCount,
-        `${String(attempts)} attempt(s) failed — ${cause.message}`,
-        REPLAN,
-        cause,
-      );
-    }
-
-    if (result.status === 201) {
-      if (index < chunkCount - 1) {
-        // Not the documented sequence, but TikTok says the transfer is done and
-        // a further PUT would be a write against a closed upload.
-        log.warn('upload complete before the last chunk', {
-          chunk_index: chunk.index,
-          total_chunks: chunkCount,
-        });
+      const chunk = opts.plan.chunks[index];
+      if (chunk === undefined) {
+        throw invalid(`uploadFile: chunk ${String(index)} is missing from the plan`);
       }
-      opts.onProgress?.(chunk.index, chunkCount);
-      return;
-    }
+      if (await fileModified(handle, pinned)) {
+        throw interrupted(chunk, chunkCount, MODIFIED, REPLAN);
+      }
+      const contentRange = `bytes ${String(chunk.start)}-${String(chunk.end)}/${String(total)}`;
 
-    if (result.status === 206) {
-      opts.onProgress?.(chunk.index, chunkCount);
-      index += 1;
-      continue;
-    }
-
-    if (result.status === 416) {
-      resyncs += 1;
-      if (resyncs > resyncBudget) {
+      const final = index === chunkCount - 1;
+      const trace = { lostResponse: false };
+      let result;
+      try {
+        result = await putChunkWithRetries(ctx, {
+          trace,
+          chunk,
+          chunkCount,
+          contentRange,
+          contentType,
+          attempts,
+          random,
+          handle,
+          pinned,
+          uploadUrl: opts.uploadUrl,
+          ...(opts.signal === undefined ? {} : { signal: opts.signal }),
+        });
+      } catch (cause) {
+        if (!isTikTokError(cause)) throw cause; // an abort unwinds verbatim (CC-G4)
+        // An earlier attempt at the final chunk that lost its answer may have
+        // completed the upload, whatever the attempts after it ran into.
+        if (final && trace.lostResponse) {
+          throw lostFinal(chunk, chunkCount, cause.message, cause);
+        }
+        // A file cut short under a chunk fails as a transport error; name the cause.
+        if (await fileModified(handle, pinned)) {
+          throw interrupted(chunk, chunkCount, MODIFIED, REPLAN, cause);
+        }
+        if (final && LOST_RESPONSE.has(cause.code)) {
+          // The final chunk is the one whose arrival completes the upload, and
+          // TikTok posts what it completes. A connection that failed or timed
+          // out may have delivered every byte and lost only the 201, so this
+          // is not "nothing was posted" — reporting it as such invites the
+          // second post the duplicate guard exists to stop (CC-G4).
+          throw lostFinal(chunk, chunkCount, cause.message, cause);
+        }
         throw interrupted(
           chunk,
           chunkCount,
-          `HTTP 416 — TikTok rejected the byte range ${String(resyncs)} times without ` +
-            'the upload making progress',
+          `${String(attempts)} attempt(s) failed — ${cause.message}`,
           REPLAN,
+          cause,
         );
       }
-      index = resyncIndex(opts.plan, chunk, chunkCount, result.uploadedBytes, log);
-      continue;
+
+      if (result.status === 201) {
+        if (index < chunkCount - 1) {
+          // Not the documented sequence, but TikTok says the transfer is done and
+          // a further PUT would be a write against a closed upload.
+          log.warn('upload complete before the last chunk', {
+            chunk_index: chunk.index,
+            total_chunks: chunkCount,
+          });
+        }
+        opts.onProgress?.(chunk.index, chunkCount);
+        return;
+      }
+
+      if (result.status === 206) {
+        opts.onProgress?.(chunk.index, chunkCount);
+        index += 1;
+        continue;
+      }
+
+      if (result.status === 416) {
+        resyncs += 1;
+        if (resyncs > resyncBudget) {
+          throw interrupted(
+            chunk,
+            chunkCount,
+            `HTTP 416 — TikTok rejected the byte range ${String(resyncs)} times without ` +
+              'the upload making progress',
+            REPLAN,
+          );
+        }
+        index = resyncIndex(opts.plan, chunk, chunkCount, result.uploadedBytes, log);
+        // The chunks TikTok says it holds count as accepted: the caller reads
+        // both its progress and the position of a later failure from here, so a
+        // resync backwards moves it back too.
+        if (index !== chunk.index) opts.onProgress?.(index - 1, chunkCount);
+        if (index === chunkCount) {
+          // TikTok already holds every byte of the final chunk: its 201 was the
+          // response lost to the retry that drew this 416. The progress it reports
+          // is the completion the 201 would have signalled.
+          return;
+        }
+        continue;
+      }
+
+      if (final && trace.lostResponse) {
+        // The retry was refused, but the attempt before it may have landed.
+        throw lostFinal(chunk, chunkCount, terminalDetail(result.status));
+      }
+      throw interrupted(
+        chunk,
+        chunkCount,
+        terminalDetail(result.status),
+        result.status === 400 ? PLANNER_BUG : REPLAN,
+      );
     }
 
-    throw interrupted(
-      chunk,
-      chunkCount,
-      terminalDetail(result.status),
-      result.status === 400 ? PLANNER_BUG : REPLAN,
-    );
+    // Every chunk was accepted with a 206 and no 201 ever arrived. Reporting this
+    // as success would hand the caller a publish_id that will never leave
+    // PROCESSING; § 4.8 makes the 201 the completion signal, so its absence is a
+    // failure of the transfer, not of the post.
+    const last = opts.plan.chunks[chunkCount - 1];
+    throw new TikTokError({
+      kind: 'network',
+      code: 'upload_interrupted',
+      message:
+        `All ${String(chunkCount)} chunks were accepted but TikTok never confirmed ` +
+        `the transfer (no HTTP 201 after bytes ${String(last?.start)}-${String(last?.end)}).`,
+      remediation: REPLAN,
+    });
+  } finally {
+    await handle.close();
   }
-
-  // Every chunk was accepted with a 206 and no 201 ever arrived. Reporting this
-  // as success would hand the caller a publish_id that will never leave
-  // PROCESSING; § 4.8 makes the 201 the completion signal, so its absence is a
-  // failure of the transfer, not of the post.
-  const last = opts.plan.chunks[chunkCount - 1];
-  throw new TikTokError({
-    kind: 'network',
-    code: 'upload_interrupted',
-    message:
-      `All ${String(chunkCount)} chunks were accepted but TikTok never confirmed ` +
-      `the transfer (no HTTP 201 after bytes ${String(last?.start)}-${String(last?.end)}).`,
-    remediation: REPLAN,
-  });
 }
 
 const PLANNER_BUG =
@@ -600,8 +722,21 @@ function resyncIndex(
     uploaded_bytes: uploadedBytes,
   });
 
+  if (chunk.index === chunkCount - 1 && uploadedBytes === chunk.end) {
+    // Complete as a last-byte index, one byte short as a count. Declaring the
+    // upload done could hand back a short video as posted; declaring it failed
+    // could invite a second post. Until P-11 pins the unit the outcome is
+    // unknown (CC-G4).
+    throw lostFinal(
+      chunk,
+      chunkCount,
+      `HTTP 416 with ${String(uploadedBytes)} bytes of progress, which is either ` +
+        'every byte or all but one',
+    );
+  }
   if (uploadedBytes >= chunk.end) {
-    // Already recorded — advance past it (CC-D6 step 4).
+    // Already recorded — advance past it (CC-D6 step 4). For the final chunk only
+    // progress past its last byte gets here, which no reading makes short.
     return chunk.index + 1;
   }
   const next = plan.chunks.findIndex(
@@ -631,19 +766,25 @@ function resyncIndex(
 }
 
 interface ChunkAttemptOptions {
+  /** Set when an attempt lost its answer and was replayed. */
+  trace: { lostResponse: boolean };
   chunk: ChunkRange;
   chunkCount: number;
   contentRange: string;
   contentType: string;
   attempts: number;
   random: () => number;
-  filePath: string;
+  /** The pinned descriptor; each attempt streams its range from it. */
+  handle: FileHandle;
+  /** What the descriptor looked like when pinned; a retry re-checks it. */
+  pinned: Stats;
   uploadUrl: string;
   signal?: AbortSignal;
 }
 
 /**
- * One chunk, up to `attempts` times, a fresh read stream per attempt.
+ * One chunk, up to `attempts` times, a fresh body stream per attempt; a file
+ * modified under it ends the attempts early.
  *
  * `chunkRetries: 0` is passed deliberately: `putChunk` would disable its own
  * retries for a stream body anyway, and saying so explicitly keeps the retry
@@ -661,7 +802,7 @@ async function putChunkWithRetries(
         uploadUrl: opts.uploadUrl,
         contentRange: opts.contentRange,
         contentType: opts.contentType,
-        body: chunkStream(opts.filePath, opts.chunk),
+        body: chunkStream(opts.handle, opts.chunk),
         contentLength: opts.chunk.size,
         timeoutMs: ctx.settings.uploadTimeoutMs,
         chunkRetries: 0,
@@ -675,7 +816,12 @@ async function putChunkWithRetries(
       // fail identically forever, and an abort is not an outcome at all.
       if (!isTikTokError(error) || !error.retryable) throw error;
       lastError = error;
-      if (attempt === opts.attempts) break;
+      // A modified file fails every replay the same way; stop spending the budget.
+      // It is checked before the lost-answer trace on purpose: a file cut short
+      // under the body fails as a transport error too, and then nothing arrived.
+      if (attempt === opts.attempts || (await fileModified(opts.handle, opts.pinned)))
+        break;
+      if (LOST_RESPONSE.has(error.code)) opts.trace.lostResponse = true;
       const wait = backoffMs(attempt, opts.random);
       ctx.log.debug('retrying chunk', {
         chunk_index: opts.chunk.index,
@@ -688,8 +834,41 @@ async function putChunkWithRetries(
   throw lastError;
 }
 
-/** A fresh `ReadableStream` over one byte range. Never buffers the chunk. */
-function chunkStream(filePath: string, chunk: ChunkRange): ReadableStream<Uint8Array> {
-  const node = createReadStream(filePath, { start: chunk.start, end: chunk.end });
-  return Readable.toWeb(node);
+const MODIFIED = 'the media file was modified during the upload';
+
+/**
+ * The descriptor survives a rename, not an in-place rewrite: bytes that change
+ * under an open upload would reach TikTok as a different video.
+ */
+async function fileModified(handle: FileHandle, pinned: Stats): Promise<boolean> {
+  const current = await handle.stat();
+  return current.size !== pinned.size || current.mtimeMs !== pinned.mtimeMs;
+}
+
+/** Bytes read per pull — bounds memory whatever the chunk size. */
+const SLICE_BYTES = 1024 * 1024;
+
+/**
+ * A fresh `ReadableStream` over one byte range. Never buffers the chunk.
+ *
+ * Positional reads, not `handle.createReadStream`: a destroyed or cancelled
+ * FileHandle stream closes the handle even with `autoClose: false`, which
+ * would break every retry after it, and each such stream leaves a listener on
+ * the handle. Cancelling this stream only stops the reads.
+ */
+function chunkStream(handle: FileHandle, chunk: ChunkRange): ReadableStream<Uint8Array> {
+  let position = chunk.start;
+  const end = chunk.end + 1;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const length = Math.min(SLICE_BYTES, end - position);
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, position);
+      // Truncated under us: fail the body; `uploadFile`'s re-stat names the cause.
+      if (bytesRead === 0) throw new Error('the media file ended before the chunk did');
+      position += bytesRead;
+      controller.enqueue(buffer.subarray(0, bytesRead));
+      if (position === end) controller.close();
+    },
+  });
 }

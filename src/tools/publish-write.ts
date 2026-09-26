@@ -36,7 +36,9 @@ import {
   resolveVideoPostInfo,
   VIDEO_TITLE_MAX,
   type CreatorInfo,
+  type FileUploadSource,
   type PublishInitResult,
+  type PullFromUrlSource,
   type VideoPostInput,
   type VideoSource,
 } from '../api/publish.js';
@@ -69,6 +71,7 @@ import {
   creatorBlock,
   dispatchWrite,
   draftInboxHint,
+  localRefusal,
   mintPlan,
   resolveOpenId,
   runPlanGuards,
@@ -76,6 +79,7 @@ import {
   waitIfAsked,
   type AppliedData,
   type ChunkPosition,
+  type DispatchOptions,
   type DraftPreview,
   type SourceBlock,
   type WritePreview,
@@ -114,16 +118,34 @@ interface SourceArgs {
 
 /**
  * One resolution, four consumers: what the preview shows, what the init sends,
- * what the digest binds, and what the journal records.
+ * what the digest binds, and what the journal records. One member per kind of
+ * source, because a file — and only a file — has bytes to move after the init,
+ * and the init it sends is the one whose answer carries the `upload_url` they
+ * go to.
  */
-interface ResolvedSource {
+type ResolvedSource = ResolvedUrlSource | ResolvedFileSource;
+
+interface ResolvedSourceBase {
   block: SourceBlock;
-  init: VideoSource;
   /** The `source_info` half of the digested payload (§ 2.6.2). */
   digestSource: Record<string, unknown>;
   intent: IntentSource;
-  /** `source: "file"` only. */
-  file?: { media: MediaFile; plan: ChunkPlan };
+  /**
+   * The local file's identity (CC-D3), bound to the plan beside the digest —
+   * never digested and never sent upstream. See `PlanRecord.fileIdentity`.
+   */
+  fileIdentity?: string;
+}
+
+interface ResolvedUrlSource extends ResolvedSourceBase {
+  init: PullFromUrlSource;
+  intent: 'PULL_FROM_URL';
+}
+
+interface ResolvedFileSource extends ResolvedSourceBase {
+  init: FileUploadSource;
+  intent: 'FILE_UPLOAD';
+  file: { media: MediaFile; plan: ChunkPlan };
 }
 
 const SOURCE_DESCRIPTION =
@@ -141,38 +163,78 @@ const VIDEO_URL_DESCRIPTION =
   'for about 1 hour. Mutually exclusive with file_path.';
 
 /**
- * The cross-field half of the schema, checked imperatively.
+ * The source the caller chose, once the cross-field rules have been checked —
+ * one field, present, instead of two that are optional apart.
  *
- * § 3.8 describes the input as discriminated on `source`, and it is — but not
- * as a `z.discriminatedUnion`: that produces a JSON Schema with no top-level
- * object shape, which both the strictness contract of `mcp/define` and the
- * models reading the manifest depend on. A flat strict object plus this
- * function is the same contract with a schema a client can actually render.
+ * This is the discrimination § 3.8 describes, expressed where it can be
+ * expressed. The schema cannot carry it: a `z.discriminatedUnion` produces a
+ * JSON Schema with no top-level object shape, which both `mcp/define`'s
+ * strictness probe and the models reading the manifest depend on, so the flat
+ * strict object stays. What {@link checkSourceArgs} proves imperatively is
+ * therefore handed on as a value the rest of the module can use without
+ * re-asking — which is what keeps the pairing from having to be re-asserted at
+ * every consumer with a fallback no call can reach.
+ */
+type CheckedSource = { source: 'url'; url: string } | { source: 'file'; path: string };
+
+/**
+ * The cross-field half of the schema, checked imperatively — see
+ * {@link CheckedSource} for why it cannot live in the schema itself.
+ *
+ * It returns the source rather than just an error: each `undefined` check below
+ * narrows the argument it guards, so handing that narrowed value on is free,
+ * while handing on only the *absence of an error* would throw the proof away
+ * and leave every consumer to re-derive it.
  */
 function checkSourceArgs(
   args: SourceArgs,
   prefixes: readonly string[],
-): ToolError | undefined {
+): { ok: true; value: CheckedSource } | { ok: false; error: ToolError } {
   if (args.source === 'url') {
     if (args.file_path !== undefined) {
-      return invalidParamsError(
-        'file_path: must not be set when source is "url" — the two are mutually exclusive',
-      );
+      return {
+        ok: false,
+        error: invalidParamsError(
+          'file_path: must not be set when source is "url" — the two are mutually exclusive',
+        ),
+      };
     }
-    if (args.video_url === undefined) {
-      return invalidParamsError('video_url: required when source is "url"');
+    const url = args.video_url;
+    if (url === undefined) {
+      return {
+        ok: false,
+        error: invalidParamsError('video_url: required when source is "url"'),
+      };
     }
-    return checkMediaUrl(args.video_url, 'video_url', prefixes);
+    const refused = checkMediaUrl(url, 'video_url', prefixes);
+    return refused === undefined
+      ? { ok: true, value: { source: 'url', url } }
+      : { ok: false, error: refused };
   }
   if (args.video_url !== undefined) {
-    return invalidParamsError(
-      'video_url: must not be set when source is "file" — the two are mutually exclusive',
-    );
+    return {
+      ok: false,
+      error: invalidParamsError(
+        'video_url: must not be set when source is "file" — the two are mutually exclusive',
+      ),
+    };
   }
-  if (args.file_path === undefined) {
-    return invalidParamsError('file_path: required when source is "file"');
+  const path = args.file_path;
+  if (path === undefined) {
+    return {
+      ok: false,
+      error: invalidParamsError('file_path: required when source is "file"'),
+    };
   }
-  return undefined;
+  return { ok: true, value: { source: 'file', path } };
+}
+
+/**
+ * The CC-D3 identity as one opaque string: size, modification time, device and
+ * inode — the same four fields `verifyMediaFile` holds the upload to.
+ */
+function fileIdentityOf(media: MediaFile): string {
+  return [media.size, media.mtimeMs, media.dev, media.ino].map(String).join(':');
 }
 
 /**
@@ -183,14 +245,16 @@ function checkSourceArgs(
  * side, and before the digest on the apply side, because the resolved path and
  * size are part of what the user approved. A file swapped between the two calls
  * therefore surfaces as `plan_mismatch` rather than as a silent upload of
- * different bytes (CC-D3).
+ * different bytes (CC-D3) — a different path or size through the digest, and a
+ * same-size replacement or rewrite in place through the identity the plan
+ * binds beside it.
  */
 async function resolveSource(
   ctx: ToolCtx,
-  args: SourceArgs,
+  src: CheckedSource,
 ): Promise<{ ok: true; value: ResolvedSource } | { ok: false; error: ToolError }> {
-  if (args.source === 'url') {
-    const url = args.video_url ?? '';
+  if (src.source === 'url') {
+    const { url } = src;
     return {
       ok: true,
       value: {
@@ -205,7 +269,7 @@ async function resolveSource(
   let media: MediaFile;
   let plan: ChunkPlan;
   try {
-    media = await resolveMediaFile(args.file_path ?? '', ctx.api.settings.mediaRoot);
+    media = await resolveMediaFile(src.path, ctx.api.settings.mediaRoot);
     plan = planChunks(media.size);
   } catch (cause) {
     return { ok: false, error: publishToolError(cause) };
@@ -241,6 +305,7 @@ async function resolveSource(
         resolved_path: media.path,
       },
       intent: 'FILE_UPLOAD',
+      fileIdentity: fileIdentityOf(media),
       file: { media, plan },
     },
   };
@@ -251,50 +316,58 @@ async function resolveSource(
  *
  * `report` fires between the two, and everything about how a failure is
  * classified hangs off that call: after it, a `publish_id` exists upstream no
- * matter what the chunks do (CC-B4). The re-stat immediately before the first
- * PUT closes the last window, where a file could change between the digest and
- * the transfer.
+ * matter what the chunks do (CC-B4). A URL source has no second phase — its
+ * init is the last thing that can fail — so it reports nothing and simply
+ * resolves with the `publish_id`. The re-stat immediately before the first PUT
+ * closes the last window, where a file could change between the digest and the
+ * transfer.
+ *
+ * `init` is generic in the source it is handed so that its answer is typed by
+ * that source ({@link PublishInitResult}): the file branch asks with a
+ * `FILE_UPLOAD` and gets the `upload_url` it PUTs to as a plain string.
  */
 function videoSender(
   ctx: ToolCtx,
   src: ResolvedSource,
-  init: (source: VideoSource) => Promise<PublishInitResult>,
-): {
-  send: (report: (publishId: string) => void) => Promise<string>;
-  position?: () => ChunkPosition;
-} {
-  const file = src.file;
-  if (file === undefined) {
-    return {
-      send: async (report) => {
-        const started = await init(src.init);
-        report(started.publishId);
-        return started.publishId;
-      },
-    };
+  init: <S extends VideoSource>(source: S) => Promise<PublishInitResult<S>>,
+): DispatchOptions['send'] {
+  if (src.intent === 'PULL_FROM_URL') {
+    return async () => (await init(src.init)).publishId;
   }
 
+  const { init: fileSource, file } = src;
   let done = 0;
-  return {
-    // `done` counts accepted chunks, so the one that failed is the next one.
-    position: () => ({ chunk: done + 1, total: file.plan.totalChunkCount }),
-    send: async (report) => {
-      const started = await init(src.init);
-      report(started.publishId);
-      const media = await verifyMediaFile(file.media, ctx.api.settings.mediaRoot);
-      await uploadFile(ctx.api, {
-        filePath: media.path,
-        plan: file.plan,
-        uploadUrl: started.uploadUrl ?? '',
-        contentType: contentTypeFor(media.path),
-        ...signalOpt(ctx),
-        onProgress: (chunkIndex, totalChunks) => {
-          done = chunkIndex + 1;
-          ctx.progress?.(done, totalChunks);
-        },
-      });
-      return started.publishId;
-    },
+  let reported = 0;
+  // `done` counts accepted chunks, so the one that failed is the next one.
+  const position = (): ChunkPosition => ({
+    chunk: done + 1,
+    total: file.plan.totalChunkCount,
+  });
+  return async (report) => {
+    const started = await init(fileSource);
+    report({ publishId: started.publishId, position });
+    const media = await verifyMediaFile(file.media, ctx.api.settings.mediaRoot);
+    await uploadFile(ctx.api, {
+      filePath: media.path,
+      plan: file.plan,
+      // A `FILE_UPLOAD` init answers with an `upload_url` or not at all —
+      // `initResult` refuses the payload that lacks one, which is what lets
+      // the result type promise the string here. Pinned by `a FILE_UPLOAD init
+      // without an upload_url is upstream_error and sends no chunk (§ 3.0)`.
+      uploadUrl: started.uploadUrl,
+      contentType: contentTypeFor(media.path),
+      // The upload reads through one descriptor, checked against this.
+      identity: media,
+      ...signalOpt(ctx),
+      onProgress: (chunkIndex, totalChunks) => {
+        done = chunkIndex + 1;
+        // A resync can move `done` back; MCP progress must only increase.
+        if (done <= reported) return;
+        reported = done;
+        ctx.progress?.(done, totalChunks);
+      },
+    });
+    return started.publishId;
   };
 }
 
@@ -472,11 +545,12 @@ function draftDigestedPayload(src: ResolvedSource): Record<string, unknown> {
 async function previewPost(
   args: PostVideoInput,
   ctx: ToolCtx,
+  src: CheckedSource,
 ): Promise<ToolResult<PostVideoData>> {
   const { api } = ctx;
 
-  const source = await resolveSource(ctx, args);
-  if (!source.ok) return { ok: false, error: source.error };
+  const source = await resolveSource(ctx, src);
+  if (!source.ok) return localRefusal(source.error, TOOL_NAME);
 
   // A preview is a read: it makes no publish, init or upload request, so it
   // never spends a publish token and never fails on an empty bucket (§ 2.6.1).
@@ -540,6 +614,7 @@ async function previewPost(
     TOOL_NAME,
     payloadDigest(digestedPayload(resolved.postInfo, source.value)),
     openId,
+    source.value.fileIdentity,
   );
 
   const hints: Hint[] = [plan.hint];
@@ -566,6 +641,7 @@ async function previewPost(
 async function executePost(
   args: PostVideoInput,
   ctx: ToolCtx,
+  src: CheckedSource,
   planId: string | undefined,
 ): Promise<ToolResult<PostVideoData>> {
   const { api } = ctx;
@@ -580,8 +656,8 @@ async function executePost(
   // pre-dispatch: nothing was journaled and no init was sent, so it stays an
   // ordinary read error rather than becoming `network_unsent` (which promises a
   // journal entry exists).
-  const source = await resolveSource(ctx, args);
-  if (!source.ok) return { ok: false, error: source.error };
+  const source = await resolveSource(ctx, src);
+  if (!source.ok) return localRefusal(source.error, TOOL_NAME);
 
   let creator: CreatorInfo;
   let resolved;
@@ -614,6 +690,7 @@ async function executePost(
     profile: api.profile,
     openId,
     tool: TOOL_NAME,
+    fileIdentity: source.value.fileIdentity,
   };
 
   // Steps 5–7.
@@ -621,13 +698,6 @@ async function executePost(
   if (guard !== undefined) return guard;
 
   // Steps 8–9.
-  const sender = videoSender(ctx, source.value, async (videoSource) =>
-    initVideoPost(api, {
-      postInfo: resolved.postInfo,
-      source: videoSource,
-      ...signalOpt(ctx),
-    }),
-  );
   const result = await dispatchWrite(ctx, {
     toolName: TOOL_NAME,
     mode: POST_MODE,
@@ -636,7 +706,13 @@ async function executePost(
     digest,
     planId: planId ?? '',
     openId,
-    ...sender,
+    send: videoSender(ctx, source.value, async (videoSource) =>
+      initVideoPost(api, {
+        postInfo: resolved.postInfo,
+        source: videoSource,
+        ...signalOpt(ctx),
+      }),
+    ),
   });
 
   return await waitIfAsked(ctx, result, args.wait_for_completion === true);
@@ -672,14 +748,14 @@ export const postVideoTool = defineTool<PostVideoInput, PostVideoData>({
       };
     }
 
-    const sourceError = checkSourceArgs(args, ctx.api.settings.verifiedUrlPrefixes);
-    if (sourceError !== undefined) return { ok: false, error: sourceError };
+    const checked = checkSourceArgs(args, ctx.api.settings.verifiedUrlPrefixes);
+    if (!checked.ok) return localRefusal(checked.error, TOOL_NAME);
 
     // `deny` never reaches here — the package is not registered at all.
     const decision = resolveWriteStep(args.plan_id, ctx.api.settings.writeMode);
     return decision.step === 'preview'
-      ? await previewPost(args, ctx)
-      : await executePost(args, ctx, decision.planId);
+      ? await previewPost(args, ctx, checked.value)
+      : await executePost(args, ctx, checked.value, decision.planId);
   },
 });
 
@@ -737,13 +813,13 @@ type UploadDraftInput = z.infer<typeof UPLOAD_DRAFT_INPUT>;
  * still choose. A draft preview is either a plan or an error.
  */
 async function previewDraft(
-  args: UploadDraftInput,
   ctx: ToolCtx,
+  src: CheckedSource,
 ): Promise<ToolResult<UploadDraftData>> {
   const { api } = ctx;
 
-  const source = await resolveSource(ctx, args);
-  if (!source.ok) return { ok: false, error: source.error };
+  const source = await resolveSource(ctx, src);
+  if (!source.ok) return localRefusal(source.error, DRAFT_TOOL_NAME);
 
   const openId = await resolveOpenId(ctx);
   const plan = mintPlan(
@@ -751,6 +827,7 @@ async function previewDraft(
     DRAFT_TOOL_NAME,
     payloadDigest(draftDigestedPayload(source.value)),
     openId,
+    source.value.fileIdentity,
   );
 
   return {
@@ -777,6 +854,7 @@ async function previewDraft(
 async function executeDraft(
   args: UploadDraftInput,
   ctx: ToolCtx,
+  src: CheckedSource,
   planId: string | undefined,
 ): Promise<ToolResult<UploadDraftData>> {
   const { api } = ctx;
@@ -787,8 +865,8 @@ async function executeDraft(
 
   // Step 3 — for a draft the whole of "re-resolve" is the source: there is no
   // `creator_info` to re-read and no `post_info` to rebuild.
-  const source = await resolveSource(ctx, args);
-  if (!source.ok) return { ok: false, error: source.error };
+  const source = await resolveSource(ctx, src);
+  if (!source.ok) return localRefusal(source.error, DRAFT_TOOL_NAME);
   const openId = await resolveOpenId(ctx);
 
   // Step 4.
@@ -798,6 +876,7 @@ async function executeDraft(
     profile: api.profile,
     openId,
     tool: DRAFT_TOOL_NAME,
+    fileIdentity: source.value.fileIdentity,
   };
 
   // Steps 5–7.
@@ -805,9 +884,6 @@ async function executeDraft(
   if (guard !== undefined) return guard;
 
   // Steps 8–9.
-  const sender = videoSender(ctx, source.value, async (videoSource) =>
-    initDraftUpload(api, { source: videoSource, ...signalOpt(ctx) }),
-  );
   const result = await dispatchWrite(ctx, {
     toolName: DRAFT_TOOL_NAME,
     mode: DRAFT_POST_MODE,
@@ -816,14 +892,22 @@ async function executeDraft(
     digest,
     planId: planId ?? '',
     openId,
-    ...sender,
+    send: videoSender(ctx, source.value, async (videoSource) =>
+      initDraftUpload(api, { source: videoSource, ...signalOpt(ctx) }),
+    ),
   });
 
   const waited = await waitIfAsked(ctx, result, args.wait_for_completion === true);
   // § 5.3: the draft only becomes a post if the user opens the app, so that
   // instruction rides on every success — ahead of the poll hint, which is the
-  // less useful of the two once the bytes are upstream.
-  if (waited.ok) waited.hints = [draftInboxHint(), ...(waited.hints ?? [])];
+  // less useful of the two once the bytes are upstream. `WaitedResult` is what
+  // makes `waited.hints` a plain array here: the poll hint is attached on every
+  // exit that returns an applied result, and the type says so.
+  // A draft that TikTok failed never reached the inbox, so there is nothing to
+  // open; the failed write gets no user action (§ 5.3).
+  if (waited.ok && waited.data.status !== 'FAILED') {
+    waited.hints = [draftInboxHint(), ...waited.hints];
+  }
   return waited;
 }
 
@@ -854,12 +938,12 @@ export const uploadVideoDraftTool = defineTool<UploadDraftInput, UploadDraftData
       };
     }
 
-    const sourceError = checkSourceArgs(args, ctx.api.settings.verifiedUrlPrefixes);
-    if (sourceError !== undefined) return { ok: false, error: sourceError };
+    const checked = checkSourceArgs(args, ctx.api.settings.verifiedUrlPrefixes);
+    if (!checked.ok) return localRefusal(checked.error, DRAFT_TOOL_NAME);
 
     const decision = resolveWriteStep(args.plan_id, ctx.api.settings.writeMode);
     return decision.step === 'preview'
-      ? await previewDraft(args, ctx)
-      : await executeDraft(args, ctx, decision.planId);
+      ? await previewDraft(ctx, checked.value)
+      : await executeDraft(args, ctx, checked.value, decision.planId);
   },
 });

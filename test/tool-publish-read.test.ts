@@ -118,6 +118,12 @@ interface ApiScript {
 interface FakeCall {
   readonly path: string;
   readonly body: unknown;
+  /**
+   * The signal `core/http` handed to `fetch`. It is a composed signal — the
+   * caller's abort source combined with the request timeout — never the
+   * caller's own object, so tests assert what it *does*, not what it *is*.
+   */
+  readonly signal: AbortSignal | null | undefined;
 }
 
 interface FakeApi extends FetchStub {
@@ -134,6 +140,7 @@ function fakeApi(script: ApiScript = {}): FakeApi {
     calls.push({
       path,
       body: raw === undefined ? undefined : (JSON.parse(raw) as unknown),
+      signal: init?.signal,
     });
 
     if (path === CREATOR_PATH) {
@@ -543,7 +550,7 @@ test('a terminal status observed on the last allowed request beats the deadline'
   });
 });
 
-test('an exhausted poll budget is ok true with one poll hint, not an error', async () => {
+test('cc-e8: an exhausted poll budget is ok true with one poll hint, not an error', async () => {
   await withCtx(
     { TT_STATUS_POLL_TIMEOUT_MS: '0', TT_STATUS_POLL_INTERVAL_MS: '5000' },
     async (ctx) => {
@@ -756,7 +763,7 @@ test('every fail_reason reaches the caller with its Appendix A recovery', async 
   }
 });
 
-test('the two deliberate Appendix A deviations stay deviated', async () => {
+test('cc-e5: the two deliberate Appendix A deviations stay deviated', async () => {
   await withCtx({}, async (ctx) => {
     // The status endpoint reports no creator data and this tool may run on a
     // video.upload-only profile, so the duration text points at the tool that
@@ -786,7 +793,7 @@ test('the two deliberate Appendix A deviations stay deviated', async () => {
 // refusals and the trust boundary
 // ---------------------------------------------------------------------------
 
-test('an upstream invalid_publish_id becomes the publish_not_found catalog code', async () => {
+test('cc-e8: an upstream invalid_publish_id becomes the publish_not_found catalog code', async () => {
   await withCtx({}, async (ctx) => {
     const upstreamText = 'publish_id 4711 not found in shard cluster tt-internal';
     const stub = fakeApi({
@@ -829,6 +836,85 @@ test('a status result never carries a token, an upload URL or an upload token', 
     assert.ok(!serialized.includes('upload_token'));
     assert.ok(!serialized.includes('secret-value'));
     assert.ok(!serialized.includes('test-access-token-DEFAULT'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cancellation — the forwarding half of CC-G4
+// ---------------------------------------------------------------------------
+
+test('cc-g4: an aborted creator info read rejects before TikTok is asked', async () => {
+  await withCtx({}, async (ctx) => {
+    const reason = new Error('client cancelled');
+    const controller = new AbortController();
+    controller.abort(reason);
+    const cancelled: ToolCtx = { ...ctx, signal: controller.signal };
+    const stub = fakeApi({ creator: () => creatorResponse() });
+
+    await withFetch(stub, async () => {
+      // Verbatim: `core/http` rethrows the caller's reason rather than wrapping
+      // it, so a cancelled call is never mistaken for an upstream failure.
+      await assert.rejects(creatorInfo(cancelled), (error: unknown) => error === reason);
+    });
+
+    assert.equal(stub.calls.length, 0, 'an already-cancelled read never reaches TikTok');
+  });
+});
+
+test('cc-g4: an aborted status read reports the cancellation without asking TikTok', async () => {
+  await withCtx({}, async (ctx) => {
+    const reason = new Error('client cancelled');
+    const controller = new AbortController();
+    controller.abort(reason);
+    const cancelled: ToolCtx = { ...ctx, signal: controller.signal };
+    const stub = fakeApi({ status: () => ttEnvelope({ status: 'PROCESSING_UPLOAD' }) });
+
+    const result = await withFetch(stub, () =>
+      publishStatus(cancelled, { publish_id: PUBLISH_ID }),
+    );
+
+    assert.equal(stub.calls.length, 0, 'an already-cancelled poll never reaches TikTok');
+    // Unlike the creator read, this handler catches every throw, so the abort
+    // comes back as a refusal. The client that cancelled is no longer listening;
+    // what matters here is that nothing was posted and nothing was polled.
+    const error = errorOf(result);
+    assert.equal(error.retryable, false);
+    assert.equal(result.data, undefined);
+  });
+});
+
+test('cc-g4: a live signal reaches the poll and stops the ladder when it aborts', async () => {
+  await withCtx({}, async (ctx) => {
+    const reason = new Error('client cancelled');
+    const controller = new AbortController();
+    const stub = fakeApi({
+      status: (n) => {
+        // Cancel while the first status request is in flight: the ladder must
+        // not come back for a second look.
+        if (n === 0) controller.abort(reason);
+        return ttEnvelope({ status: 'PROCESSING_UPLOAD' });
+      },
+    });
+
+    await withFetch(stub, async () => {
+      await assert.rejects(
+        pollPublishStatus(ctx.api, PUBLISH_ID, {
+          waitForCompletion: true,
+          signal: controller.signal,
+        }),
+        (error: unknown) => error === reason,
+      );
+    });
+
+    assert.equal(countPath(stub, STATUS_PATH), 1, 'the ladder stopped at the abort');
+    const [call] = stub.calls;
+    assert.ok(call !== undefined);
+    // Forwarded, not identical: `core/http` composes the caller's signal with
+    // the request timeout, so the assertion is that the signal the request
+    // carried follows the caller's — it aborts with the caller's own reason.
+    assert.ok(call.signal instanceof AbortSignal, 'the request carried a signal');
+    assert.equal(call.signal.aborted, true);
+    assert.equal(call.signal.reason, reason);
   });
 });
 

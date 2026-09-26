@@ -1,13 +1,21 @@
 name: Publish VS Code Extension
 
 # Publish the VS Code extension (extension/) to the Visual Studio Marketplace.
-# Runs on a version tag (alongside the npm "Publish" workflow) and on demand via
-# workflow_dispatch (for the first publish or a re-run). Authentication uses the
-# VSCE_PAT repo secret (Azure DevOps PAT, scope Marketplace > Manage); the token
-# never touches a laptop or the logs.
+# Runs after the npm "Publish" workflow succeeds, never on the tag by itself:
+# the extension's whole behavior is launching `npx -y tiktok-mcp-ai`, so a
+# Marketplace release must not exist for a version npm does not have. A tag
+# whose npm publish fails — the first-release case, where trusted publishing
+# cannot authenticate a package the registry has never seen (G-14) — skips this
+# job instead of spending a Marketplace version on an extension that cannot
+# start. workflow_dispatch stays for the first publish or a re-run; a dispatch
+# has no Publish run behind it, so it must name a `v*` tag and runs
+# `npm run release:guard` itself before anything reaches the Marketplace.
+# Authentication uses the VSCE_PAT repo secret (Azure DevOps PAT, scope
+# Marketplace > Manage); the token never touches a laptop or the logs.
 on:
-  push:
-    tags: ['v*']
+  workflow_run:
+    workflows: ['Publish']
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -16,24 +24,59 @@ permissions:
 jobs:
   publish-vscode:
     runs-on: ubuntu-latest
+    # A workflow_run event is matched by workflow *name*, and this job holds the
+    # repository's one long-lived secret, so the name is not trusted alone: the
+    # run must have succeeded, come from publish.yml itself, have been started
+    # by a push (Publish runs on tags only) and be this repository's own. A
+    # dispatch must run on a version tag.
+    if: >-
+      ${{ (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.path == '.github/workflows/publish.yml' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository) }}
     defaults:
       run:
         working-directory: extension
     steps:
+      # A workflow_run checkout defaults to the default branch's HEAD, not the
+      # tagged commit Publish released; without this the version check below
+      # would compare main's manifests, which after a release bump name the
+      # *next* version. Empty on workflow_dispatch, where the dispatched ref is
+      # already the right one. Nothing here pushes, so the token is not left in
+      # .git/config while `npm ci` runs lifecycle scripts next to VSCE_PAT.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: extension/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            extension/package-lock.json
+      # A dispatch skipped Publish's gates, so the tag, every version field and
+      # the changelog are checked here, as publish.yml does, from the repository
+      # root. A workflow_run already passed them on this commit.
+      - name: Release identity gate (tag ⇄ versions ⇄ CHANGELOG)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        working-directory: .
+        run: |
+          npm ci
+          npm run build
+          npm run release:guard
       - run: npm ci
       # The extension version must match the root package version, so the
       # Marketplace can never lag behind an npm release. The authoritative
       # check — tag, both package.json files, server.json, the plugin manifest
       # and CHANGELOG.md all agreeing — is `npm run release:guard` in
-      # publish.yml; this job only installs extension/, so it re-checks the one
-      # pair it can see rather than paying for a root install to learn the same.
+      # publish.yml (and, on a dispatch, the gate step above). On a workflow_run
+      # this job installs only extension/, so it re-checks the one pair it can
+      # see rather than paying for a root install to learn the same; on a
+      # dispatch the check is redundant with release:guard but cheap.
       - name: Check version sync with the root package
+        id: ver
         run: |
           root=$(node -p "require('../package.json').version")
           ext=$(node -p "require('./package.json').version")
@@ -41,8 +84,13 @@ jobs:
             echo "Version skew: root $root vs extension $ext" >&2
             exit 1
           fi
+          echo "version=$ext" >> "$GITHUB_OUTPUT"
       - run: npm run compile
+      # The Marketplace rejects a semver prerelease version, and release-guard
+      # lets a `vX.Y.Z-rc.N` tag through to npm's `next` dist-tag; such a tag
+      # ships to npm only, instead of failing here after npm already has it.
       - name: Publish to the Marketplace
+        if: ${{ !contains(steps.ver.outputs.version, '-') }}
         run: npx vsce publish --no-dependencies -p "$VSCE_PAT"
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

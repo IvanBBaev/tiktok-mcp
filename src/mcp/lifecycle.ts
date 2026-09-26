@@ -1,6 +1,7 @@
 /**
- * The credential-store watch behind `notifications/tools/list_changed`
- * (CC-A7, TOOLS.md § 6.3, CONTRACTS.md § `mcp/lifecycle.ts`).
+ * The credential-store watch behind `notifications/tools/list_changed` and
+ * `notifications/resources/list_changed` (CC-A7, TOOLS.md § 6.3, CONTRACTS.md
+ * § `mcp/lifecycle.ts`).
  *
  * `tools/list` already rebuilds every description from the credential store on
  * every request, so an `[UNAVAILABLE: …]` marker is never stale *when asked*
@@ -9,7 +10,8 @@
  * tool as unavailable until something makes it re-list. This module is that
  * something — it polls the store and calls back when the picture the tool list
  * is built from actually changed, which the caller turns into
- * `sendToolListChanged()`.
+ * `McpServerHandle.notifyListChanged()` — one callback for both lists, since a
+ * resource description carries the same marker as its tool's.
  *
  * Three rules shape the whole module:
  *
@@ -40,7 +42,7 @@
  *   envFilePath,
  *   clock: systemClock,
  *   logger,
- *   onChange: () => handle.notifyToolListChanged(),
+ *   onChange: () => handle.notifyListChanged(),
  * });
  * await watch.poll(); // seed the baseline now instead of one tick from now
  * // …and in the shutdown handler, before server.close():
@@ -48,7 +50,8 @@
  * ```
  *
  * Order matters in both directions. Started **after** `connectStdio`, because
- * `Server.sendToolListChanged()` throws `Not connected` without a transport.
+ * `notifyListChanged()` (the SDK's `sendToolListChanged()` underneath) throws
+ * `Not connected` without a transport.
  * Stopped **before** `server.close()`, because a notification into a closing
  * transport is a rejection nobody needs to see.
  *
@@ -212,9 +215,14 @@ export async function readCredentialProfiles(
   const env = overlayEnv(source.env ?? process.env, snapshot.values);
   return listProfiles(snapshot, env).map((name) => {
     try {
-      return { name, scopes: readProfile(name, snapshot, env).scopes ?? [] };
+      const stored = readProfile(name, snapshot, env);
+      return {
+        name,
+        scopes: stored.scopes ?? [],
+        authorized: stored.accessToken !== undefined || stored.refreshToken !== undefined,
+      };
     } catch {
-      return { name, scopes: [] };
+      return { name, scopes: [], authorized: false };
     }
   });
 }
@@ -399,6 +407,8 @@ export function startCredentialWatch(opts: CredentialWatchOptions): CredentialWa
   }
 
   function poll(): Promise<boolean> {
+    // After `stop()` nothing may notify a transport that is being closed.
+    if (stopping.signal.aborted) return Promise.resolve(false);
     inFlight ??= runPoll().finally(() => {
       inFlight = undefined;
     });
@@ -423,6 +433,9 @@ export function startCredentialWatch(opts: CredentialWatchOptions): CredentialWa
     stop: async () => {
       stopping.abort();
       await loop;
+      // A poll started through `poll()` runs outside the loop; it is the same
+      // "already in flight" the contract promises to wait for.
+      await inFlight;
     },
   };
 }

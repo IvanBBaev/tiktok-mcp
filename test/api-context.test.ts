@@ -23,6 +23,7 @@ import {
   type ApiContext,
 } from '../src/api/context.js';
 import { isTikTokError } from '../src/core/errors.js';
+import type { Clock } from '../src/core/clock.js';
 import { createLogger } from '../src/core/log.js';
 import { loadSettings, type Settings } from '../src/core/settings.js';
 import type { RefreshDeps } from '../src/core/oauth.js';
@@ -33,6 +34,7 @@ import {
   baselineEnv,
   fsSandbox,
   mockClock,
+  type MockClock,
   scriptFetch,
   ttEnvelope,
   withFetch,
@@ -54,6 +56,7 @@ interface CtxOptions {
   settings?: Settings;
   refresh?: (profile: string, deps: RefreshDeps) => Promise<string>;
   env?: NodeJS.ProcessEnv;
+  clock?: Clock;
 }
 
 function apiCtx(opts: CtxOptions = {}): ApiContext {
@@ -61,7 +64,7 @@ function apiCtx(opts: CtxOptions = {}): ApiContext {
     profile: opts.profile ?? 'DEFAULT',
     settings: opts.settings ?? settings(),
     log: NOOP_LOGGER,
-    clock: mockClock(),
+    clock: opts.clock ?? mockClock(),
     refresh: opts.refresh ?? (() => Promise.resolve('test-access-token-DEFAULT')),
     ...(opts.env === undefined ? {} : { env: opts.env }),
   });
@@ -191,7 +194,7 @@ test('apiRequest resolves the envelope payload and forwards the body verbatim', 
   assert.deepEqual(stub.calls[0]?.json(), { max_count: 20 });
 });
 
-test('a rejected access token buys exactly one forced refresh and one replay', async () => {
+test('cc-a4: a rejected access token buys exactly one forced refresh and one replay', async () => {
   const stub = scriptFetch([
     ttEnvelope(undefined, { code: 'access_token_invalid', message: 'expired' }),
     ttEnvelope({ user: { open_id: 'after-refresh' } }),
@@ -217,7 +220,7 @@ test('a rejected access token buys exactly one forced refresh and one replay', a
   assert.deepEqual(forced, [false, true]);
 });
 
-test('a second rejection after the replay is terminal and reads as auth_expired', async () => {
+test('cc-a4: a second rejection after the replay is terminal and reads as auth_expired', async () => {
   const stub = scriptFetch([
     ttEnvelope(undefined, { code: 'access_token_invalid', message: 'expired' }),
     ttEnvelope(undefined, { code: 'access_token_invalid', message: 'still expired' }),
@@ -244,6 +247,45 @@ test('a second rejection after the replay is terminal and reads as auth_expired'
   // Two calls, never three: looping on a credential TikTok keeps refusing is
   // how a client burns an account's rate budget for nothing.
   assert.equal(stub.calls.length, 2);
+});
+
+test('cc-a4: a non-idempotent request class is never replayed on a token rejection', async () => {
+  // "One forced refresh + one replay, idempotent requests only" (CC-A4). The
+  // publish init is the live non-read caller (`retryClass: 'init'`), and a
+  // replayed init is a second post: TikTok may well have accepted the first
+  // one and rejected only the stale bearer on the response path.
+  const stub = scriptFetch([
+    ttEnvelope(undefined, { code: 'access_token_invalid', message: 'expired' }),
+    ttEnvelope({ user: { open_id: 'never-reached' } }),
+  ]);
+  const forced: boolean[] = [];
+
+  await withFetch(stub, async () => {
+    await assert.rejects(
+      apiRequest(
+        apiCtx({
+          refresh: (_profile, deps) => {
+            forced.push(deps.force === true);
+            return Promise.resolve('token');
+          },
+        }),
+        {
+          method: 'POST',
+          path: '/v2/post/publish/video/init/',
+          body: {},
+          retryClass: 'init',
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(isTikTokError(error));
+        assert.equal(error.apiCode, 'access_token_invalid');
+        return true;
+      },
+    );
+  });
+
+  assert.equal(stub.calls.length, 1, 'the init was attempted once and only once');
+  assert.deepEqual(forced, [false], 'no forced refresh, because there is no replay');
 });
 
 test('an error that is not a token rejection is not replayed', async () => {
@@ -290,6 +332,100 @@ test('a non-token failure on the replay propagates unchanged', async () => {
     );
   });
   assert.equal(stub.calls.length, 2);
+});
+
+/**
+ * Advance virtual time in slices until `work` settles. The retry backoff is
+ * jittered, so there is no single `advance(n)` that is exactly right; a wait
+ * the mock clock does not own shows up as the loud failure below instead of a
+ * hung test.
+ */
+async function drive<T>(clock: MockClock, work: Promise<T>): Promise<T> {
+  let settled = false;
+  const tracked = work.finally(() => {
+    settled = true;
+  });
+  // Keep an in-flight rejection from surfacing as unhandled before the caller
+  // gets to assert on it.
+  tracked.catch(() => undefined);
+  for (let step = 0; step < 500 && !settled; step += 1) {
+    await clock.advance(1_000);
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 1);
+    });
+  }
+  if (!settled) assert.fail('the request had not settled after 500 s of virtual time');
+  return tracked;
+}
+
+/** A fresh retryable failure per attempt — a `Response` body reads only once. */
+function failures(count: number, make: () => Response): Response[] {
+  return Array.from({ length: count }, make);
+}
+
+const serverError = (): Response => new Response('gateway', { status: 500 });
+const tooMany = (): Response =>
+  new Response('slow down', { status: 429, headers: { 'retry-after': '1' } });
+
+for (const { retries, label, make } of [
+  { retries: 0, label: '500', make: serverError },
+  { retries: 2, label: '500', make: serverError },
+  { retries: 0, label: '429', make: tooMany },
+  { retries: 2, label: '429', make: tooMany },
+]) {
+  test(`TT_MAX_RETRIES=${String(retries)} is a retry cap: a read hitting ${label}s makes ${String(1 + retries)} request(s)`, async () => {
+    // One attempt plus up to TT_MAX_RETRIES retries, the same reading as
+    // TT_CHUNK_RETRIES — not an attempt count, which would make 0 mean "try
+    // once anyway" and 1 mean "never retry".
+    const clock = mockClock();
+    // One spare failure past the cap: an extra attempt would consume it rather
+    // than exhaust the script, so the count below is what proves the cap.
+    const stub = scriptFetch(failures(retries + 2, make));
+    const ctx = apiCtx({
+      clock,
+      settings: settings({ TT_MAX_RETRIES: String(retries) }),
+    });
+
+    await withFetch(stub, async () => {
+      await assert.rejects(
+        drive(
+          clock,
+          apiRequest(ctx, { method: 'GET', path: '/v2/user/info/', fields: ['open_id'] }),
+        ),
+        (error: unknown) => {
+          assert.ok(isTikTokError(error));
+          assert.equal(error.retryable, true);
+          return true;
+        },
+      );
+    });
+
+    assert.equal(stub.calls.length, 1 + retries);
+  });
+}
+
+test('a retried read that recovers within TT_MAX_RETRIES resolves normally', async () => {
+  const clock = mockClock();
+  const stub = scriptFetch([
+    serverError(),
+    serverError(),
+    ttEnvelope({ user: { open_id: 'third-time-lucky' } }),
+  ]);
+  const ctx = apiCtx({ clock, settings: settings({ TT_MAX_RETRIES: '2' }) });
+
+  const payload = await withFetch(stub, async () =>
+    drive(
+      clock,
+      apiRequest<{ user: { open_id: string } }>(ctx, {
+        method: 'GET',
+        path: '/v2/user/info/',
+        fields: ['open_id'],
+      }),
+    ),
+  );
+
+  assert.equal(payload.user.open_id, 'third-time-lucky');
+  assert.equal(stub.calls.length, 3);
 });
 
 test('malformedPayload reports a shape change as an upstream problem', () => {

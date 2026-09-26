@@ -81,8 +81,42 @@ test('an undocumented field name fails locally and names the vocabulary', async 
   assert.equal(stub.calls.length, 0);
 });
 
+test('an inherited property name is not a documented field', async () => {
+  // `in` would find these on Object.prototype and let them through to TikTok.
+  for (const field of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    const stub = scriptFetch([]);
+    await withFetch(stub, async () => {
+      await assert.rejects(
+        getUserInfo(apiCtx(), ['open_id', field]),
+        (error: unknown) => {
+          assert.ok(isTikTokError(error));
+          assert.equal(error.code, 'invalid_params');
+          assert.ok(error.message.includes(`'${field}' is not a documented user field`));
+          return true;
+        },
+      );
+    });
+    assert.equal(stub.calls.length, 0, `${field} must not reach the network`);
+  }
+});
+
 test('a 200 without the user object reads as an upstream shape change', async () => {
   const stub = scriptFetch([ttEnvelope({})]);
+  await withFetch(stub, async () => {
+    await assert.rejects(getUserInfo(apiCtx(), ['open_id']), (error: unknown) => {
+      assert.ok(isTikTokError(error));
+      assert.equal(error.kind, 'api');
+      assert.equal(error.code, 'upstream_error');
+      assert.ok(error.message.includes('user object'));
+      return true;
+    });
+  });
+});
+
+test('a 200 whose user is null reads as the same upstream shape change', async () => {
+  // JSON can say "no user" as an absent key or as null; neither is a user, and
+  // null must not be handed back to a caller that dereferences it.
+  const stub = scriptFetch([ttEnvelope({ user: null })]);
   await withFetch(stub, async () => {
     await assert.rejects(getUserInfo(apiCtx(), ['open_id']), (error: unknown) => {
       assert.ok(isTikTokError(error));

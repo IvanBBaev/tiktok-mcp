@@ -207,7 +207,12 @@ export async function runCoverageGate(doRatchet: boolean): Promise<boolean> {
       if (!area.advisory) ok = false;
     }
     if (area.files === 0 && area.path !== 'GLOBAL') {
-      out.push('    note: no source file matches this rule yet');
+      // A rule that matches nothing is stale configuration: a renamed file has
+      // silently left its stricter floor behind.
+      out.push(
+        '    STALE RULE: no source file matches it — move it with the file or delete it',
+      );
+      ok = false;
     }
   }
   for (const file of unmatchedFiles) {

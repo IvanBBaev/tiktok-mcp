@@ -219,9 +219,9 @@ export async function apiRequest<T>(
       clock: ctx.clock,
       logger: ctx.log,
       timeoutMs: ctx.settings.timeoutMs,
-      // `TT_MAX_RETRIES` is the read class's attempt cap (CONFIGURATION.md);
-      // `core/http` clamps it to at least one attempt.
-      maxAttempts: ctx.settings.maxRetries,
+      // `TT_MAX_RETRIES` is a retry cap (CONFIGURATION.md), like
+      // `TT_CHUNK_RETRIES`: one attempt plus up to that many retries.
+      maxAttempts: 1 + ctx.settings.maxRetries,
       ...(opts.body === undefined ? {} : { body: opts.body }),
       ...(opts.signal === undefined ? {} : { signal: opts.signal }),
     });

@@ -145,16 +145,23 @@ active; CONTRACTS.md frozen (changelog entry).
 
 | Task | After | Owned files | Scope | Size |
 |---|---|---|---|---|
-| TE-1 | Wave D | `.github/workflows/publish.yml` (shipped under that name — `publish-mcp.yml` triggers on `workflows: [Publish]`, so it cannot be renamed), `scripts/release-guard.*`, `CHANGELOG.md` | npm trusted publishing (OIDC) + provenance; tag==version==server.json==CHANGELOG guard; keep-a-changelog policy (G-10); deprecation policy text (G-11) | M |
+| TE-1 | Wave D | `.github/workflows/publish.yml` (shipped under that name — `publish-mcp.yml` triggers on `workflows: [Publish]`, so it cannot be renamed), `scripts/release-guard.*`, `CHANGELOG.md` | npm trusted publishing (OIDC) + provenance; tag==version==server.json==CHANGELOG guard; keep-a-changelog policy (G-10); deprecation policy text (G-11). The pipeline is correct as designed but cannot bootstrap itself — the first version has to be published by hand before any tag exists (G-14, executed in TE-5) | M |
 | TE-2 | Wave D (parallel) | `.github/workflows/codeql.yml`, `.github/dependabot.yml`, root `SECURITY.md` | Scanning + disclosure policy | S |
 | TE-3 | Wave D (parallel) | `server.json`, `.claude-plugin/` | MCP registry entry + publish sequencing; Claude Code plugin manifest | M |
 | TE-4 | Wave D (parallel) | `docs/SETUP-TIKTOK-APP.md` (G-3), `docs/CLIENTS.md` (G-6), `docs/TROUBLESHOOTING.md` (G-7), uninstall section (G-8), `CONTRIBUTING.md` (G-9) | User-facing operator docs; verifies the G-2 disclaimer is present in README + npm | M |
-| TE-5 | TE-1..TE-4 | — (integrator + human) | RC checklist: `npx` install smoke on 3 OS (G-12 — **closed**: automated as the `smoke-pack` CI job, `npm run smoke:pack`, and re-run in `publish.yml` before publishing); Privacy Policy + ToS live URLs tracked (G-4 — human deliverable); npm 0.x → 1.0; TikTok audit **submission** | M |
+| TE-5 | TE-1..TE-4 | — (integrator + human) | RC checklist: `npx` install smoke on 3 OS (G-12 — **closed**: automated as the `smoke-pack` CI job, `npm run smoke:pack`, and re-run in `publish.yml` before publishing); Privacy Policy + ToS at live URLs (G-4 — **in-repo**: `site/privacy.html` + `site/terms.html` ship with the next `pages.yml` deploy to `https://ivanbbaev.github.io/tiktok-mcp/privacy.html` and `…/terms.html`; the human steps left are committing the two page files — both are still untracked, and `pages.yml` deploys the repository's `site/`, not the working tree — and enabling GitHub Pages on the repo with Source = GitHub Actions, then confirming both URLs resolve before the audit submission); **first-release bootstrap (G-14)** — one manual `npm publish --access public` plus the trusted-publisher configuration for `IvanBBaev/tiktok-mcp` + `publish.yml`, **before** the first `v*` tag: OIDC cannot publish a first version, so a premature tag fails at `npm publish` — and since `publish-vscode.yml` and `publish-mcp.yml` both follow a successful *Publish* run rather than the tag, it spends nothing: no npm, Marketplace or MCP Registry version, no GitHub release; npm 0.x → 1.0; TikTok audit **submission**, run from [docs/AUDIT.md](AUDIT.md) — preconditions (G-4 above, G-2, G-14), the demo-video shot list, the submission checklist and the journey log to fill in | M |
 | TE-6 | any time after Wave C | `src/mcp/lifecycle.ts` + tests | Scope/`[UNAVAILABLE]` v2: credential-store watch + `tools/list_changed` (WP-3.5). CC-A7 | M |
 | TE-7 | Wave C (parallel with Wave D) | `src/mcp/http.ts` + tests, transport branch in `src/index.ts` | **Streamable HTTP transport — CC-G6.** `TT_TRANSPORT=http` currently refuses to start (`src/index.ts`), while README § env table, CONFIGURATION.md § transport and SECURITY.md already document it as a shipped feature: the gap must close before v1.0 or the docs must retract it. Owns `StreamableHTTPServerTransport` wiring, `TT_HTTP_HOST`/`TT_PORT` bind, the mandatory `TT_HTTP_TOKEN` bearer (constant-time compare over fixed-length digests; startup refusal when absent — loopback included), `Origin`/`Host` validation on every request (DNS-rebinding defense), the non-loopback TLS / `TT_HTTP_INSECURE=1` acknowledgement, and per-session isolation of the mcp runtime. `TT_HTTP_TOKEN` stays a registered secret and reports as `<redacted>`. **Added by the integrator after TC-2** — CC-G6 had no owner. | L |
 
-**v1.0 gate:** IMPLEMENTATION-PLAN "Road to v1.0" definition satisfied;
-G-1..G-13 all closed or explicitly tracked (G-4).
+**v1.0 gate:** IMPLEMENTATION-PLAN "Road to v1.0" definition satisfied, and
+every row of its gap table reading closed. That is the condition, not a report:
+the **Status** column of that table is the single source for where each gap
+actually stands, and two rows do not meet the condition today. **G-4** stopped
+being an *external* deliverable when the Pages site landed, but it now needs two
+in-repo steps, not one — `site/privacy.html` and `site/terms.html` are still
+untracked, so a `pages.yml` deploy would not carry them, and GitHub Pages is not
+enabled on the repository. **G-14** is closed by the first release itself, and
+closing it is what makes the first `v*` tag safe to push.
 
 ---
 

@@ -12,7 +12,7 @@
  *    here is `process.stderr` — `console.log` is additionally banned by lint.
  * 2. **Redaction happens before serialization** (ARCHITECTURE.md § 10): the
  *    message goes through `redactText` (registered secrets scrubbed out of
- *    free text) and the merged fields through `redactValue` (allowlist-based
+ *    free text) and the merged fields through `redactRecord` (allowlist-based
  *    deep redaction, unknown keys default-deny). `logFields` being an
  *    allowlist is policy; this is the backstop.
  * 3. **Logging never throws and never crashes the process.** An
@@ -26,7 +26,7 @@
  */
 
 import { systemClock, type Clock } from './clock.js';
-import { redactText, redactValue } from './redact.js';
+import { redactRecord, redactText } from './redact.js';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -51,10 +51,6 @@ const RESERVED_KEYS: ReadonlySet<string> = new Set(['ts', 'level', 'msg']);
 /** Matches the documented `TT_LOG_LEVEL` default (CONFIGURATION.md). */
 const DEFAULT_LEVEL: LogLevel = 'info';
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 /**
  * A broken stderr pipe (`EPIPE` when the parent closed the handle) must never
  * take the server down: the log line is simply lost.
@@ -74,23 +70,12 @@ function buildRecord(
   merged: Record<string, unknown>,
 ): Record<string, unknown> {
   const record: Record<string, unknown> = { ts, level, msg: redactText(msg) };
-  if (Object.keys(merged).length > 0) {
-    const redacted = redactValue(merged);
-    if (isRecord(redacted)) {
-      for (const [key, value] of Object.entries(redacted)) {
-        if (!RESERVED_KEYS.has(key)) record[key] = value;
-      }
-      /* c8 ignore start */
-    } else if (redacted !== undefined) {
-      // Unreachable with the current `core/redact`: `merged` is a spread-created
-      // plain object, so `redactValue` always walks it with `redactEntries` and
-      // always returns a record. Kept as a backstop because the invariant lives
-      // in another module and nothing enforces it across the boundary — if
-      // `redactValue` ever starts collapsing whole objects, the field set must
-      // still reach stderr rather than vanish silently.
-      record.fields = redacted;
-    }
-    /* c8 ignore stop */
+  // `merged` is a plain object spread from the bound and per-call fields, and
+  // `redactRecord` hands a plain record back by type, so the redacted entries
+  // spread straight into the envelope — there is no shape the field set could
+  // collapse to and nothing to check for.
+  for (const [key, value] of Object.entries(redactRecord(merged))) {
+    if (!RESERVED_KEYS.has(key)) record[key] = value;
   }
   return record;
 }

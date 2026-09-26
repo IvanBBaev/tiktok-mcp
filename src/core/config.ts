@@ -19,9 +19,11 @@
  *   included. A `#` inside a token is far more likely than a comment on a
  *   generated credential line, and guessing wrong would silently truncate a
  *   secret. Comments must be on their own line.
- * - **Reads are snapshots.** `readEnvFile` does one `readFile`, and every write
- *   lands via `rename`, so a reader either sees the whole old file or the whole
- *   new one — a torn read is not representable (TESTING.md § core/config).
+ * - **Reads are snapshots.** `readEnvFile` takes one file handle and reads both
+ *   the text and the mode through it, and every write lands via `rename`, so a
+ *   reader either sees the whole old file or the whole new one — a torn read,
+ *   or a snapshot whose two halves came from two different inodes, is not
+ *   representable (TESTING.md § core/config).
  * - **A failed write never fails a tool call** (CC-H3). Persisting is
  *   best-effort: EPERM/EBUSY on `rename` (a virus scanner or an editor holding
  *   the file open on Windows) is retried three times, and any other I/O failure
@@ -34,23 +36,16 @@
  *   `withEnvLock` (CONTRACTS.md § core/config, CC-A2/CC-F5).
  */
 
-import {
-  chmod,
-  copyFile,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  rm,
-  stat,
-} from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import type { Clock } from './clock.js';
 import { systemClock } from './clock.js';
+import { canonicalPath } from './env-lock.js';
 import { TikTokError } from './errors.js';
 import { createLogger, type Logger } from './log.js';
+import { registerSecret } from './redact.js';
 import { DEFAULT_PROFILE, knownSettingVars } from './settings.js';
 
 /** The directory name used under the platform's config root. */
@@ -116,6 +111,29 @@ const PROFILE_KEY = new RegExp(
   'i',
 );
 
+/**
+ * A successful `PROFILE_KEY.exec`. Group 1 is `[A-Za-z0-9_]+` — mandatory, not
+ * optional and not inside an alternation — so a match always carries the profile
+ * name, exactly as the standard library declares `0` present on every
+ * `RegExpExecArray`. Declaring it is what keeps `noUncheckedIndexedAccess` from
+ * widening the name to `string | undefined` and inventing a guard for it.
+ */
+interface ProfileKeyMatch extends RegExpExecArray {
+  1: string;
+}
+
+/**
+ * The same trick for {@link KEY_LINE}. Groups 2 and 3 — the key and the raw
+ * value — are not optional: a match means the line assigned something, so the
+ * guard `noUncheckedIndexedAccess` would otherwise demand for them is a branch
+ * nothing can reach. Group 1 (`export `) *is* optional and stays widened to
+ * `string | undefined`, which is exactly what the rewrite needs to know.
+ */
+interface KeyLineMatch extends RegExpExecArray {
+  2: string;
+  3: string;
+}
+
 /** The `TT_` key a field maps to for a given profile. */
 export function envKeyFor(profile: string, field: TokenField | AppField): string {
   if (field === 'clientKey' || field === 'clientSecret') return APP_KEY_NAME[field];
@@ -140,20 +158,16 @@ export interface EnvLine {
   readonly prefix?: string;
 }
 
-/** An immutable view of the env file at one instant. */
-export interface EnvFileSnapshot {
+/** What both arms of {@link EnvFileSnapshot} carry, file or no file. */
+interface EnvFileSnapshotBase {
   /** The absolute path this snapshot was read from. */
   readonly path: string;
-  /** `false` when the file does not exist — legal: process env may suffice (CC-F1). */
-  readonly exists: boolean;
   /** Effective key → value, duplicates resolved last-wins (CC-F1). */
   readonly values: ReadonlyMap<string, string>;
   /** `TT_CONFIG_SCHEMA` as literally present, `undefined` when absent. */
   readonly declaredSchema?: number;
   /** The effective schema — `declaredSchema` or `1` (CONFIGURATION.md § Schema versioning). */
   readonly schema: number;
-  /** `st_mode & 0o777`; `undefined` when the file is missing. Meaningful on POSIX only (CC-F3). */
-  readonly mode?: number;
   /** Non-fatal findings: duplicate keys, unknown `TT_*` keys (CC-F1). */
   readonly warnings: readonly string[];
   /** The raw document, for a byte-exact rewrite. Consumed by `persistProfilePatch`. */
@@ -161,6 +175,36 @@ export interface EnvFileSnapshot {
   /** The dominant line ending, used for lines appended to the file. */
   readonly eol: '\n' | '\r\n';
 }
+
+/**
+ * The file was there and was read. `mode` came off the *same* handle as the
+ * bytes, so it describes the file those bytes came from and is never absent.
+ */
+export interface ExistingEnvFile extends EnvFileSnapshotBase {
+  readonly exists: true;
+  /** `st_mode & 0o777`. Meaningful on POSIX only (CC-F3). */
+  readonly mode: number;
+}
+
+/**
+ * No file yet — legal, not an error: the process environment may carry
+ * everything (CC-F1). There is no mode, so this arm does not declare one: a
+ * caller that wants `mode` has to narrow on `exists` first, which is the only
+ * question that decides whether a mode exists at all.
+ */
+export interface MissingEnvFile extends EnvFileSnapshotBase {
+  readonly exists: false;
+}
+
+/**
+ * An immutable view of the env file at one instant, discriminated on `exists`.
+ *
+ * A union rather than one shape with an optional `mode`: `readEnvFile` builds
+ * exactly two literals and each of them either has a mode or cannot have one,
+ * so the optional field only ever manufactured guards that nothing could reach
+ * (TESTING.md § What to do with an uncovered branch — "type artifact").
+ */
+export type EnvFileSnapshot = ExistingEnvFile | MissingEnvFile;
 
 // ---------------------------------------------------------------------------
 // path resolution
@@ -243,12 +287,46 @@ function configError(opts: {
   return new TikTokError({ kind: 'config', ...opts });
 }
 
+/**
+ * The errno of a thrown value, when it carries one.
+ *
+ * Every rejection `node:fs/promises` produces carries a string `code` — a
+ * `SystemError` for an I/O failure, an argument `TypeError`/`RangeError`
+ * otherwise — so at a site whose only source of errors is `fs`, this never
+ * answers `undefined`. Callers that need a code to put in a message or a log
+ * field go through {@link errnoFor}, which turns that "never" into a type.
+ */
 function errnoOf(err: unknown): string | undefined {
   if (typeof err === 'object' && err !== null && 'code' in err) {
     const { code } = err as { code?: unknown };
     if (typeof code === 'string') return code;
   }
   return undefined;
+}
+
+/**
+ * The code to report for a thrown value: its cause's errno, else its own, else
+ * `'unknown'`.
+ *
+ * The cause comes first because the errors this module raises are wrapping
+ * errors: a `TikTokError` from `readEnvFile` carries `env_file_unreadable` in
+ * its own `code` and the errno that caused it one level down, and the operator
+ * wants the errno. A parse failure has no errno cause, so it reports its own
+ * code (`env_file_malformed`) instead, and an `fs` rejection — which has no
+ * `cause` at all — reports the errno it carries.
+ *
+ * This exists as one function rather than as a `?? 'unknown'` written out at
+ * each warning site because only one of those sites can reach the fallback: an
+ * `fs` rejection always carries an errno, while the injected `rename` seam can
+ * reject with anything, including a codeless `Error` or a value that is not an
+ * `Error` at all (CC-H3). Repeating the chain per site put five unreachable
+ * fallbacks in the file and excluded five whole lines from coverage to hide
+ * them — including the two arms here that tests do drive. Written once, every
+ * arm is on a path some test takes.
+ */
+function errnoFor(err: unknown): string {
+  const cause = err instanceof Error ? err.cause : undefined;
+  return errnoOf(cause) ?? errnoOf(err) ?? 'unknown';
 }
 
 /** Is this key one this build understands? Unknown ones are kept, not dropped. */
@@ -262,11 +340,7 @@ function isKnownKey(key: string): boolean {
   return PROFILE_KEY.test(key);
 }
 
-function parseSnapshot(
-  path: string,
-  text: string,
-  mode: number | undefined,
-): EnvFileSnapshot {
+function parseSnapshot(path: string, text: string, mode: number): ExistingEnvFile {
   const rawLines = splitLines(text);
   const lines: EnvLine[] = [];
   const values = new Map<string, string>();
@@ -283,7 +357,7 @@ function parseSnapshot(
       return;
     }
 
-    const match = KEY_LINE.exec(raw.text.trim());
+    const match = KEY_LINE.exec(raw.text.trim()) as KeyLineMatch | null;
     if (match === null) {
       // CC-F1: a malformed line is an error that names the line number.
       throw configError({
@@ -295,9 +369,6 @@ function parseSnapshot(
     }
 
     const [, prefix, key, rawValue] = match;
-    /* c8 ignore next -- the regex has three capture groups; this narrows them for TS. */
-    if (key === undefined || rawValue === undefined)
-      throw new Error('unreachable: KEY_LINE groups');
 
     if (values.has(key)) duplicates.add(key);
     values.set(key, unquote(rawValue)); // CC-F1: last wins.
@@ -332,7 +403,7 @@ function parseSnapshot(
     );
   }
 
-  const snapshot: EnvFileSnapshot = {
+  const snapshot: ExistingEnvFile = {
     path,
     exists: true,
     values,
@@ -341,7 +412,7 @@ function parseSnapshot(
     lines,
     eol: crlf > 0 && crlf * 2 >= rawLines.length ? '\r\n' : '\n',
     ...(declaredSchema === undefined ? {} : { declaredSchema }),
-    ...(mode === undefined ? {} : { mode }),
+    mode,
   };
   return snapshot;
 }
@@ -359,13 +430,21 @@ function parseSnapshot(
  */
 export async function readEnvFile(path: string): Promise<EnvFileSnapshot> {
   let text: string;
-  let mode: number | undefined;
+  let mode: number;
   try {
-    text = await readFile(path, 'utf8');
-    const info = await stat(path);
-    mode = info.mode & 0o777;
+    // One `open`, not a `readFile` plus a `stat`: two lookups can land on two
+    // different inodes, and a file removed between them would be reported as
+    // "no file yet" — the "you are not logged in" answer this function exists to
+    // avoid — with the tokens it had just read in hand.
+    const handle = await open(path, 'r');
+    try {
+      text = await handle.readFile('utf8');
+      mode = (await handle.stat()).mode & 0o777;
+    } finally {
+      await handle.close();
+    }
   } catch (err) {
-    const code = errnoOf(err);
+    const code = errnoFor(err);
     if (code === 'ENOENT') {
       return {
         path,
@@ -379,7 +458,7 @@ export async function readEnvFile(path: string): Promise<EnvFileSnapshot> {
     }
     throw configError({
       code: 'env_file_unreadable',
-      message: `${path}: cannot be read (${code ?? 'unknown error'})`,
+      message: `${path}: cannot be read (${code})`,
       remediation:
         code === 'EACCES'
           ? 'Fix the file permissions (it should be readable by you and mode 0600), or point TT_ENV_FILE at a readable path.'
@@ -395,9 +474,17 @@ export async function readEnvFile(path: string): Promise<EnvFileSnapshot> {
 // profiles
 // ---------------------------------------------------------------------------
 
+/**
+ * The canonical spelling of a profile name, unvalidated: what a caller-given
+ * `account` is compared by, so `work`, ` Work ` and `WORK` name one profile.
+ */
+export function canonicalProfileName(name: string): string {
+  return name.trim().toUpperCase();
+}
+
 /** Upper-case and validate a profile name (CC-F4). */
 export function normalizeProfileName(name: string): string {
-  const normalized = name.trim().toUpperCase();
+  const normalized = canonicalProfileName(name);
   if (!PROFILE_NAME.test(normalized)) {
     throw configError({
       code: 'invalid_profile_name',
@@ -424,11 +511,9 @@ export function listProfiles(
   const found = new Set<string>([DEFAULT_PROFILE]);
   const keys = [...snapshot.values.keys(), ...Object.keys(env)];
   for (const key of keys) {
-    const match = PROFILE_KEY.exec(key);
+    const match = PROFILE_KEY.exec(key) as ProfileKeyMatch | null;
     if (match === null) continue;
-    const raw = match[1];
-    if (raw === undefined) continue;
-    const name = raw.toUpperCase();
+    const name = match[1].toUpperCase();
     if (name === DEFAULT_PROFILE) {
       throw configError({
         code: 'invalid_profile_name',
@@ -439,6 +524,27 @@ export function listProfiles(
     found.add(name);
   }
   return [...found].sort();
+}
+
+/**
+ * The value of `key` in one source, `undefined` when the source lacks it.
+ *
+ * `listProfiles` declares a profile from a `TT_PROFILE_<NAME>_*` key in any
+ * case (CC-F4), so the read has to find that same key: an exact match wins,
+ * and a per-profile key otherwise matches its canonical upper-case spelling.
+ * The shared app keys stay exact — they declare nothing.
+ */
+function presentValue(
+  key: string,
+  keys: Iterable<string>,
+  get: (key: string) => string | undefined,
+): string | undefined {
+  const exact = get(key);
+  if (exact !== undefined || !PROFILE_KEY.test(key)) return exact;
+  for (const candidate of keys) {
+    if (candidate.toUpperCase() === key) return get(candidate);
+  }
+  return undefined;
 }
 
 /**
@@ -465,14 +571,15 @@ export function readProfile(
     throw configError({
       code: 'unknown_profile',
       message: `unknown profile ${profile}; profiles that exist: ${profiles.join(', ')}`,
-      remediation: `Set TT_ACTIVE_PROFILE to one of those, or run login with account=${profile} to create it.`,
+      remediation: `Set TT_ACTIVE_PROFILE to one of those, or run "tiktok-mcp-ai login --profile ${profile}" to create it.`,
     });
   }
 
   /** Presence-based per-key overlay: process env first, then the file (CC-F2). */
   const lookup = (key: string): string | undefined => {
-    const fromEnv = env[key];
-    const raw = fromEnv ?? snapshot.values.get(key);
+    const raw =
+      presentValue(key, Object.keys(env), (k) => env[k]) ??
+      presentValue(key, snapshot.values.keys(), (k) => snapshot.values.get(k));
     if (raw === undefined) return undefined;
     const value = raw.trim();
     return value === '' ? undefined : value;
@@ -491,6 +598,9 @@ export function readProfile(
         'Create an app at developers.tiktok.com, then set TT_CLIENT_KEY and TT_CLIENT_SECRET in the MCP client configuration or the env file.',
     });
   }
+  // Every path to the app secret runs through here, so this is where it becomes a
+  // secret: a later stack trace or echoed form body must come out masked.
+  registerSecret(clientSecret);
 
   /** CC-H2: persisted times are ISO-8601 UTC; a value that cannot be parsed would become NaN at comparison time. */
   const timestamp = (
@@ -568,11 +678,25 @@ function formatValue(key: string, value: string): string {
     });
   }
   const quoted = value !== value.trim();
+  const first = value[0];
   const looksQuoted =
-    value.length >= 2 &&
-    (value.startsWith('"') || value.startsWith("'")) &&
-    value.endsWith(value[0] ?? '');
+    value.length >= 2 && (first === '"' || first === "'") && value.endsWith(first);
   return quoted || looksQuoted ? `"${value}"` : value;
+}
+
+/**
+ * The update a document key receives, by the key it is filed under. A
+ * per-profile key is the one `presentValue` reads in any case (CC-F4), so it
+ * is written in any case too — as its canonical spelling, or a hand-written
+ * `TT_PROFILE_work_REFRESH_TOKEN` would outlive the revoke meant to clear it.
+ */
+function updateKey(
+  key: string,
+  updates: ReadonlyMap<string, string>,
+): string | undefined {
+  if (updates.has(key)) return key;
+  const canonical = key.toUpperCase();
+  return PROFILE_KEY.test(key) && updates.has(canonical) ? canonical : undefined;
 }
 
 /**
@@ -591,20 +715,20 @@ function applyUpdates(
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = lines[i];
     if (line?.key === undefined) continue;
-    const value = pending.get(line.key);
-    if (value === undefined) continue;
+    const key = updateKey(line.key, pending);
+    if (key === undefined) continue;
 
-    if (rewritten.has(line.key)) {
+    if (rewritten.has(key)) {
       lines[i] = undefined; // an earlier duplicate of a key we just rewrote
       continue;
     }
     lines[i] = {
-      text: `${line.prefix ?? ''}${line.key}=${formatValue(line.key, value)}`,
+      text: `${line.prefix ?? ''}${key}=${formatValue(key, pending.get(key) as string)}`,
       eol: line.eol === '' ? snapshot.eol : line.eol,
-      key: line.key,
+      key,
       ...(line.prefix === undefined ? {} : { prefix: line.prefix }),
     };
-    rewritten.add(line.key);
+    rewritten.add(key);
   }
   for (const key of rewritten) pending.delete(key);
 
@@ -636,7 +760,13 @@ async function atomicWrite(
   opts: Required<Pick<PersistOptions, 'clock' | 'logger' | 'platform'>> &
     Pick<PersistOptions, 'rename'>,
 ): Promise<boolean> {
-  const dir = dirname(path);
+  // A symlinked env file (a dotfiles repo, a mounted secret) is written through
+  // to its target: renaming onto the link itself would replace it with a
+  // regular file and silently fork the credentials. A dangling link is followed
+  // too — its target directory is created below — and the spelling matches the
+  // one `withEnvLock` keys its lock on.
+  const target = await canonicalPath(path);
+  const dir = dirname(target);
   const doRename = opts.rename ?? rename;
   tempCounter += 1;
   const temp = join(dir, `.env.tmp-${String(process.pid)}-${String(tempCounter)}`);
@@ -647,7 +777,9 @@ async function atomicWrite(
     // like ~/.config that other tools share.
     if (created !== undefined && opts.platform !== 'win32') await chmod(dir, DIR_MODE);
 
-    const handle = await open(temp, 'w', FILE_MODE);
+    // Exclusive: never follow or reuse whatever already sits at the temp name —
+    // a planted symlink there would otherwise receive the tokens.
+    const handle = await open(temp, 'wx', FILE_MODE);
     try {
       await handle.writeFile(contents, 'utf8');
       await handle.sync();
@@ -657,7 +789,7 @@ async function atomicWrite(
   } catch (err) {
     opts.logger.warn('env file write failed, keeping state in memory only', {
       path,
-      code: errnoOf(err) ?? 'unknown',
+      code: errnoFor(err),
     });
     await rm(temp, { force: true }).catch(() => undefined);
     return false;
@@ -665,17 +797,17 @@ async function atomicWrite(
 
   for (let attempt = 0; ; attempt += 1) {
     try {
-      await doRename(temp, path);
+      await doRename(temp, target);
       // Unconditional per CC-H3: a no-op on win32, the real guarantee on POSIX.
-      await chmod(path, FILE_MODE).catch((err: unknown) => {
+      await chmod(target, FILE_MODE).catch((err: unknown) => {
         opts.logger.warn('could not set env file mode', {
           path,
-          code: errnoOf(err) ?? 'unknown',
+          code: errnoFor(err),
         });
       });
       return true;
     } catch (err) {
-      const code = errnoOf(err) ?? 'unknown';
+      const code = errnoFor(err);
       const delay = RENAME_RETRY_DELAYS_MS[attempt];
       if (delay === undefined || !RENAME_RETRY_CODES.has(code)) {
         opts.logger.warn('env file rename failed, keeping state in memory only', {
@@ -727,10 +859,9 @@ export async function persistProfilePatch(
   try {
     snapshot = await readEnvFile(path);
   } catch (err) {
-    const cause = err instanceof Error ? err.cause : undefined;
     logger.warn('env file could not be read, keeping state in memory only', {
       path,
-      code: errnoOf(cause) ?? errnoOf(err) ?? 'unknown',
+      code: errnoFor(err),
     });
     return { persisted: false };
   }
@@ -768,13 +899,30 @@ export async function persistProfilePatch(
   ) {
     const backup = `${path}.pre-schema${String(snapshot.declaredSchema)}`;
     try {
-      await copyFile(path, backup, /* COPYFILE_EXCL */ 1);
+      // Created owner-only by the `open` itself, never copied and then
+      // tightened: `copyFile` makes the copy at the umask's mode, and for the
+      // moment before a `chmod` a file of tokens would be readable by other
+      // accounts. `'wx'` keeps COPYFILE_EXCL's promise — an existing copy is
+      // never overwritten (EEXIST below). The source is read first, so a read
+      // failure cannot leave an empty backup behind that EEXIST would later
+      // mistake for a kept copy.
+      const bytes = await readFile(path);
+      const handle = await open(backup, 'wx', FILE_MODE);
+      try {
+        await handle.writeFile(bytes);
+      } finally {
+        await handle.close();
+      }
+      // The umask can only have narrowed 0600; this pins it to exactly 0600.
       if (platform !== 'win32') await chmod(backup, FILE_MODE);
     } catch (err) {
-      if (errnoOf(err) !== 'EEXIST') {
+      // EEXIST means the copy is already there from an earlier attempt, which is
+      // the outcome this wanted; anything else is worth a word to the operator.
+      const code = errnoFor(err);
+      if (code !== 'EEXIST') {
         logger.warn('could not keep a pre-upgrade copy of the env file', {
           path: backup,
-          code: errnoOf(err) ?? 'unknown',
+          code,
         });
       }
     }

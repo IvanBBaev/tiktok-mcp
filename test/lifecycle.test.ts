@@ -275,6 +275,37 @@ test('cc-f4: a profile that cannot be read is scopeless, not fatal for the rest'
   }
 });
 
+test('readCredentialProfiles marks a profile authorized only when it holds a token', async () => {
+  const box = await fsSandbox();
+  try {
+    const envFile = path.join(box.dir, '.env');
+    // DEFAULT: an access token only. REFRESHONLY: a refresh token only.
+    // SCOPED: scopes recorded but no token at all — listed, never logged in.
+    // BROKEN: a token, but an expiry `readProfile` rejects (CC-H2).
+    await writeFile(
+      envFile,
+      `${envFileText('video.list')}` +
+        'TT_PROFILE_REFRESHONLY_REFRESH_TOKEN=rft.only\n' +
+        'TT_PROFILE_SCOPED_SCOPES=video.publish\n' +
+        'TT_PROFILE_BROKEN_ACCESS_TOKEN=act.broken\n' +
+        'TT_PROFILE_BROKEN_TOKEN_EXPIRES_AT=yesterday\n',
+      'utf8',
+    );
+    const profiles = await readCredentialProfiles({ envFilePath: envFile, env: {} });
+    assert.deepEqual(
+      profiles.map((entry) => [entry.name, entry.authorized, [...entry.scopes]]),
+      [
+        ['BROKEN', false, []],
+        ['DEFAULT', true, ['video.list']],
+        ['REFRESHONLY', true, []],
+        ['SCOPED', false, ['video.publish']],
+      ],
+    );
+  } finally {
+    await box.cleanup();
+  }
+});
+
 test('an env file that does not exist is a store with no scopes', async () => {
   const box = await fsSandbox();
   try {
@@ -619,7 +650,7 @@ test('cc-a7: a failing onChange is logged, and the next change still notifies', 
     profiles: () => Promise.resolve([profile('DEFAULT', ...scopes)]),
     onChange: () => {
       calls += 1;
-      // What `sendToolListChanged()` does on a transport that just went away.
+      // What `notifyListChanged()` does on a transport that just went away.
       return Promise.reject(new Error('Not connected'));
     },
   });
@@ -698,4 +729,43 @@ test('a custom interval is honoured exactly', async () => {
 
   await watch.stop();
   assert.equal(clock.pending(), 0);
+});
+
+test('stop() waits for a manual poll already in flight, and a poll after stop is a no-op', async () => {
+  const clock = mockClock();
+  const gate = deferred<readonly ProfileInfo[]>();
+  let reads = 0;
+  const changes: unknown[] = [];
+  const watch = startCredentialWatch({
+    envFilePath: '/nonexistent/.env',
+    clock,
+    baseline: [],
+    profiles: () => {
+      reads += 1;
+      return gate.promise;
+    },
+    onChange: (change) => {
+      changes.push(change);
+    },
+  });
+
+  const polling = watch.poll();
+  let stopped = false;
+  const stopping = watch.stop().then(() => {
+    stopped = true;
+  });
+  await flush();
+  // The read is still out, so stop() cannot have returned yet.
+  assert.equal(stopped, false);
+
+  gate.resolve([{ name: 'DEFAULT', scopes: ['video.list'], authorized: true }]);
+  await stopping;
+  // The poll that was already running finished its work, notification included.
+  assert.equal(await polling, true);
+  assert.equal(changes.length, 1);
+
+  // After stop nothing reads the store and nothing notifies.
+  assert.equal(await watch.poll(), false);
+  assert.equal(reads, 1);
+  assert.equal(changes.length, 1);
 });

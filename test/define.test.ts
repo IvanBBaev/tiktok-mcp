@@ -148,6 +148,46 @@ test('defineTool rejects duplicate or empty scopes', () => {
   );
 });
 
+test('defineTool rejects a scopesAnyOf that is not a real alternation', () => {
+  assert.match(
+    specError((spec) => {
+      spec.scopesAnyOf = ['video.publish'];
+    }).message,
+    /at least two alternatives/,
+  );
+  assert.match(
+    specError((spec) => {
+      spec.scopesAnyOf = ['video.publish', 'video.publish'];
+    }).message,
+    /scopesAnyOf contains duplicates/,
+  );
+  assert.match(
+    specError((spec) => {
+      spec.scopesAnyOf = ['video.publish', ' '];
+    }).message,
+    /scopesAnyOf contains an empty entry/,
+  );
+});
+
+test('defineTool rejects a scopesAnyOf that overlaps scopes, making it vacuous', () => {
+  assert.match(
+    specError((spec) => {
+      spec.scopes = ['video.publish'];
+      spec.scopesAnyOf = ['video.publish', 'video.upload'];
+    }).message,
+    /vacuous/,
+  );
+});
+
+test('defineTool accepts and freezes a two-member alternation', () => {
+  const spec = defineTool({
+    ...validSpec(),
+    scopesAnyOf: ['video.publish', 'video.upload'],
+  });
+  assert.deepEqual(spec.scopesAnyOf, ['video.publish', 'video.upload']);
+  assert.ok(Object.isFrozen(spec.scopesAnyOf));
+});
+
 test('cc-g1: defineTool rejects an input schema that accepts unknown keys', () => {
   const err = specError((spec) => {
     (spec as { input: z.ZodTypeAny }).input = z.object({

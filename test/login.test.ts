@@ -2,10 +2,11 @@
  * `cli/login.ts` — the OAuth 2.0 login, revoke and their corner cases.
  *
  * Everything the flow touches is a seam: the loopback listener, the browser,
- * the prompt, `fetch`, the clock and both output streams. The only exception is
- * one test that binds the *real* `nodeListen()` on `127.0.0.1:0` and talks to
- * it over loopback — that is the only way to prove the default listener serves
- * the registered redirect shape, and it opens no socket to anything but itself.
+ * the prompt, `fetch`, the clock and both output streams. The exceptions are
+ * the two tests that bind the *real* `nodeListen()` on `127.0.0.1:0` and talk
+ * to it over loopback — one proving the default listener serves the registered
+ * redirect shape, one proving `runLogin` reaches that default when the seam is
+ * left out — and they open no socket to anything but themselves.
  *
  * Corner cases covered: CC-A8 (redirect shape and port pinning), CC-A9 (exactly
  * one accepted authorization response), CC-A10 (manual paste), CC-A11
@@ -14,6 +15,7 @@
 
 import assert from 'node:assert/strict';
 import { readFile, stat, writeFile } from 'node:fs/promises';
+import { get as httpGet } from 'node:http';
 import path from 'node:path';
 import { test } from 'node:test';
 
@@ -27,17 +29,21 @@ import {
 } from '../src/cli/index.js';
 import {
   browserCommand,
+  callbackRequest,
   constantTimeEquals,
   createCallbackSink,
   decodeOnce,
+  defaultOpenBrowser,
   journalPaths,
   loginUsage,
   nodeListen,
+  openBrowserOf,
   parseCallbackQuery,
   parseLoginArgs,
   parsePastedRedirect,
   resolveScopes,
   runLogin,
+  spawnDetached,
 } from '../src/cli/login.js';
 import type { Logger } from '../src/core/log.js';
 import { resetTokenCache } from '../src/core/oauth.js';
@@ -209,6 +215,24 @@ function fakeListen(port = 45_678): {
   };
 }
 
+/**
+ * One GET over loopback, made with `node:http` rather than `fetch`.
+ *
+ * The tests that need it run inside `withFetch`, where the global `fetch` is a
+ * scripted stub that would answer the callback with a token response.
+ */
+async function loopbackGet(url: string): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const req = httpGet(url, (res) => {
+      res.resume();
+      res.once('end', () => {
+        resolve(res.statusCode ?? 0);
+      });
+    });
+    req.once('error', reject);
+  });
+}
+
 function tokenResponse(over: Record<string, unknown> = {}): Response {
   return new Response(
     JSON.stringify({
@@ -279,14 +303,15 @@ async function loginWithCallback(
 // ---------------------------------------------------------------------------
 
 test('the flags parse in both --flag value and --flag=value form', () => {
+  // The profile is stored normalized, the same spelling every env key uses.
   const spaced = parseLoginArgs(['--profile', 'work', '--scopes', 'a,b']);
   assert.ok(spaced.ok);
-  assert.equal(spaced.flags.profile, 'work');
+  assert.equal(spaced.flags.profile, 'WORK');
   assert.deepEqual(spaced.flags.scopes, ['a', 'b']);
 
   const inline = parseLoginArgs(['--profile=work', '--scopes=a,b']);
   assert.ok(inline.ok);
-  assert.equal(inline.flags.profile, 'work');
+  assert.equal(inline.flags.profile, 'WORK');
   assert.deepEqual(inline.flags.scopes, ['a', 'b']);
 });
 
@@ -325,6 +350,66 @@ test('a value flag without a value, and a boolean flag with one, both fail', () 
   const extra = parseLoginArgs(['--force=yes']);
   assert.equal(extra.ok, false);
   assert.match(extra.ok ? '' : extra.message, /--force does not take a value/);
+});
+
+test('a separated value that looks like a flag is a missing value, not a value', () => {
+  // `--profile --force` is a forgotten profile name, not a profile named
+  // "--force" — and not a login that silently turned --force into a name.
+  const profile = parseLoginArgs(['--profile', '--force', '--manual']);
+  assert.equal(profile.ok, false);
+  assert.equal(profile.ok ? '' : profile.message, '--profile needs a value.');
+
+  const scopes = parseLoginArgs(['--scopes', '--manual']);
+  assert.equal(scopes.ok, false);
+  assert.equal(scopes.ok ? '' : scopes.message, '--scopes needs a value.');
+
+  // The inline form states its value outright, so it is not second-guessed: a
+  // scope list that starts with a dash is taken as written.
+  const inline = parseLoginArgs(['--scopes=-a,b']);
+  assert.ok(inline.ok);
+  assert.deepEqual(inline.flags.scopes, ['-a', 'b']);
+});
+
+test('an invalid --profile is a usage error at parse time', () => {
+  const spaced = parseLoginArgs(['--profile', 'my-work']);
+  assert.equal(spaced.ok, false);
+  assert.match(spaced.ok ? '' : spaced.message, /invalid profile name "my-work"/);
+  // The remediation travels with the message.
+  assert.match(spaced.ok ? '' : spaced.message, /letters, digits and underscores/);
+
+  const inline = parseLoginArgs(['--profile=a b']);
+  assert.equal(inline.ok, false);
+  assert.match(inline.ok ? '' : inline.message, /invalid profile name "a b"/);
+});
+
+test('runLogin exits with a usage error for an invalid --profile and touches nothing', async () => {
+  const f = await fixture();
+  try {
+    const stub = scriptFetch([]);
+    const h = harness(f, { argv: ['--profile', 'my-work'] });
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_USAGE);
+    assert.match(h.err(), /invalid profile name "my-work"/);
+    assert.match(h.err(), /Usage: tiktok-mcp-ai login/);
+    assert.equal(h.out(), '');
+    assert.deepEqual(h.opened, []);
+    assert.equal(stub.calls.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('-h is the short form of --help', () => {
+  const parsed = parseLoginArgs(['-h']);
+  assert.ok(parsed.ok);
+  assert.equal(parsed.flags.help, true);
+});
+
+test('a --scopes value that names no scope at all is rejected', () => {
+  // The value is not empty, so the "needs a value" guard lets it through; what
+  // survives the split is the empty set, and authorizing nothing is not a login.
+  const parsed = parseLoginArgs(['--scopes', ', ,']);
+  assert.equal(parsed.ok, false);
+  assert.match(parsed.ok ? '' : parsed.message, /--scopes needs at least one scope/);
 });
 
 test('--purge-journal without --revoke is rejected', async () => {
@@ -490,6 +575,27 @@ test('cc-a8: a busy pinned port names TT_REDIRECT_PORT and offers manual paste',
   }
 });
 
+test('cc-a8: a bind rejection that is not an Error still names what happened', async () => {
+  const f = await fixture();
+  try {
+    const stub = scriptFetch([]);
+    // A rejection is not obliged to be an `Error` — a listener seam may reject
+    // with a bare errno — and the diagnostic must still carry the reason rather
+    // than "[object Object]" or nothing at all.
+    const h = harness(f, {
+      env: appEnv(f, { TT_REDIRECT_PORT: '8123' }),
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the value under test
+      listen: () => Promise.reject('EACCES'),
+    });
+
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_FAILURE);
+    assert.match(h.err(), /EACCES/);
+    assert.equal(h.out(), '');
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('cc-a8: with no pin a bind failure degrades to manual paste', async () => {
   const f = await fixture();
   try {
@@ -574,6 +680,32 @@ test('cc-a8: the default listener binds an ephemeral loopback port and serves th
   }
 });
 
+test('cc-a8: a request line the transport cannot omit still converts to one', () => {
+  // `node:http` types `method` and `url` optional on `IncomingMessage`, so the
+  // conversion into the handler's two-string contract has to be total. What it
+  // must never do is invent a redirect out of nothing: an absent request line
+  // reads as `GET /`, which the sink answers with the not-found page and does
+  // not count against the single accept (CC-A9).
+  assert.deepEqual(callbackRequest('GET', '/callback/?code=c'), {
+    method: 'GET',
+    url: '/callback/?code=c',
+  });
+  assert.deepEqual(callbackRequest(undefined, '/callback/'), {
+    method: 'GET',
+    url: '/callback/',
+  });
+  assert.deepEqual(callbackRequest('POST', undefined), { method: 'POST', url: '/' });
+  assert.deepEqual(callbackRequest(undefined, undefined), { method: 'GET', url: '/' });
+
+  const sink = createCallbackSink();
+  sink.arm('the-state');
+  assert.equal(sink.handler(callbackRequest(undefined, undefined)).status, 404);
+  assert.equal(
+    sink.handler({ method: 'GET', url: '/callback/?code=c&state=the-state' }).status,
+    200,
+  );
+});
+
 test('cc-a9: a second callback hit is not exchanged', async () => {
   const sink = createCallbackSink();
   sink.arm('the-state');
@@ -640,6 +772,21 @@ test('the callback server answers only GET, and only on the callback path', () =
   );
 });
 
+test('a request target that is not a URL is answered, not thrown on', () => {
+  const sink = createCallbackSink();
+  sink.arm('the-state');
+
+  // The handler is called straight from the server's request callback, so a
+  // target `new URL` refuses has to become a page rather than an exception
+  // that would take the listener down mid-login.
+  assert.equal(sink.handler({ method: 'GET', url: 'http://[' }).status, 404);
+  // And the single accepted response is still unspent.
+  assert.equal(
+    sink.handler({ method: 'GET', url: '/callback/?code=c&state=the-state' }).status,
+    200,
+  );
+});
+
 test('the callback pages never echo what upstream sent', () => {
   const sink = createCallbackSink();
   sink.arm('the-state');
@@ -660,6 +807,18 @@ test('an upstream error in the redirect is reported with a sanitized code', () =
   assert.equal(denied.ok, false);
   assert.match(denied.ok ? '' : denied.message, /access_denied/);
   assert.equal(denied.ok ? '' : denied.message.includes('<b>'), false);
+});
+
+test('an upstream error code that sanitizes to nothing is named unspecified', () => {
+  const denied = parseCallbackQuery(
+    new URLSearchParams('error=<<>>&state=the-state'),
+    'the-state',
+    true,
+  );
+  assert.equal(denied.ok, false);
+  // Every character was stripped; the message still has to name a cause rather
+  // than trail off into an empty pair of parentheses.
+  assert.match(denied.ok ? '' : denied.message, /unspecified/);
 });
 
 test('a callback without a state or without a code is refused', () => {
@@ -724,6 +883,16 @@ test('cc-a10: a bare code is percent-decoded exactly once', () => {
   assert.equal(decodeOnce('%zz'), '%zz');
 });
 
+test('cc-a10: a paste that only looks percent-encoded is left alone', () => {
+  // `%E0%A4` matches the "still encoded" test but is an incomplete UTF-8
+  // sequence, so decoding it throws. The paste is the user's, not ours to lose.
+  assert.equal(decodeOnce('%E0%A4'), '%E0%A4');
+  assert.deepEqual(parsePastedRedirect('abc%E0%A4', 'the-state'), {
+    ok: true,
+    code: 'abc%E0%A4',
+  });
+});
+
 test('cc-a10: neither a URL nor a bare code is refused with both shapes named', () => {
   const junk = parsePastedRedirect('code=abc&state=s', 'the-state');
   assert.equal(junk.ok, false);
@@ -755,6 +924,29 @@ test('cc-a10: a paste the user gets wrong ends the login with exit code 1', asyn
   }
 });
 
+test('cc-a10: --manual whose input ends before a paste fails and changes nothing', async () => {
+  const f = await fixture();
+  try {
+    await writeAuthorizedEnvFile(f);
+    const before = await readFile(f.envFile, 'utf8');
+    const stub = scriptFetch([]);
+    const h = harness(f, {
+      argv: ['--manual', '--force'],
+      prompt: () =>
+        Promise.reject(new Error('The input ended before an answer was given.')),
+    });
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_FAILURE);
+    assert.match(
+      h.err(),
+      /No redirect URL was pasted \(the input ended\); nothing was changed\./,
+    );
+    assert.equal(stub.calls.length, 0, 'nothing may be exchanged without a paste');
+    assert.equal(await readFile(f.envFile, 'utf8'), before);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // overwrite confirmation (CC-A11)
 // ---------------------------------------------------------------------------
@@ -766,13 +958,42 @@ test('cc-a11: existing credentials without a TTY need --force', async () => {
     const stub = scriptFetch([]);
     const h = harness(f, { isTTY: false });
 
-    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_FAILURE);
+    // Nobody can be asked, so the invocation itself is incomplete: a usage error.
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_USAGE);
     assert.match(h.err(), /--force/);
     // The account being replaced is named, so the user can tell it is not theirs.
     assert.match(h.err(), /open_id open-id-old/);
     assert.match(h.err(), /user\.info\.basic/);
     assert.equal(stub.calls.length, 0);
     assert.equal(h.out(), '');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cc-a11: a profile with nothing but a token is named by what it has', async () => {
+  const f = await fixture();
+  try {
+    // What a hand-edited env file — or one written before the open_id and scope
+    // keys existed — looks like: enough to be worth protecting, nothing to name.
+    await writeFile(
+      f.envFile,
+      [
+        'TT_CLIENT_KEY=test-client-key',
+        'TT_CLIENT_SECRET=test-client-secret',
+        'TT_ACCESS_TOKEN=act.old',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const stub = scriptFetch([]);
+    const h = harness(f, { isTTY: false });
+
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_USAGE);
+    assert.match(h.err(), /an account with no open_id on file/);
+    // Nothing is invented: no scope list is appended when none is on file.
+    assert.equal(h.err().includes('scopes '), false);
+    assert.equal(stub.calls.length, 0);
   } finally {
     await f.cleanup();
   }
@@ -1050,6 +1271,45 @@ test('--profile authorizes a named profile and leaves DEFAULT alone', async () =
   }
 });
 
+test('TT_LOCK_PROFILE is the default profile a login authorizes', async () => {
+  const f = await fixture();
+  try {
+    await writeAuthorizedEnvFile(f);
+    const stub = scriptFetch([tokenResponse(), ttEnvelope({ user: {} })]);
+    // The lock outranks TT_ACTIVE_PROFILE, as it does for doctor and the server.
+    const { code, h } = await loginWithCallback(f, stub, {
+      env: appEnv(f, { TT_LOCK_PROFILE: 'work', TT_ACTIVE_PROFILE: 'other' }),
+    });
+    assert.equal(code, EXIT_OK);
+    assert.match(h.out(), /Authorized profile WORK/);
+
+    const written = await readFile(f.envFile, 'utf8');
+    assert.match(written, /TT_PROFILE_WORK_ACCESS_TOKEN=act\.new/);
+    assert.equal(written.includes('TT_PROFILE_OTHER_'), false);
+    assert.match(written, /^TT_ACCESS_TOKEN=act\.old$/m);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('--profile still outranks TT_LOCK_PROFILE', async () => {
+  const f = await fixture();
+  try {
+    const stub = scriptFetch([tokenResponse(), ttEnvelope({ user: {} })]);
+    const { code, h } = await loginWithCallback(f, stub, {
+      argv: ['--profile', 'team'],
+      env: appEnv(f, { TT_LOCK_PROFILE: 'work' }),
+    });
+    assert.equal(code, EXIT_OK);
+    assert.match(h.out(), /Authorized profile TEAM/);
+    const written = await readFile(f.envFile, 'utf8');
+    assert.match(written, /TT_PROFILE_TEAM_ACCESS_TOKEN=act\.new/);
+    assert.equal(written.includes('TT_PROFILE_WORK_'), false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('a missing client key fails before any browser is opened', async () => {
   const f = await fixture();
   try {
@@ -1059,6 +1319,169 @@ test('a missing client key fails before any browser is opened', async () => {
     assert.deepEqual(h.opened, []);
     assert.equal(stub.calls.length, 0);
     assert.equal(h.out(), '');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a login given only the two stream seams still completes', async () => {
+  const f = await fixture();
+  const saved = new Map<string, string | undefined>();
+  const set = (key: string, value: string): void => {
+    saved.set(key, process.env[key]);
+    process.env[key] = value;
+  };
+  try {
+    // Everything a test cannot leave real — `fetch`, the browser, the streams —
+    // is injected; argv, env, the clock, the logger, the entropy and the
+    // loopback listener are the production defaults. Nothing else proves the
+    // defaults are wired to what the seams claim to stand in for.
+    set('TT_ENV_FILE', f.envFile);
+    set('TT_CLIENT_KEY', 'test-client-key');
+    set('TT_CLIENT_SECRET', 'test-client-secret');
+    set('TT_LOG_LEVEL', 'error');
+
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const deps: CliDeps = {
+      isTTY: false,
+      stdout: (chunk) => stdout.push(chunk),
+      stderr: (chunk) => stderr.push(chunk),
+      openBrowser: async (url) => {
+        const params = new URL(url).searchParams;
+        // The real listener chose an ephemeral port; the redirect_uri it
+        // published is the only place that port is written down.
+        const redirect = params.get('redirect_uri') ?? '';
+        const state = params.get('state') ?? '';
+        const status = await loopbackGet(
+          `${redirect}?code=the-code&state=${encodeURIComponent(state)}`,
+        );
+        assert.equal(status, 200);
+      },
+    };
+    const stub = scriptFetch([tokenResponse(), ttEnvelope({ user: {} })]);
+
+    assert.equal(
+      await withFetch(stub, async () => await runLogin(deps)),
+      EXIT_OK,
+      stderr.join(''),
+    );
+    assert.match(stdout.join(''), /Authorized profile DEFAULT/);
+    assert.match(await readFile(f.envFile, 'utf8'), /^TT_ACCESS_TOKEN=act\.new$/m);
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await f.cleanup();
+  }
+});
+
+test('a stored profile that will not parse fails the login rather than starting over', async () => {
+  const f = await fixture();
+  try {
+    await writeFile(
+      f.envFile,
+      [
+        'TT_CLIENT_KEY=test-client-key',
+        'TT_CLIENT_SECRET=test-client-secret',
+        'TT_PROFILE_WORK_ACCESS_TOKEN=act.work',
+        'TT_PROFILE_WORK_TOKEN_EXPIRES_AT=whenever',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const stub = scriptFetch([]);
+    const h = harness(f, { argv: ['--profile', 'work'] });
+
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_FAILURE);
+    // "This profile does not exist yet" is the one refusal a first login may
+    // swallow; a profile that does exist and is malformed has to be reported,
+    // because overwriting it would destroy whatever the operator meant to keep.
+    assert.match(h.err(), /TT_PROFILE_WORK_TOKEN_EXPIRES_AT/);
+    assert.deepEqual(h.opened, []);
+    assert.equal(stub.calls.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('tokens that cannot be written down are a failure, not a login', async () => {
+  const f = await fixture();
+  try {
+    const stub = scriptFetch([tokenResponse({ scope: 'video.publish' })]);
+    const { code, h } = await loginWithCallback(f, stub, {
+      rename: () => Promise.reject(new Error('EROFS: read-only file system')),
+    });
+
+    assert.equal(code, EXIT_FAILURE);
+    // The grant happened upstream but not here. Printing a summary would send
+    // the operator to a profile that holds nothing.
+    assert.equal(h.out(), '');
+    assert.match(h.err(), /could not be written/);
+    assert.match(h.err(), /then run login again/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a failure that is not a TikTokError is still reported by its message', async () => {
+  const f = await fixture();
+  try {
+    await writeAuthorizedEnvFile(f);
+    const stub = scriptFetch([]);
+    const h = harness(f, {
+      isTTY: true,
+      prompt: () => Promise.reject(new Error('the terminal went away')),
+    });
+
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_FAILURE);
+    // Neither swallowed into a bare exit code nor left to escape as an
+    // unhandled rejection: the top-level catch names what went wrong.
+    assert.match(h.err(), /the terminal went away/);
+    assert.equal(h.out(), '');
+    assert.equal(stub.calls.length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a failure that is not even an Error is reported by its string form', async () => {
+  const f = await fixture();
+  try {
+    await writeAuthorizedEnvFile(f);
+    const stub = scriptFetch([]);
+    const h = harness(f, {
+      isTTY: true,
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the value under test
+      prompt: () => Promise.reject('EIO on the tty'),
+    });
+
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_FAILURE);
+    // The last resort of the reporter: whatever was thrown, the operator gets a
+    // line naming it instead of a bare exit code.
+    assert.match(h.err(), /EIO on the tty/);
+    assert.equal(h.out(), '');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a grant that enables no tool package prints no package matrix', async () => {
+  const f = await fixture();
+  try {
+    const stub = scriptFetch([tokenResponse(), ttEnvelope({ user: {} })]);
+    const { code, h } = await loginWithCallback(f, stub, {
+      // Read-only mode strikes the only package that was selected, so the grant
+      // enables nothing — and an empty matrix must not print as a heading with
+      // no rows under it.
+      env: appEnv(f, { TT_TOOL_PACKAGES: 'publish-write', TT_PACKAGES_READONLY: '1' }),
+      argv: ['--scopes', 'user.info.basic'],
+    });
+
+    assert.equal(code, EXIT_OK);
+    assert.match(h.out(), /Authorized profile DEFAULT/);
+    assert.equal(h.out().includes('tool packages:'), false);
   } finally {
     await f.cleanup();
   }
@@ -1102,7 +1525,7 @@ test('--revoke --purge-journal deletes the journal and its rotation', async () =
   const f = await fixture();
   try {
     await writeAuthorizedEnvFile(f);
-    const [current, rotated] = journalPaths(f.envFile) as [string, string];
+    const [current, rotated] = journalPaths(f.envFile);
     await writeFile(current, '{}\n', 'utf8');
     await writeFile(rotated, '{}\n', 'utf8');
 
@@ -1141,6 +1564,99 @@ test('--revoke --purge-journal says so when there was no journal', async () => {
   }
 });
 
+/** A rename seam that fails every atomic write, as a full or read-only disk would. */
+const failingRename = (): Promise<void> =>
+  Promise.reject(Object.assign(new Error('no space left'), { code: 'ENOSPC' }));
+
+test('--revoke whose local clear fails says so and exits 1', async () => {
+  const f = await fixture();
+  try {
+    await writeAuthorizedEnvFile(f);
+    const journal = path.join(f.dir, 'journal.ndjson');
+    await writeFile(journal, '{"kind":"publish"}\n', 'utf8');
+    const stub = scriptFetch([
+      new Response('{}', {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    ]);
+    const h = harness(f, {
+      argv: ['--revoke', '--purge-journal'],
+      rename: failingRename,
+    });
+
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_FAILURE);
+    // Both halves are reported as they happened: dead upstream, still on disk.
+    assert.equal(h.out(), '', 'no success line over a file that still holds the token');
+    assert.match(h.err(), /TikTok revoked the access token of profile DEFAULT/);
+    assert.match(h.err(), /credentials were NOT cleared from /);
+    assert.ok(h.err().includes(f.envFile), 'the message names the file');
+    assert.match(h.err(), /run "tiktok-mcp-ai login --revoke" again/);
+    assert.match(h.err(), /TT_ACCESS_TOKEN and its siblings/);
+    // A half-done revoke purges nothing, so rerunning the same command finishes it.
+    assert.match(h.err(), /The publish journal was not purged/);
+    assert.equal((await stat(journal)).isFile(), true);
+    assert.match(await readFile(f.envFile, 'utf8'), /act\.old/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('--revoke that tiktok refuses and cannot clear locally says neither happened', async () => {
+  const f = await fixture();
+  try {
+    await writeFile(
+      f.envFile,
+      [
+        'TT_CLIENT_KEY=test-client-key',
+        'TT_CLIENT_SECRET=test-client-secret',
+        'TT_PROFILE_WORK_ACCESS_TOKEN=act.work',
+        'TT_PROFILE_WORK_REFRESH_TOKEN=rft.work',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const stub = scriptFetch([
+      new Response('{"error":"invalid_request","error_description":"nope"}', {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+    ]);
+    const h = harness(f, {
+      argv: ['--revoke', '--profile', 'work'],
+      rename: failingRename,
+    });
+
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_FAILURE);
+    assert.match(h.err(), /TikTok did not confirm the revocation of profile WORK/);
+    assert.match(h.err(), /run "tiktok-mcp-ai login --revoke --profile WORK" again/);
+    assert.match(h.err(), /TT_PROFILE_WORK_ACCESS_TOKEN and its siblings/);
+    assert.equal(h.err().includes('journal'), false, 'no purge was asked for');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('--revoke with no access token and a failed clear says there was nothing to revoke', async () => {
+  const f = await fixture();
+  try {
+    await writeFile(
+      f.envFile,
+      'TT_CLIENT_KEY=test-client-key\nTT_CLIENT_SECRET=test-client-secret\nTT_REFRESH_TOKEN=rft.old\n',
+      'utf8',
+    );
+    const stub = scriptFetch([]);
+    const h = harness(f, { argv: ['--revoke'], rename: failingRename });
+
+    assert.equal(await withFetch(stub, async () => await runLogin(h.deps)), EXIT_FAILURE);
+    assert.equal(stub.calls.length, 0);
+    assert.match(h.err(), /Profile DEFAULT had no access token to revoke upstream/);
+    assert.match(h.err(), /NOT cleared/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('the journal is a sibling of the env file', () => {
   assert.deepEqual(journalPaths('/tmp/box/.env'), [
     path.join('/tmp/box', 'journal.ndjson'),
@@ -1158,13 +1674,25 @@ test('the browser command is the platform opener', () => {
     args: ['https://x/'],
   });
   assert.deepEqual(browserCommand('https://x/', 'win32'), {
-    command: 'cmd',
-    args: ['/c', 'start', '', 'https://x/'],
+    command: 'rundll32',
+    args: ['url.dll,FileProtocolHandler', 'https://x/'],
   });
   assert.deepEqual(browserCommand('https://x/', 'linux'), {
     command: 'xdg-open',
     args: ['https://x/'],
   });
+});
+
+test('the win32 opener passes a multi-parameter URL as one untouched argument', () => {
+  // `cmd /c start` re-parses its command line, so an unquoted `&` split the
+  // authorize URL and ran the tail as a second command. `rundll32` receives the
+  // URL as a single argv entry, with every `&` intact.
+  const url = 'https://x/?a=1&b=2';
+  const { command, args } = browserCommand(url, 'win32');
+  assert.equal(command, 'rundll32');
+  assert.deepEqual(args, ['url.dll,FileProtocolHandler', url]);
+  assert.equal(args.at(-1), url);
+  assert.equal(args.filter((arg) => arg.includes('b=2')).length, 1);
 });
 
 test('a browser that cannot be opened is not fatal', async () => {
@@ -1185,4 +1713,30 @@ test('a browser that cannot be opened is not fatal', async () => {
   } finally {
     await f.cleanup();
   }
+});
+
+// ---------------------------------------------------------------------------
+// the seam defaults' testable halves
+// ---------------------------------------------------------------------------
+
+test('a detached opener resolves as soon as the command is running', async () => {
+  // The browser seam's default without a browser: a spawn nobody waits for. The
+  // command is this very Node binary evaluating nothing, so the test opens no
+  // window and leaves nothing behind.
+  await spawnDetached({ command: process.execPath, args: ['-e', ''] });
+});
+
+test('a detached opener rejects when there is nothing to start', async () => {
+  // The rejection is what `authorize` degrades on: no browser, print the URL.
+  await assert.rejects(
+    spawnDetached({ command: 'tiktok-mcp-no-such-opener', args: ['https://x/'] }),
+    (err: unknown) => err instanceof Error && /ENOENT/.test(err.message),
+  );
+});
+
+test('the opener in force is the injected one, and the process default otherwise', () => {
+  // Same shape as the prompt: asserting the identity opens no browser window.
+  const injected = (): Promise<void> => Promise.resolve();
+  assert.equal(openBrowserOf({ openBrowser: injected }), injected);
+  assert.equal(openBrowserOf({}), defaultOpenBrowser);
 });

@@ -5,7 +5,9 @@ name: Publish to MCP Registry
 # can verify the published tarball's mcpName), and can be re-run on demand via
 # workflow_dispatch without re-publishing to npm. server.json carries the version;
 # `npm run release:guard` in the "Publish" workflow is what guarantees it equals
-# the tag that was published, so this job can register it without re-checking.
+# the tag that was published, so a workflow_run can register it without
+# re-checking. A dispatch has no Publish run behind it, so it must name a `v*`
+# tag and runs the same guard itself before registering anything.
 on:
   workflow_run:
     workflows: ['Publish']
@@ -19,19 +21,59 @@ permissions:
 jobs:
   publish-mcp:
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    # A workflow_run event is matched by workflow *name*, and this job can
+    # register under the repository's OIDC identity, so the name is not trusted
+    # alone — the same four conditions as publish-vscode.yml: the run succeeded,
+    # came from publish.yml itself, was started by a push (Publish runs on tags
+    # only) and is this repository's own. A dispatch must run on a version tag.
+    if: >-
+      ${{ (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v')) || (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.path == '.github/workflows/publish.yml' &&
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_repository.full_name == github.repository) }}
     steps:
       # A workflow_run checkout defaults to the default branch's HEAD, not the
       # commit that triggered it — without this the registry would be handed
       # whatever server.json main happens to carry, which after a release bump
       # is the *next* version. Empty on workflow_dispatch, where the dispatched
-      # ref is already the right one.
+      # ref is already the right one. Nothing here pushes, so the token is not
+      # left in .git/config while a dispatch's `npm ci` runs lifecycle scripts.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      # A dispatch skipped Publish's gates, so the tag, every version field and
+      # the changelog are checked here, as publish.yml does, before server.json
+      # is registered. A workflow_run already passed them on this commit.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        with:
+          node-version: 22
+          cache: npm
+      - if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: npm ci
+      - if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: npm run build
+      - name: Release identity gate (tag ⇄ versions ⇄ CHANGELOG)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        run: npm run release:guard
+      # Pinned to a release and verified against its published sha256 (the
+      # release's registry_<version>_checksums.txt), like every action here is
+      # pinned to a commit: this job holds an OIDC token that can register
+      # under the repository's identity. ubuntu-latest is linux/amd64. To bump,
+      # take the new tag's line for mcp-publisher_linux_amd64.tar.gz from that
+      # checksums file.
       - name: Install mcp-publisher
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
         run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          archive="$RUNNER_TEMP/mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSL -o "$archive" \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  ${archive}" | sha256sum --check --strict -
+          tar xzf "$archive" mcp-publisher
       - name: Publish to the MCP Registry (GitHub OIDC)
         run: |
           ./mcp-publisher login github-oidc

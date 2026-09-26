@@ -163,6 +163,21 @@ export interface RefreshDeps extends CallSeams {
   rename?: (from: string, to: string) => Promise<void>;
 }
 
+/**
+ * What `revokeToken` did, so the CLI reports it truthfully (AUTH.md § 4).
+ *
+ * `upstream` is `'none'` when there was no access token to send, `'revoked'`
+ * when TikTok acknowledged the call and `'unconfirmed'` when it failed or was
+ * refused. `cleared` is false when the env file could not be rewritten — the
+ * token keys are then still on disk at `envFilePath`.
+ */
+export interface RevokeOutcome {
+  readonly profile: string;
+  readonly envFilePath: string;
+  readonly upstream: 'none' | 'revoked' | 'unconfirmed';
+  readonly cleared: boolean;
+}
+
 export type RevokeDeps = CallSeams & {
   /** Overrides `process.env` for the credential read. Test seam. */
   env?: NodeJS.ProcessEnv;
@@ -226,15 +241,6 @@ function originFor(settings: Settings | undefined, fallback: string): string {
     return fallback;
   }
   return LOOPBACK_HOST_RE.test(parsed.hostname) ? parsed.origin : fallback;
-}
-
-/** Whether a resolved origin is the loopback override rather than the pin. */
-function isLoopbackOrigin(origin: string): boolean {
-  try {
-    return LOOPBACK_HOST_RE.test(new URL(origin).hostname);
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -403,10 +409,16 @@ function requestOptions(
   path: string,
   body: Record<string, string>,
 ): Parameters<typeof oauthRequest>[0] {
-  const allowLoopbackOrigin = isLoopbackOrigin(origin);
+  // `originFor` is the only producer of `origin`, so it is always parseable —
+  // one of the two pinned constants, or the `origin` of a URL it parsed itself.
+  // The loopback question is therefore answered from the request URL that has to
+  // be built anyway, rather than from a second, separately guarded parse of the
+  // same string.
+  const url = new URL(path, origin);
+  const allowLoopbackOrigin = LOOPBACK_HOST_RE.test(url.hostname);
   return {
     method: 'POST',
-    url: new URL(path, origin).toString(),
+    url: url.toString(),
     body,
     ...(allowLoopbackOrigin ? { allowLoopbackOrigin } : {}),
     ...(seams.clock === undefined ? {} : { clock: seams.clock }),
@@ -435,6 +447,7 @@ export async function exchangeCode(opts: ExchangeCodeOptions): Promise<TokenSet>
   // The authorization code shares its field name with the error-catalog `code`,
   // which is on the log allowlist — so the value is registered explicitly.
   registerSecret(opts.code);
+  registerSecret(opts.clientSecret);
   const clock = opts.clock ?? systemClock;
   const origin = originFor(opts.settings, API_ORIGIN);
 
@@ -466,17 +479,27 @@ const adopted = new Map<string, TokenSet>();
 const inFlight = new Map<string, Promise<string>>();
 
 /**
- * The refresh token this process last **spent**, per profile.
+ * Every refresh token this process has **spent**, per profile.
  *
  * TikTok rotates on every use, so a spent token is dead. That matters because
  * credential precedence is presence-based and the *process environment wins*
  * over the env file (CC-F2) — an MCP client config that pins `TT_REFRESH_TOKEN`
  * inline keeps handing back the original token no matter how many times this
  * process rotates it, and re-reading would spend a dead token on every refresh.
- * Remembering the last spent value lets the re-read prefer a token it has not
+ * Remembering the spent values lets the re-read prefer a token it has not
  * burned yet, without pretending to know which of two unknown tokens is newer.
+ * It is every spent value, not only the last one: after two rotations the
+ * pinned token is no longer the most recent spend, yet it is still dead. One
+ * entry per refresh, so the set grows by one token a day at most.
  */
-const lastSpent = new Map<string, string>();
+const spentTokens = new Map<string, Set<string>>();
+
+/** Record `token` as spent for `profile`. */
+function markSpent(profile: string, token: string): void {
+  const set = spentTokens.get(profile);
+  if (set === undefined) spentTokens.set(profile, new Set([token]));
+  else set.add(token);
+}
 
 /**
  * Drop every cached token set. Exported for tests and for `cli/login`, which
@@ -485,7 +508,7 @@ const lastSpent = new Map<string, string>();
 export function resetTokenCache(): void {
   adopted.clear();
   inFlight.clear();
-  lastSpent.clear();
+  spentTokens.clear();
 }
 
 /** A credential record read from disk, as a `TokenSet` when it is complete. */
@@ -510,11 +533,20 @@ function toCachedSet(creds: ProfileCredentials): TokenSet | undefined {
   };
 }
 
-/** Whether `set`'s access token is still outside the proactive-refresh window. */
+/**
+ * Whether `set`'s access token is still outside the proactive-refresh window.
+ *
+ * `accessExpiresAt` always parses: `toTokenSet` renders it with
+ * `Date.prototype.toISOString`, and `toCachedSet` copies it from credentials
+ * whose expiry `readProfile` has already put through the same `Date.parse`
+ * (the `timestamp` guard in `core/config.ts`, CC-H2) — no exported entry point
+ * takes a `TokenSet` from outside. Were an unparseable one ever to arrive,
+ * `Date.parse` would yield `NaN`, and `NaN` compares false, so it would read
+ * as "refresh now" rather than as "fresh for ever": the bare comparison already
+ * says what a guard in front of it would.
+ */
 function isFresh(set: TokenSet, nowMs: number, skewS: number): boolean {
-  const expiresAt = Date.parse(set.accessExpiresAt);
-  if (!Number.isFinite(expiresAt)) return false;
-  return expiresAt - nowMs > skewS * 1_000;
+  return Date.parse(set.accessExpiresAt) - nowMs > skewS * 1_000;
 }
 
 // ---------------------------------------------------------------------------
@@ -636,15 +668,21 @@ async function persist(state: RefreshState, set: TokenSet): Promise<void> {
  * already burned, which is what happens when the value is pinned in the process
  * environment (it wins over the file by CC-F2 and never changes). In that case
  * the in-memory token from our own last rotation is the only live one left.
+ *
+ * With no refresh token on the file (and none pinned in the environment) there
+ * is no login left to continue: another process ran `login --revoke` or the key
+ * was removed by hand. The in-memory copy is then not a fallback — spending it
+ * would write the tokens back and resurrect a profile the user logged out of.
  */
 function pickRefreshToken(
   state: RefreshState,
   fromDisk: ProfileCredentials,
 ): string | undefined {
-  const spent = lastSpent.get(state.profile);
+  if (fromDisk.refreshToken === undefined) return undefined;
+  const spent = spentTokens.get(state.profile);
   const candidates = [fromDisk.refreshToken, adopted.get(state.profile)?.refreshToken];
   return (
-    candidates.find((token) => token !== undefined && token !== spent) ??
+    candidates.find((token) => token !== undefined && spent?.has(token) !== true) ??
     candidates.find((token) => token !== undefined)
   );
 }
@@ -687,6 +725,8 @@ async function refreshUnderLock(state: RefreshState): Promise<string> {
 
   const refreshToken = pickRefreshToken(state, fromDisk);
   if (refreshToken === undefined) {
+    // The login is gone from disk; stop serving its cached access token too.
+    adopted.delete(state.profile);
     throw new TikTokError({
       kind: 'auth',
       code: 'auth_expired',
@@ -699,7 +739,7 @@ async function refreshUnderLock(state: RefreshState): Promise<string> {
 
   let set: TokenSet;
   try {
-    lastSpent.set(state.profile, refreshToken);
+    markSpent(state.profile, refreshToken);
     set = await callRefresh(state, fromDisk, refreshToken);
   } catch (error) {
     if (!isInvalidGrant(error)) throw error;
@@ -709,7 +749,10 @@ async function refreshUnderLock(state: RefreshState): Promise<string> {
     // retry exactly once — never a loop (CC-A6).
     const retryCreds = await readFromDisk(state);
     const retryToken = retryCreds.refreshToken;
-    if (retryToken === undefined || retryToken === refreshToken) {
+    if (
+      retryToken === undefined ||
+      spentTokens.get(state.profile)?.has(retryToken) === true
+    ) {
       throw authExpired(state.profile, error);
     }
     state.logger.warn(
@@ -717,7 +760,7 @@ async function refreshUnderLock(state: RefreshState): Promise<string> {
       { profile: state.profile },
     );
     try {
-      lastSpent.set(state.profile, retryToken);
+      markSpent(state.profile, retryToken);
       set = await callRefresh(state, retryCreds, retryToken);
     } catch (retryError) {
       if (isInvalidGrant(retryError)) throw authExpired(state.profile, retryError);
@@ -861,8 +904,10 @@ export async function ensureFreshAccessToken(
     env,
     deps,
   };
-  const attempt = runRefresh(state, cached === undefined).finally(() => {
-    inFlight.delete(name);
+  const attempt: Promise<string> = runRefresh(state, cached === undefined).finally(() => {
+    // `resetTokenCache` may have dropped this entry and a newer refresh taken
+    // the slot; clearing that one would let a third caller rotate in parallel.
+    if (inFlight.get(name) === attempt) inFlight.delete(name);
   });
   inFlight.set(name, attempt);
   return await attempt;
@@ -893,8 +938,17 @@ const CLEARED: Partial<ProfileCredentials> = Object.freeze({
  * An upstream failure does not stop the local clear: a token this machine can
  * no longer use is worse kept than dropped, and the user's next step is a fresh
  * `login` either way. The failure is logged.
+ *
+ * A local clear that fails is *returned*, not just logged: the CLI would
+ * otherwise report "tokens cleared" over a file that still holds them, which is
+ * the one lie a logout must never tell. The outcome is a value rather than a
+ * throw so the caller can still say what happened upstream — the token may be
+ * dead at TikTok even though its copy is still on disk.
  */
-export async function revokeToken(profile: string, deps: RevokeDeps = {}): Promise<void> {
+export async function revokeToken(
+  profile: string,
+  deps: RevokeDeps = {},
+): Promise<RevokeOutcome> {
   const name = normalizeProfileName(profile);
   const env = deps.env ?? process.env;
   const settings = deps.settings ?? loadSettings(env);
@@ -905,7 +959,12 @@ export async function revokeToken(profile: string, deps: RevokeDeps = {}): Promi
   const creds = readProfile(name, await readEnvFile(envFilePath), env);
   const accessToken = creds.accessToken ?? adopted.get(name)?.accessToken;
 
-  if (accessToken !== undefined) {
+  const revokeUpstream = async (
+    token: string,
+    clientKey: string,
+    clientSecret: string,
+  ): Promise<RevokeOutcome['upstream']> => {
+    registerSecret(token);
     try {
       await oauthRequest<unknown>(
         requestOptions(
@@ -913,12 +972,13 @@ export async function revokeToken(profile: string, deps: RevokeDeps = {}): Promi
           originFor(settings, API_ORIGIN),
           REVOKE_PATH,
           {
-            client_key: creds.clientKey,
-            client_secret: creds.clientSecret,
-            token: accessToken,
+            client_key: clientKey,
+            client_secret: clientSecret,
+            token,
           },
         ),
       );
+      return 'revoked';
     } catch (error) {
       logger.warn(
         'TikTok did not confirm the revocation; clearing the local credentials anyway',
@@ -927,16 +987,33 @@ export async function revokeToken(profile: string, deps: RevokeDeps = {}): Promi
           reason: error instanceof Error ? error.message : 'unknown',
         },
       );
+      return 'unconfirmed';
     }
+  };
+
+  let upstream: RevokeOutcome['upstream'] = 'none';
+  if (accessToken !== undefined) {
+    upstream = await revokeUpstream(accessToken, creds.clientKey, creds.clientSecret);
   }
 
   adopted.delete(name);
   // The spent-token memo is only meaningful next to an adopted set; leaving it
   // behind would make a later login's first refresh look like a replay.
-  lastSpent.delete(name);
-  await withEnvLock(
+  spentTokens.delete(name);
+  const cleared = await withEnvLock(
     envFilePath,
     async () => {
+      // A refresh elsewhere (a running server) may have rotated the token
+      // between the read above and this lock. Revoke what is on the file now
+      // too, or the rotated token outlives the logout upstream.
+      const current = readProfile(name, await readEnvFile(envFilePath), env);
+      if (current.accessToken !== undefined && current.accessToken !== accessToken) {
+        upstream = await revokeUpstream(
+          current.accessToken,
+          current.clientKey,
+          current.clientSecret,
+        );
+      }
       const { persisted } = await persistProfilePatch(envFilePath, name, CLEARED, {
         clock,
         logger,
@@ -948,6 +1025,7 @@ export async function revokeToken(profile: string, deps: RevokeDeps = {}): Promi
           { profile: name, path: envFilePath, key: envKeyFor(name, 'accessToken') },
         );
       }
+      return persisted;
     },
     {
       waitMs: settings.envLockWaitMs,
@@ -957,4 +1035,5 @@ export async function revokeToken(profile: string, deps: RevokeDeps = {}): Promi
       logger,
     },
   );
+  return { profile: name, envFilePath, upstream, cleared };
 }

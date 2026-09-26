@@ -45,8 +45,12 @@ const TAG_PATTERN = /^v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)
 
 const HEADING_PATTERN = /^## \[([^\]]+)\](?:\s+-\s+(.+?))?\s*$/;
 const LINK_PATTERN = /^\[([^\]]+)\]:\s+\S+/;
-/** A `### Added` group, a bullet, or a numbered item — anything that is content. */
-const ENTRY_PATTERN = /^(?:### |[-*] |\d+\. )/;
+/**
+ * A bullet or a numbered item — a change. A bare `### Added` heading is not: an
+ * empty template group would otherwise block a release as "unreleased entries",
+ * and a released section of headings alone would pass as listing changes.
+ */
+const ENTRY_PATTERN = /^(?:[-*] |\d+\. )/;
 
 // --- changelog (keep a changelog 1.1.0) ---
 
@@ -263,8 +267,9 @@ export async function readReleaseInputs(tag: string): Promise<ReleaseInputs> {
       };
     }),
     { label: `${PLUGIN_JSON} version`, version: asString(plugin['version']) },
-    // publish-vscode.yml publishes the extension from this same tag, so a
-    // forgotten bump there ships a marketplace entry describing another release.
+    // publish-vscode.yml publishes the extension once this tag's npm publish
+    // succeeds, so a forgotten bump there ships a marketplace entry describing
+    // another release.
     ...(extension === undefined
       ? []
       : [

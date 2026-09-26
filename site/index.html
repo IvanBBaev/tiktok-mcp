@@ -28,7 +28,7 @@
       property="og:image:alt"
       content="tiktok-mcp-ai — drive TikTok from your AI assistant. 11 tools, 5 packages, OAuth 2.0 (PKCE), MIT."
     />
-    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="tiktok-mcp-ai — Unofficial TikTok MCP Server" />
     <meta
       name="twitter:description"
@@ -56,7 +56,7 @@
             "description": "An unofficial Model Context Protocol server that lets an MCP-capable AI client read a creator's TikTok profile and videos and publish videos and photo carousels over the official TikTok Display and Content Posting APIs, with OAuth 2.0 (PKCE) login, plan-then-execute write safety and multi-account profiles.",
             "url": "https://ivanbbaev.github.io/tiktok-mcp/",
             "downloadUrl": "https://www.npmjs.com/package/tiktok-mcp-ai",
-            "softwareVersion": "0.0.0",
+            "softwareVersion": "0.7.0",
             "license": "https://opensource.org/licenses/MIT",
             "author": { "@type": "Person", "name": "Ivan Baev" },
             "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -91,10 +91,10 @@
               },
               {
                 "@type": "Question",
-                "name": "Why did my direct post end up private?",
+                "name": "Why can't I post publicly?",
                 "acceptedAnswer": {
                   "@type": "Answer",
-                  "text": "Until your TikTok app passes TikTok's content-posting audit, TikTok forces every direct post to SELF_ONLY regardless of the privacy_level you send. That is an upstream platform gate, not a limitation of this server; uploading to the inbox as a draft works in the meantime."
+                  "text": "Until your TikTok app passes TikTok's content-posting audit, SELF_ONLY is the only privacy level TikTok offers it. Every direct post is preceded by a creator_info query, so the server sees the available options and refuses anything else locally with privacy_level_unavailable, naming what is available. The video is not posted at the wrong visibility — it is not posted at all. That is an upstream platform gate, not a limitation of this server; uploading to the inbox as a draft works in the meantime."
                 }
               },
               {
@@ -1518,10 +1518,10 @@ TT_TOOL_PACKAGES=core,publish-write</code></pre>
             <p>
               <strong>The write guard doesn't replace TikTok's app-audit
               gate.</strong> Until your app passes TikTok's content-posting
-              audit, direct posts land as <code>SELF_ONLY</code> regardless of
-              the <code>privacy_level</code> you send — TikTok enforces that
-              upstream, not this server. Uploading drafts to the inbox works
-              meanwhile.
+              audit, <code>SELF_ONLY</code> is the only privacy level TikTok
+              offers your app, and a direct post asking for any other one is
+              refused before it is sent — that gate is TikTok's, not this
+              server's. Uploading drafts to the inbox works meanwhile.
             </p>
           </div>
           <p>
@@ -1773,13 +1773,16 @@ TT_TOOL_PACKAGES=core,publish-write</code></pre>
             TikTok or ByteDance Ltd.; "TikTok" is a trademark of ByteDance Ltd.,
             used here only to indicate compatibility.
           </p>
-          <h3>Why did my direct post end up private?</h3>
+          <h3>Why can't I post publicly?</h3>
           <p>
-            Until your TikTok app passes TikTok's content-posting audit, TikTok
-            forces every direct post to <code>SELF_ONLY</code> regardless of the
-            <code>privacy_level</code> you send. That's an upstream platform gate,
-            not a server limitation; uploading to the inbox as a draft works in
-            the meantime.
+            Until your TikTok app passes TikTok's content-posting audit,
+            <code>SELF_ONLY</code> is the only privacy level TikTok offers it.
+            Every direct post is preceded by a <code>creator_info</code> query,
+            so the server sees the available options and refuses anything else
+            locally with <code>privacy_level_unavailable</code>, naming what is
+            available. Your video isn't posted at the wrong visibility — it
+            isn't posted at all. That's an upstream platform gate, not a server
+            limitation; uploading to the inbox as a draft works in the meantime.
           </p>
           <h3>Can I manage several accounts from one server?</h3>
           <p>
@@ -1812,7 +1815,9 @@ TT_TOOL_PACKAGES=core,publish-write</code></pre>
           <a href="https://github.com/IvanBBaev/tiktok-mcp" target="_blank" rel="noopener">GitHub</a> ·
           <a href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/README.md" target="_blank" rel="noopener">README</a> ·
           <a href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/SECURITY.md" target="_blank" rel="noopener">Security</a> ·
-          <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">About MCP</a>
+          <a href="https://modelcontextprotocol.io" target="_blank" rel="noopener">About MCP</a> ·
+          <a href="privacy.html">Privacy</a> ·
+          <a href="terms.html">Terms</a>
           <span class="foot-support" aria-label="Support this project">
             <span class="foot-support-label">Support:</span>
             <a class="sponsor-link" href="https://github.com/sponsors/IvanBBaev" target="_blank" rel="noopener">&#9829; Sponsor</a>

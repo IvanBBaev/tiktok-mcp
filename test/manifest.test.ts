@@ -9,7 +9,12 @@
  */
 
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { copyFile, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import { PACKAGE_SCOPES, SCOPE_ORDER } from '../src/cli/login.js';
 import { TOOL_PACKAGES } from '../src/core/settings.js';
@@ -310,6 +315,87 @@ test('a rule that matches no file yet neither passes nor fails silently', () => 
   const oauth = areas.find((area) => area.path === 'src/core/oauth.ts');
   assert.equal(oauth?.files, 0);
   assert.deepEqual(oauth?.failures, []);
+});
+
+/**
+ * Run the compiled gate as its CLI, against a throwaway repo root.
+ *
+ * `runCoverageGate` reads its floors and summary from `REPO_ROOT`, which is
+ * derived from the compiled module's own location. Copying the two compiled
+ * modules into a temp tree therefore gives the gate a private root, so these
+ * tests never touch the real `coverage/` or `scripts/coverage-floors.json`.
+ */
+async function runGate(
+  rules: readonly Record<string, unknown>[],
+  files: readonly string[],
+): Promise<{ code: number; stdout: string }> {
+  // Node resolves the entry module's real path, so on macOS `/var` becomes
+  // `/private/var`; the summary keys must use the same spelling to match.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'coverage-gate-')));
+  try {
+    await mkdir(join(root, 'build/scripts/lib'), { recursive: true });
+    await mkdir(join(root, 'scripts'), { recursive: true });
+    await mkdir(join(root, 'coverage'), { recursive: true });
+    await copyFile(
+      join(REPO_ROOT, 'build/scripts/coverage-gate.js'),
+      join(root, 'build/scripts/coverage-gate.js'),
+    );
+    await copyFile(
+      join(REPO_ROOT, 'build/scripts/lib/repo.js'),
+      join(root, 'build/scripts/lib/repo.js'),
+    );
+    await writeFile(join(root, 'package.json'), '{"type":"module"}\n');
+    await writeFile(
+      join(root, 'scripts/coverage-floors.json'),
+      JSON.stringify({ global: { lines: 50, branches: 50, functions: 50 }, rules }),
+    );
+    const summary: Record<string, unknown> = {};
+    for (const file of files) summary[join(root, file)] = fileSummary(96, 91, 100);
+    await writeFile(
+      join(root, 'coverage/coverage-summary.json'),
+      JSON.stringify(summary),
+    );
+
+    // Keep a surrounding c8 run from collecting coverage for the temp copy.
+    const env = { ...process.env };
+    delete env.NODE_V8_COVERAGE;
+    try {
+      const { stdout } = await promisify(execFile)(
+        process.execPath,
+        [join(root, 'build/scripts/coverage-gate.js')],
+        { env },
+      );
+      return { code: 0, stdout };
+    } catch (error) {
+      const failed = error as { code?: number; stdout?: string };
+      return { code: failed.code ?? -1, stdout: failed.stdout ?? '' };
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test('a floor rule that matches no source file fails the gate as stale', async () => {
+  // A renamed file silently leaves its stricter floor behind; the rule then
+  // guards nothing, so the gate treats it as a configuration error.
+  const { code, stdout } = await runGate(
+    [
+      { path: 'src/core/oauth.ts', lines: 95, branches: 90, functions: 100 },
+      { path: 'src/core/renamed.ts', lines: 95, branches: 90, functions: 100 },
+    ],
+    ['src/core/oauth.ts'],
+  );
+  assert.equal(code, 1);
+  assert.match(stdout, /STALE RULE/);
+});
+
+test('a floor rule that matches a file and meets its floor passes the gate', async () => {
+  const { code, stdout } = await runGate(
+    [{ path: 'src/core/oauth.ts', lines: 95, branches: 90, functions: 100 }],
+    ['src/core/oauth.ts'],
+  );
+  assert.equal(code, 0, stdout);
+  assert.doesNotMatch(stdout, /STALE RULE/);
 });
 
 // ---------------------------------------------------------------------------

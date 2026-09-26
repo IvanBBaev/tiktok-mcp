@@ -35,11 +35,11 @@ import { timingSafeEqual } from 'node:crypto';
 import { rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
-import { createInterface } from 'node:readline/promises';
 import { spawn } from 'node:child_process';
 
 import { systemClock, type Clock } from '../core/clock.js';
 import {
+  envKeyFor,
   normalizeProfileName,
   persistProfilePatch,
   readEnvFile,
@@ -51,11 +51,13 @@ import { withEnvLock } from '../core/env-lock.js';
 import { isTikTokError, TikTokError } from '../core/errors.js';
 import { ttRequest } from '../core/http.js';
 import { createLogger, type Logger } from '../core/log.js';
+import { boundPortOf } from '../core/net.js';
 import {
   buildAuthUrl,
   exchangeCode,
   resetTokenCache,
   revokeToken,
+  type RevokeOutcome,
   type TokenSet,
 } from '../core/oauth.js';
 import { registerSecret } from '../core/redact.js';
@@ -75,11 +77,13 @@ import {
   overlayEnvFile,
   type CallbackHandler,
   type CallbackReply,
+  type CallbackRequest,
   type CliDeps,
   type CliIo,
   type ListenFn,
   type LoopbackServer,
 } from './index.js';
+import { ask } from './prompt.js';
 
 // ---------------------------------------------------------------------------
 // constants
@@ -200,34 +204,48 @@ export function parseLoginArgs(argv: readonly string[]): ParseResult {
     help: false,
   };
 
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === undefined) continue;
+  // Iterated through `entries()` rather than by index: `argv[i]` under
+  // `noUncheckedIndexedAccess` is `string | undefined` however tightly the loop
+  // bounds it, and guarding that would be a branch nothing can ever take.
+  // `consumed` is the index a `--flag value` pair ate — the one lookahead where
+  // the `| undefined` is real, because the value may be past the end.
+  let consumed = -1;
+  for (const [i, arg] of argv.entries()) {
+    if (i === consumed) continue;
     const eq = arg.indexOf('=');
     const name = eq === -1 ? arg : arg.slice(0, eq);
     const inline = eq === -1 ? undefined : arg.slice(eq + 1);
 
     const takesValue = name === '--profile' || name === '--scopes';
-    let value: string | undefined;
+    // Empty rather than `undefined`: only the `takesValue` arm assigns, and it
+    // returns before it can assign anything empty, so the two cases that read
+    // `value` below need no fallback for a state they cannot be reached in.
+    let value = '';
     if (takesValue) {
-      if (inline !== undefined) value = inline;
-      else {
-        i += 1;
-        value = argv[i];
-      }
-      if (value === undefined || value === '') {
+      if (inline === undefined) consumed = i + 1;
+      const given = inline ?? argv[consumed];
+      // `--profile --force` is a missing value, not a profile named "--force".
+      const flagLike = inline === undefined && given?.startsWith('-') === true;
+      if (given === undefined || given === '' || flagLike) {
         return { ok: false, message: `${name} needs a value.` };
       }
+      value = given;
     } else if (inline !== undefined) {
       return { ok: false, message: `${name} does not take a value.` };
     }
 
     switch (name) {
       case '--profile':
-        flags.profile = value;
+        // Checked here so a malformed name is the usage error it is (exit 2),
+        // not a login that ran and failed.
+        try {
+          flags.profile = normalizeProfileName(value);
+        } catch (err) {
+          return { ok: false, message: describeError(err) };
+        }
         break;
       case '--scopes':
-        flags.scopes = splitScopes(value ?? '');
+        flags.scopes = splitScopes(value);
         break;
       case '--force':
         flags.force = true;
@@ -478,11 +496,32 @@ export function createCallbackSink(): CallbackSink {
   };
 }
 
+/**
+ * The request line as {@link CallbackRequest} promises it: two strings.
+ *
+ * `node:http` types `method` and `url` as optional on `IncomingMessage` — it
+ * fills both in before it emits `request`, and llhttp has already rejected
+ * anything it could not parse, so the server never hands them over absent. The
+ * handler contract (`cli/index.ts:53-57`) is stricter than the type, and this is
+ * the one place that closes the gap. It closes it with a total conversion rather
+ * than a validation that could never answer: a request line that is not there
+ * reads as `GET /`, which {@link createCallbackSink} answers with the not-found
+ * page — the same answer every other unrecognized request gets, so the absent
+ * case cannot be mistaken for a redirect. Split out of the listener so it is
+ * testable the way {@link browserCommand} is.
+ */
+export function callbackRequest(
+  method: string | undefined,
+  url: string | undefined,
+): CallbackRequest {
+  return { method: method ?? 'GET', url: url ?? '/' };
+}
+
 /** The default listener: a `node:http` server, bound to loopback only. */
 export function nodeListen(): ListenFn {
   return async (handler, opts) => {
     const server = createServer((req, res) => {
-      const reply = handler({ method: req.method ?? 'GET', url: req.url ?? '/' });
+      const reply = handler(callbackRequest(req.method, req.url));
       res.writeHead(reply.status, {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
@@ -498,11 +537,8 @@ export function nodeListen(): ListenFn {
       });
     });
 
-    const address = server.address();
-    const port =
-      typeof address === 'object' && address !== null ? address.port : opts.port;
     return {
-      port,
+      port: boundPortOf(server.address(), opts.port),
       close: () =>
         new Promise<void>((resolve) => {
           // Browsers keep the redirect connection alive; without this the close
@@ -540,7 +576,7 @@ async function bindCallback(
     const server = await listen(handler, { host: LOOPBACK_HOST, port: pinned ?? 0 });
     return { kind: 'bound', server };
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = errorMessage(err);
     if (pinned !== undefined) {
       return {
         kind: 'failed',
@@ -619,20 +655,6 @@ export function parsePastedRedirect(
   return { ok: true, code };
 }
 
-/** The default prompt: one line from stdin, echoed nowhere. */
-async function defaultPrompt(question: string): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    return await rl.question(question);
-  } finally {
-    rl.close();
-  }
-}
-
-async function ask(deps: CliDeps, question: string): Promise<string> {
-  return await (deps.prompt ?? defaultPrompt)(question);
-}
-
 // ---------------------------------------------------------------------------
 // browser
 // ---------------------------------------------------------------------------
@@ -643,21 +665,68 @@ export function browserCommand(
   platform: NodeJS.Platform,
 ): { command: string; args: string[] } {
   if (platform === 'darwin') return { command: 'open', args: [url] };
-  if (platform === 'win32') return { command: 'cmd', args: ['/c', 'start', '', url] };
+  // Not `cmd /c start`: cmd.exe reads every `&` in the authorize URL as a
+  // command separator, so the browser would get the URL cut at the first
+  // parameter. The URL protocol handler takes it as one argument, no shell.
+  if (platform === 'win32') {
+    return { command: 'rundll32', args: ['url.dll,FileProtocolHandler', url] };
+  }
   return { command: 'xdg-open', args: [url] };
 }
 
-/** Fire-and-forget browser open; a failure is never fatal to the login. */
-async function defaultOpenBrowser(url: string): Promise<void> {
-  const { command, args } = browserCommand(url, process.platform);
+/**
+ * Start a command and resolve as soon as it is running, never waiting for it.
+ *
+ * The half of the browser seam's default that does not need a browser: an opener
+ * is a spawn whose exit nobody waits for, which is decidable against any command
+ * at all — the suite starts `process.execPath` for the resolving path and a name
+ * that does not exist for the rejecting one. `unref` is what lets the CLI exit
+ * while the opener is still starting, and `stdio: 'ignore'` keeps the opener's
+ * chatter off the CLI's own streams.
+ */
+export async function spawnDetached(opener: {
+  readonly command: string;
+  readonly args: readonly string[];
+}): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: 'ignore', detached: false });
+    const child = spawn(opener.command, [...opener.args], {
+      stdio: 'ignore',
+      detached: false,
+    });
     child.once('error', reject);
     child.once('spawn', () => {
       child.unref();
       resolve();
     });
   });
+}
+
+/**
+ * Fire-and-forget browser open; a failure is never fatal to the login.
+ *
+ * Production seam default: the seam is `CliDeps.openBrowser`
+ * (`cli/index.ts:110`), the substitution is {@link openBrowserOf}, and every
+ * test that gets that far injects a replacement (`test/login.test.ts:171`, and
+ * `:1251` for the one that builds its `deps` by hand), because running the real
+ * one would open a browser window on the machine running the suite. Every other
+ * part is tested on its own — which command a platform opens with is
+ * {@link browserCommand}, starting one is {@link spawnDetached}, choosing
+ * between injected and default is {@link openBrowserOf} — so what is excluded
+ * here is the binding of the one to the other on the real `process.platform`.
+ */
+/* c8 ignore next -- production seam default, replaced by injection in every test (test/login.test.ts:171). */
+export const defaultOpenBrowser = (url: string): Promise<void> =>
+  spawnDetached(browserCommand(url, process.platform));
+
+/**
+ * The opener in force: the injected one, or {@link defaultOpenBrowser}.
+ *
+ * Same split as {@link promptOf}, for the same reason: inline, the fallback arm
+ * could only be covered by opening a real browser window on the machine running
+ * the suite; returned, it is an identity a test can assert against.
+ */
+export function openBrowserOf(deps: CliDeps): (url: string) => Promise<void> {
+  return deps.openBrowser ?? defaultOpenBrowser;
 }
 
 // ---------------------------------------------------------------------------
@@ -668,7 +737,7 @@ async function defaultOpenBrowser(url: string): Promise<void> {
  * The journal and its single rotation, both siblings of the resolved env file —
  * the same rule `--purge-journal` needs and the journal writer will use.
  */
-export function journalPaths(envFilePath: string): readonly string[] {
+export function journalPaths(envFilePath: string): readonly [string, string] {
   const dir = dirname(envFilePath);
   return [join(dir, JOURNAL_FILE), join(dir, `${JOURNAL_FILE}.1`)];
 }
@@ -697,6 +766,20 @@ function describeError(error: unknown): string {
       ? error.message
       : `${error.message}\n${error.remediation}`;
   }
+  return errorMessage(error);
+}
+
+/**
+ * The human text of a thrown value.
+ *
+ * `catch` binds `unknown`, so the non-`Error` arm is not a defensive nicety: a
+ * seam is free to reject with a bare errno, and the diagnostic has to carry it
+ * rather than print `[object Object]`. One shared conversion instead of a copy
+ * per `catch`, so that both arms are decided where they are reachable — the
+ * `Error` arm by the bind failure at `test/login.test.ts:526`, the other by the
+ * listener that rejects with a bare `'EACCES'` at `test/login.test.ts:552`.
+ */
+function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -737,8 +820,14 @@ async function probeDisplayName(
     const name = data.user?.display_name;
     return typeof name === 'string' && name !== '' ? name : undefined;
   } catch (err) {
+    // What reaches here is always a `TikTokError`, which extends `Error`
+    // (`core/errors.ts:34`): the one value `ttRequest` rethrows verbatim is a
+    // caller's abort reason (`core/http.ts:846`), and this probe passes no
+    // `signal`, so that listener is never attached (`core/http.ts:1127`). The
+    // shared conversion still answers to the `unknown` of a `catch`, and both of
+    // its arms are decided where a seam can actually produce them.
     logger.warn('the display-name probe after login failed; the summary omits the name', {
-      reason: err instanceof Error ? err.message : String(err),
+      reason: errorMessage(err),
     });
     return undefined;
   }
@@ -840,7 +929,11 @@ async function resolveContext(
   const settings = loadSettings(env);
   const clock = deps.clock ?? systemClock;
   const logger = deps.logger ?? createLogger({ level: settings.logLevel, clock });
-  const profile = normalizeProfileName(profileFlag ?? settings.activeProfile);
+  // The same default `doctor` and the server use: a locked installation logs in
+  // the locked account unless told otherwise.
+  const profile = normalizeProfileName(
+    profileFlag ?? settings.lockProfile ?? settings.activeProfile,
+  );
 
   // The app credentials are per installation, so they are read from the default
   // profile — which also produces the right `missing_credentials` error before a
@@ -866,7 +959,7 @@ async function runRevoke(
   deps: CliDeps,
   io: CliIo,
 ): Promise<number> {
-  await revokeToken(ctx.profile, {
+  const outcome = await revokeToken(ctx.profile, {
     clock: ctx.clock,
     logger: ctx.logger,
     env: ctx.env,
@@ -874,6 +967,23 @@ async function runRevoke(
     timeoutMs: ctx.settings.timeoutMs,
     rename: deps.rename,
   });
+  if (!outcome.cleared) {
+    // The tokens are still on disk. Saying "cleared" here would send the user
+    // away believing this machine is logged out, so the message states both
+    // halves separately and the exit code fails. The journal is left alone —
+    // even with --purge-journal — so a rerun of the same command finishes the
+    // whole job rather than half of it.
+    io.err(
+      `${describeUpstream(outcome.upstream, ctx.profile)}, but its credentials were ` +
+        `NOT cleared from ${outcome.envFilePath}: the file could not be rewritten.\n` +
+        `Fix: make ${outcome.envFilePath} writable (check its permissions and the ` +
+        `free disk space) and run "${CLI_NAME} login --revoke${profileArg(ctx.profile)}" ` +
+        `again, or delete the profile's token keys (${envKeyFor(ctx.profile, 'accessToken')} ` +
+        'and its siblings) from the file by hand.\n',
+    );
+    if (flags.purgeJournal) io.err('The publish journal was not purged.\n');
+    return EXIT_FAILURE;
+  }
   io.out(
     `Revoked profile ${ctx.profile}; its tokens were cleared from ${ctx.envFilePath}.\n`,
   );
@@ -887,24 +997,46 @@ async function runRevoke(
     );
   } else {
     io.out(
-      `The publish journal was kept (${journalPaths(ctx.envFilePath)[0] ?? JOURNAL_FILE}); ` +
+      `The publish journal was kept (${journalPaths(ctx.envFilePath)[0]}); ` +
         'add --purge-journal to delete it as well.\n',
     );
   }
   return EXIT_OK;
 }
 
-/** The CC-A11 guard: never replace credentials the user did not mean to lose. */
+/** The upstream half of a revoke whose local clear failed, as one clause. */
+function describeUpstream(upstream: RevokeOutcome['upstream'], profile: string): string {
+  switch (upstream) {
+    case 'revoked':
+      return `TikTok revoked the access token of profile ${profile}`;
+    case 'unconfirmed':
+      return `TikTok did not confirm the revocation of profile ${profile}`;
+    case 'none':
+      return `Profile ${profile} had no access token to revoke upstream`;
+  }
+}
+
+/** The `--profile` argument that reruns a command for `profile`, if it is not the default. */
+function profileArg(profile: string): string {
+  return profile === DEFAULT_PROFILE ? '' : ` --profile ${profile}`;
+}
+
+/**
+ * The CC-A11 guard: never replace credentials the user did not mean to lose.
+ *
+ * @returns `undefined` to go ahead, otherwise the exit code to stop with —
+ *   usage when there is no terminal to ask on, failure when the user said no.
+ */
 async function confirmOverwrite(
   ctx: LoginContext,
   flags: LoginFlags,
   deps: CliDeps,
   io: CliIo,
-): Promise<boolean> {
+): Promise<number | undefined> {
   const { existing } = ctx;
   if (existing.accessToken === undefined && existing.refreshToken === undefined)
-    return true;
-  if (flags.force) return true;
+    return undefined;
+  if (flags.force) return undefined;
 
   const who = describeAccount(existing);
   if (!io.isTTY) {
@@ -912,15 +1044,15 @@ async function confirmOverwrite(
       `Profile ${ctx.profile} already holds credentials (${who}). ` +
         'Re-run with --force to replace them.\n',
     );
-    return false;
+    return EXIT_USAGE;
   }
   const answer = await ask(
     deps,
     `Replace the credentials of profile ${ctx.profile} (${who})? [y/N] `,
   );
-  if (/^y(es)?$/i.test(answer.trim())) return true;
+  if (/^y(es)?$/i.test(answer.trim())) return undefined;
   io.err('Aborted; nothing was changed.\n');
-  return false;
+  return EXIT_FAILURE;
 }
 
 /** The authorization half: consent, callback (or paste), exchange. */
@@ -971,21 +1103,28 @@ async function authorize(
     io.errRaw(`\nOpen this URL to authorize:\n\n  ${url}\n\n`);
     if (!manual && !flags.noBrowser) {
       try {
-        await (deps.openBrowser ?? defaultOpenBrowser)(url);
+        await openBrowserOf(deps)(url);
       } catch {
         io.err('A browser could not be opened; open the URL above by hand.\n');
       }
     }
 
-    const result = manual
-      ? parsePastedRedirect(
-          await ask(
-            deps,
-            `Paste the ${redirectUri} URL you were redirected to (or just the code): `,
-          ),
-          state,
-        )
-      : await waitForCallback(io, redirectUri, sink.received);
+    let pasted: string | undefined;
+    if (manual) {
+      try {
+        pasted = await ask(
+          deps,
+          `Paste the ${redirectUri} URL you were redirected to (or just the code): `,
+        );
+      } catch {
+        io.err('No redirect URL was pasted (the input ended); nothing was changed.\n');
+        return { ok: false };
+      }
+    }
+    const result =
+      pasted === undefined
+        ? await waitForCallback(io, redirectUri, sink.received)
+        : parsePastedRedirect(pasted, state);
 
     if (!result.ok) {
       io.err(`${result.message}\n`);
@@ -1087,7 +1226,8 @@ export async function runLogin(deps: CliDeps = {}): Promise<number> {
   try {
     const ctx = await resolveContext(deps, flags.profile);
     if (flags.revoke) return await runRevoke(ctx, flags, deps, io);
-    if (!(await confirmOverwrite(ctx, flags, deps, io))) return EXIT_FAILURE;
+    const refused = await confirmOverwrite(ctx, flags, deps, io);
+    if (refused !== undefined) return refused;
 
     const scopes = resolveScopes(flags, ctx.settings);
     const result = await authorize(ctx, flags, deps, io, scopes);

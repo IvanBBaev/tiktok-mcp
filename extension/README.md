@@ -7,11 +7,12 @@ no manual `.vscode/mcp.json`.
 
 <!-- TODO(owner): the Marketplace listing has no icon. `package.json` no longer
      declares one, because `vsce` refuses to package an extension whose declared
-     icon is absent — and `publish-vscode.yml` fires on the same `v*` tag as the
-     npm release, so a missing file there would fail the job *after* npm had
-     already published. To add one: drop a 128×128 PNG at `extension/icon.png`
-     and put `"icon": "icon.png"` back in `package.json`. Nothing else depends
-     on it; the extension packages and publishes fine without one. -->
+     icon is absent — and `publish-vscode.yml` runs only after the npm release of
+     the same `v*` tag has succeeded, so a missing file there would fail the job
+     *after* npm had already published. To add one: drop a 128×128 PNG at
+     `extension/icon.png` and put `"icon": "icon.png"` back in `package.json`.
+     Nothing else depends on it; the extension packages and publishes fine
+     without one. -->
 
 ## What you get
 

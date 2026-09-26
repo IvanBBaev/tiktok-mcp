@@ -94,9 +94,24 @@ test('parseChangelog separates headings, dates and link definitions', () => {
   assert.deepEqual([...changelog.links].sort(), ['1.0.0', 'Unreleased']);
 });
 
-test('countEntries counts groups and items, not prose', () => {
-  assert.equal(countEntries('Some words.\n\n### Added\n\n- One\n- Two\n1. Three'), 4);
+test('countEntries counts bullets and numbered items, not headings or prose', () => {
+  assert.equal(countEntries('Some words.\n\n### Added\n\n- One\n- Two\n1. Three'), 3);
+  assert.equal(countEntries('* Star bullet'), 1);
   assert.equal(countEntries('Nothing has shipped yet.'), 0);
+  // A bare group heading is template, not a change.
+  assert.equal(countEntries('### Added\n\n### Fixed'), 0);
+});
+
+test('an empty ### Added template under [Unreleased] does not block the release', () => {
+  const text = RELEASED.replace('## [Unreleased]\n', '## [Unreleased]\n\n### Added\n');
+  assert.deepEqual(checkChangelog(parseChangelog(text), '1.0.0'), []);
+});
+
+test('a released section of group headings alone lists no changes', () => {
+  const text = RELEASED.replace('- A thing.', '### Fixed');
+  const problems = checkChangelog(parseChangelog(text), '1.0.0');
+  assert.equal(problems.length, 1);
+  assert.match(problems[0] ?? '', /\[1\.0\.0\] lists no changes/);
 });
 
 test('the released changelog entry passes the policy', () => {

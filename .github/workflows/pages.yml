@@ -28,11 +28,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-      # v5 of both is the node24 runtime; upload-pages-artifact v5 writes the
-      # artifact through upload-artifact v7, which only deploy-pages v4+ can
+      # upload-pages-artifact v5 and deploy-pages v5 are the node24 runtime
+      # (configure-pages is on its own v6 line). upload-pages-artifact v5 writes
+      # the artifact through upload-artifact v7, which only deploy-pages v4+ can
       # read — so these two move together or not at all.
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ./site
       - id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

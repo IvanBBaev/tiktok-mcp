@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy Policy — tiktok-mcp-ai</title>
+    <meta
+      name="description"
+      content="Privacy policy for tiktok-mcp-ai, an unofficial TikTok MCP server. The software runs on your own computer, stores its tokens locally, and talks to no host other than TikTok's own APIs. The author operates no server and receives no user data. Not affiliated with, endorsed by, or sponsored by TikTok or ByteDance Ltd."
+    />
+    <meta name="theme-color" content="#0a0d0c" />
+    <link rel="canonical" href="https://ivanbbaev.github.io/tiktok-mcp/privacy.html" />
+    <!-- Social sharing -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Privacy Policy — tiktok-mcp-ai" />
+    <meta
+      property="og:description"
+      content="What tiktok-mcp-ai stores on your machine, where it sends data, and why there is no telemetry: the software is local, the only network destination is TikTok's own APIs, and the author operates no server."
+    />
+    <meta
+      property="og:url"
+      content="https://ivanbbaev.github.io/tiktok-mcp/privacy.html"
+    />
+    <meta
+      property="og:image"
+      content="https://ivanbbaev.github.io/tiktok-mcp/assets/og-image.png"
+    />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta
+      property="og:image:alt"
+      content="tiktok-mcp-ai — drive TikTok from your AI assistant. 11 tools, 5 packages, OAuth 2.0 (PKCE), MIT."
+    />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Privacy Policy — tiktok-mcp-ai" />
+    <meta
+      name="twitter:description"
+      content="What tiktok-mcp-ai stores on your machine, where it sends data, and why there is no telemetry."
+    />
+    <meta
+      name="twitter:image"
+      content="https://ivanbbaev.github.io/tiktok-mcp/assets/og-image.png"
+    />
+    <meta
+      name="twitter:image:alt"
+      content="tiktok-mcp-ai — drive TikTok from your AI assistant. 11 tools, 5 packages, OAuth 2.0 (PKCE), MIT."
+    />
+    <link rel="stylesheet" href="assets/styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%2300f2ea'/%3E%3Ctext x='50' y='70' font-size='54' text-anchor='middle' fill='%2304211f' font-family='monospace' font-weight='bold'%3Ett%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div class="bg-glow" aria-hidden="true"></div>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="topbar">
+      <a class="brand" href="index.html">
+        <span class="logo">tt</span>
+        tiktok-mcp-ai <small>· docs</small>
+      </a>
+      <span class="spacer"></span>
+      <nav class="toplinks">
+        <a href="index.html">Documentation</a>
+        <a href="index.html#security">Security</a>
+        <a href="terms.html">Terms</a>
+      </nav>
+      <a
+        class="icon-btn"
+        href="https://github.com/IvanBBaev/tiktok-mcp"
+        title="GitHub repository"
+        aria-label="GitHub repository"
+        target="_blank"
+        rel="noopener"
+        ><svg
+          viewBox="0 0 16 16"
+          width="18"
+          height="18"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path
+            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"
+          ></path></svg
+      ></a>
+    </header>
+
+    <div class="layout legal-layout" id="top">
+      <main class="content legal" id="main">
+        <section id="intro">
+          <span class="eyebrow">Legal</span>
+          <h1>Privacy Policy</h1>
+          <p class="updated">Last updated: 2026-08-29</p>
+          <p class="lead">
+            <strong>tiktok-mcp-ai</strong> is software you install and run on your own
+            computer. There is no service behind it. The author operates no server,
+            receives no data from you, and has no technical means of observing what you
+            do with it. It is an independent project, not affiliated with, endorsed by,
+            or sponsored by TikTok or ByteDance Ltd.
+          </p>
+          <p>
+            That makes most of a conventional privacy policy inapplicable, and padding
+            it out with clauses that do not apply would obscure the parts that do. So
+            this document does something narrower and more useful: it states exactly
+            what the software writes to your disk, exactly which hosts it may contact,
+            and the one place where data genuinely leaves your control — the AI client
+            and model you choose to connect it to.
+          </p>
+          <p>
+            Every statement below is a description of the published source code. Where a
+            claim rests on a specific mechanism, the mechanism is named so you can go
+            and read it.
+          </p>
+          <p>
+            <a href="index.html">← Back to the documentation</a>
+          </p>
+        </section>
+
+        <section id="who">
+          <h2>Who is responsible for what</h2>
+          <p>
+            The software is published by Ivan Baev as an open-source npm package and a
+            public GitHub repository. Publishing is where the author's involvement ends.
+            He is not a party to your use of TikTok, does not host a deployment of this
+            server, and provides no account, login, or backend of any kind.
+          </p>
+          <p>
+            Two separate things carry the project's name, and it is worth keeping them
+            apart. The first is <strong>this documentation website</strong>, a static
+            site served from GitHub Pages — see
+            <a href="#website">This website</a>. The second is
+            <strong>the server itself</strong>, which runs as a local, single-user
+            process launched by your MCP client. Everything between here and that
+            section describes the second one.
+          </p>
+          <div class="callout">
+            <span class="c-ico" aria-hidden="true">🔐</span>
+            <p>
+              There is no controller collecting your data, because there is no
+              collection. The data this software handles moves between your machine and
+              TikTok, plus the AI client you point it at. It never reaches the author.
+            </p>
+          </div>
+        </section>
+
+        <section id="local-storage">
+          <h2>What the software stores, and where</h2>
+          <p>
+            The server keeps no database. Its entire persistent state is two files in
+            one directory on your machine: an environment file holding credentials, and
+            an append-only publish journal.
+          </p>
+          <p>The environment file is resolved in this order:</p>
+          <ul>
+            <li><code>TT_ENV_FILE</code>, if you set it, wins outright.</li>
+            <li>
+              On Linux and macOS,
+              <code>$XDG_CONFIG_HOME/tiktok-mcp-ai/.env</code>, falling back to
+              <code>~/.config/tiktok-mcp-ai/.env</code>.
+            </li>
+            <li>
+              On Windows, <code>%LOCALAPPDATA%\tiktok-mcp-ai\.env</code>.
+              <code>%APPDATA%</code> is deliberately not used: roaming profiles
+              replicate to other machines, and tokens must not roam.
+            </li>
+          </ul>
+          <p>For each configured account, that file holds:</p>
+          <ul>
+            <li>the TikTok user access token and the time it expires;</li>
+            <li>the refresh token and the time it expires;</li>
+            <li>
+              the <code>open_id</code> — TikTok's pseudonymous, per-application
+              identifier for the account;
+            </li>
+            <li>the OAuth scopes that were granted.</li>
+          </ul>
+          <p>
+            Alongside them sit your own TikTok application's
+            <code>TT_CLIENT_KEY</code> and <code>TT_CLIENT_SECRET</code>. The client
+            secret is steered into this file rather than into your MCP client's JSON
+            configuration, because that configuration is routinely copied into chat
+            windows and issue reports.
+          </p>
+          <p>
+            The file is written atomically — a temporary file created with mode
+            <code>0600</code>, flushed, renamed into place, then re-<code>chmod</code>ed
+            — inside a directory created with mode <code>0700</code>. Concurrent
+            processes serialize their writes through a cross-process lock on that file,
+            so two servers refreshing the same account cannot interleave and lose a
+            rotated refresh token. On Windows there is no POSIX mode to enforce; the
+            protection boundary there is the default access control list of your
+            per-user profile directory, which is documented in
+            <a
+              href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/docs/SECURITY.md"
+              target="_blank"
+              rel="noopener"
+              >docs/SECURITY.md</a
+            >.
+          </p>
+          <p>
+            Nothing else is persisted. No profile data, no video metadata, no media, no
+            conversation, no history of what was read.
+          </p>
+        </section>
+
+        <section id="journal">
+          <h2>The publish journal</h2>
+          <p>
+            Every attempt to post is recorded in an append-only NDJSON file,
+            <code>journal.ndjson</code>, written beside the environment file with the
+            same <code>0600</code> permissions. It exists so that an unattended publish
+            leaves an audit trail you can read, and so the server can refuse to post the
+            same payload twice inside a ten-minute window.
+          </p>
+          <p>Each attempt writes an intent record containing:</p>
+          <ul>
+            <li>
+              a record version, the record type, a unique attempt id, and an ISO-8601
+              UTC timestamp;
+            </li>
+            <li>the tool name, the profile name and the account's <code>open_id</code>;</li>
+            <li>
+              the single-use <code>plan_id</code> that authorized the write and a digest
+              of the payload;
+            </li>
+            <li>
+              a <code>title_excerpt</code> — the post's title with whitespace collapsed,
+              cut to 48 characters;
+            </li>
+            <li>the media source and the write mode in force.</li>
+          </ul>
+          <p>
+            When the attempt finishes, an outcome record follows with the same attempt
+            id and timestamp, the result, and — depending on the result — TikTok's
+            <code>publish_id</code>, an error code, a failure reason, or the chunk index
+            that failed.
+          </p>
+          <p>
+            That is the whole schema. The journal records
+            <em>that</em> you posted and <em>what it was called</em>; it never contains
+            the media, the full caption, or any credential. Every string written to it
+            passes through the same redaction primitive described below.
+          </p>
+          <p>
+            The journal rotates at 5 MB by default
+            (<code>TT_JOURNAL_MAX_BYTES</code>), keeping one previous generation as
+            <code>journal.ndjson.1</code>. It cannot be switched off. If you do not want
+            the history, delete the files — see <a href="#deletion">Deleting your data</a>.
+          </p>
+        </section>
+
+        <section id="network">
+          <h2>Where data travels</h2>
+          <p>
+            The server enforces a default-deny egress allowlist before any socket is
+            opened. A request whose URL does not satisfy every one of the following is
+            refused with an <code>egress_blocked</code> error rather than sent:
+          </p>
+          <ul>
+            <li>the scheme is exactly <code>https:</code>, never upgraded from http;</li>
+            <li>the URL carries no <code>user:password</code> credentials;</li>
+            <li>the port is 443;</li>
+            <li>
+              the host is exactly <code>open.tiktokapis.com</code> for API calls; and
+              for media uploads, exactly <code>open.tiktokapis.com</code>, exactly
+              <code>open-upload.tiktokapis.com</code>, or a regional upload host
+              matching <code>upload.&lt;region&gt;.tiktokapis.com</code>.
+            </li>
+          </ul>
+          <p>
+            Host matching is exact against the URL parser's normalized form, so
+            <code>eviltiktokapis.com</code> and
+            <code>open.tiktokapis.com.attacker.tld</code> are both rejected, and a
+            homograph domain is rejected too. Widening that list is a change to the
+            specification and to this file; it cannot be done through configuration at
+            runtime.
+          </p>
+          <p>
+            <strong>That is the complete set of network destinations.</strong> There is
+            no other address anywhere in the code that this server may open a connection
+            to.
+          </p>
+          <p>
+            Two related flows are worth naming precisely, because in both of them the
+            server is not the party making the request. When you log in, the
+            authorization page at <code>https://www.tiktok.com/v2/auth/authorize/</code>
+            is opened in <em>your</em> browser; that is your browser talking to TikTok,
+            and TikTok returns the authorization code to a one-shot listener bound to
+            <code>127.0.0.1</code> on your own machine. And when you publish with a
+            pull-from-URL source, you hand TikTok a URL and
+            <em>TikTok</em> fetches the bytes; the server never downloads them.
+          </p>
+          <p>
+            If you run the optional HTTP transport instead of the default stdio one, the
+            server binds a loopback socket and requires a bearer token
+            (<code>TT_HTTP_TOKEN</code>) before it will start. That socket is inbound and
+            local; it changes nothing about where data goes.
+          </p>
+        </section>
+
+        <section id="to-tiktok">
+          <h2>What is sent to TikTok</h2>
+          <p>
+            The server is a client for TikTok's official Display API and Content Posting
+            API, so what it sends is what those APIs require: your access token, the
+            field sets you asked for when reading, and the post you asked to publish.
+          </p>
+          <p>
+            Reading returns your own profile and videos. The available profile fields are
+            <code>open_id</code>, <code>union_id</code>, <code>avatar_url</code>,
+            <code>display_name</code>, <code>bio_description</code>,
+            <code>profile_deep_link</code>, <code>username</code>,
+            <code>is_verified</code>, and the
+            <code>follower_count</code>, <code>following_count</code>,
+            <code>likes_count</code> and <code>video_count</code> statistics — each
+            gated on the OAuth scope that covers it. Video queries return metadata such
+            as title, description, duration, cover and share URLs, embed markup, and
+            view, like, comment and share counts. Default field sets are deliberately
+            minimal; you get more only by asking for it.
+          </p>
+          <p>
+            Publishing sends the post's title or caption, the privacy level, the
+            interaction and disclosure settings, and the media. In file-upload mode the
+            server reads the file from disk and streams it to TikTok's upload host in
+            chunks; it may only read files beneath the directory you name in
+            <code>TT_MEDIA_ROOT</code>, and if you do not set that variable, reading
+            local files is disabled entirely.
+          </p>
+          <p>
+            Once data reaches TikTok it is governed by TikTok's own terms and privacy
+            policy, not by this one. The same is true of anything you publish: it is
+            your content on your account.
+          </p>
+        </section>
+
+        <section id="ai-client">
+          <h2>Your AI client and model</h2>
+          <p>
+            This is the disclosure that matters most, and it is the one a policy of this
+            kind is usually tempted to bury.
+          </p>
+          <p>
+            An MCP server is only useful because something reads its output. When a tool
+            returns your display name, your bio, your follower counts, or the titles and
+            descriptions of your videos, that result is handed to the MCP client you
+            connected — and the client puts it into the context of whatever model it is
+            driving. <strong>Your TikTok data therefore reaches the AI vendor you
+            chose.</strong> What happens to it from that point is governed by that
+            vendor's privacy policy and that client's settings, and neither this
+            software nor its author has any control over, or visibility into, it.
+          </p>
+          <p>
+            Choose that client and model as deliberately as you would choose anything
+            else you grant access to your account. Two mechanisms help you limit the
+            exposure:
+          </p>
+          <ul>
+            <li>
+              tool packages — <code>TT_TOOL_PACKAGES</code>,
+              <code>TT_PACKAGES_DENY</code> and <code>TT_PACKAGES_READONLY</code> — let
+              you expose only the tools you actually want the model to have;
+            </li>
+            <li>
+              login scopes are derived from the enabled packages, so a read-only
+              deployment never holds a token carrying posting authority.
+            </li>
+          </ul>
+          <p>
+            Credentials are the deliberate exception to all of this.
+            <strong>Tokens never transit an MCP tool in either direction.</strong>
+            Authorization happens only in the <code>login</code> command-line flow, and
+            the authentication-status tool reports expiry timestamps and a
+            <em>masked</em> <code>open_id</code> — never a token. A model driving this
+            server cannot read your credentials out of it.
+          </p>
+        </section>
+
+        <section id="redaction">
+          <h2>Logs, errors and redaction</h2>
+          <p>
+            The server writes diagnostic logs to stderr — your terminal, or wherever
+            your MCP client routes it. Stdout carries nothing but protocol frames. Logs
+            are not uploaded anywhere; there is no destination they could be uploaded
+            to.
+          </p>
+          <p>
+            Before anything is serialized to a log line, an error message, a tool
+            result, a plan preview, a journal row or <code>doctor</code> output, it
+            passes through a single redaction primitive that sits below every one of
+            those sinks. It works two ways at once. Structurally it is
+            <em>allowlist-based and default-deny</em>: a field whose name is not on an
+            explicit list has its value replaced with <code>[REDACTED]</code> at every
+            depth, so a newly added secret-bearing field is safe on the day it appears,
+            and the key name itself is scrubbed so a secret used as a key cannot leak.
+            Textually, the exact values of tokens, the client secret and upload tokens
+            are registered and scrubbed out of free text, sensitive query and form
+            parameters are masked by name, <code>Authorization: Bearer</code> headers
+            render as <code>Bearer ***</code>, and a bare URL is reduced to its origin
+            and path so that a credential in a query string cannot survive.
+          </p>
+          <p>
+            Identifiers that do appear in logs are pseudonymous and truncated: the
+            <code>open_id</code> is TikTok's per-application identifier, not your
+            username, and it is shortened before it is written.
+          </p>
+        </section>
+
+        <section id="telemetry">
+          <h2>No telemetry</h2>
+          <p>
+            The software collects no analytics, sends no usage reports, counts no
+            installations, checks for no updates, and transmits no crash reports. There
+            is no opt-out because there is nothing to opt out of.
+          </p>
+          <p>
+            This is a checkable claim rather than a promise. The egress allowlist above
+            admits TikTok's hosts and refuses everything else before a socket is opened,
+            so a phone-home would have to be one of those hosts to work at all; and the
+            package ships with two runtime dependencies, which is a small enough
+            surface to audit yourself.
+          </p>
+        </section>
+
+        <section id="website">
+          <h2>This website</h2>
+          <p>
+            The documentation site is static HTML, CSS and one JavaScript file, served
+            from GitHub Pages. That script does nothing but enhance the page you are
+            reading: the mobile menu, the back-to-top button, copy buttons, heading
+            anchors, the table of contents and the in-page search. It sets no cookie,
+            writes nothing to local or session storage, and makes no network request of
+            any kind. There is no analytics service, no tag manager and no tracking
+            pixel on any page of this site.
+          </p>
+          <p>
+            The two legal pages — this one and the
+            <a href="terms.html">Terms of Service</a> — load nothing at all beyond this
+            site's own stylesheet. The documentation home page additionally requests
+            three web fonts from Google Fonts, which means your browser contacts Google's
+            servers when you open it; those requests are subject to Google's policies,
+            not this one.
+          </p>
+          <p>
+            Because GitHub serves the pages, GitHub's servers necessarily see the
+            requests, and those server logs are GitHub's, handled under
+            <a
+              href="https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement"
+              target="_blank"
+              rel="noopener"
+              >GitHub's Privacy Statement</a
+            >. The author has no access to them and has configured no analytics or
+            visitor tracking of any kind.
+          </p>
+        </section>
+
+        <section id="deletion">
+          <h2>Deleting your data</h2>
+          <p>
+            Because there is no server, there is nothing to request from anyone. You
+            delete everything yourself:
+          </p>
+          <ul>
+            <li>
+              <strong>Tokens and credentials</strong> — delete the environment file, and
+              any <code>.pre-schema</code> backup sitting next to it. Running
+              <code>tiktok-mcp-ai doctor</code> prints the resolved path if you are not
+              sure where it is.
+            </li>
+            <li>
+              <strong>Publish history</strong> — delete
+              <code>journal.ndjson</code> and <code>journal.ndjson.1</code> from the same
+              directory.
+            </li>
+            <li>
+              <strong>TikTok's side</strong> — revoke this application's access from your
+              TikTok account settings, which invalidates the tokens regardless of what
+              remains on disk.
+            </li>
+            <li>
+              <strong>The software</strong> — uninstall the npm package.
+            </li>
+          </ul>
+          <p>
+            Data that already reached your AI client or your model vendor is outside all
+            of this; remove it through that vendor's own controls.
+          </p>
+        </section>
+
+        <section id="changes">
+          <h2>Changes to this policy</h2>
+          <p>
+            This page lives in the project's public Git repository, so every change to
+            it is a commit anyone can read, with a diff and a date. The
+            <em>Last updated</em> line at the top reflects the most recent substantive
+            revision; the commit history is the authoritative record. Changes take effect
+            when they are published here.
+          </p>
+        </section>
+
+        <section id="contact">
+          <h2>Contact</h2>
+          <p>
+            Questions about this policy, or a claim in it you believe is wrong, belong in
+            a
+            <a
+              href="https://github.com/IvanBBaev/tiktok-mcp/issues"
+              target="_blank"
+              rel="noopener"
+              >GitHub issue</a
+            >. If the matter is a security vulnerability, please use the private
+            reporting route described in
+            <a
+              href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/SECURITY.md"
+              target="_blank"
+              rel="noopener"
+              >SECURITY.md</a
+            >
+            instead of a public issue.
+          </p>
+          <p>
+            <a href="index.html">← Back to the documentation</a> ·
+            <a href="terms.html">Terms of Service →</a>
+          </p>
+        </section>
+      </main>
+    </div>
+
+    <footer>
+      <div class="foot-inner">
+        <div>
+          <strong>tiktok-mcp-ai</strong> · MIT License · built by Ivan Baev
+          <br />
+          An unofficial Model Context Protocol server for TikTok.
+        </div>
+        <div>
+          <a href="https://github.com/IvanBBaev/tiktok-mcp" target="_blank" rel="noopener"
+            >GitHub</a
+          >
+          ·
+          <a
+            href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/README.md"
+            target="_blank"
+            rel="noopener"
+            >README</a
+          >
+          ·
+          <a
+            href="https://github.com/IvanBBaev/tiktok-mcp/blob/main/SECURITY.md"
+            target="_blank"
+            rel="noopener"
+            >Security</a
+          >
+          · <a href="privacy.html">Privacy</a> · <a href="terms.html">Terms</a>
+        </div>
+      </div>
+      <p class="disclaimer" style="opacity: 0.7; font-size: 0.8rem; margin-top: 1rem">
+        <strong>Trademark &amp; affiliation.</strong> <strong>tiktok-mcp-ai</strong> is an
+        independent, community-built open-source project. It is <strong>not</strong>
+        affiliated with, endorsed by, sponsored by, or in any way officially connected to
+        TikTok, ByteDance Ltd., or any of their subsidiaries or affiliates.
+      </p>
+      <p class="disclaimer" style="opacity: 0.7; font-size: 0.8rem; margin-top: 0.6rem">
+        "TikTok" and all related names, marks, logos, and brand features are trademarks of
+        ByteDance Ltd. and its affiliates. They are used in this project only
+        <strong>nominatively</strong> — to identify the third-party service that this MCP
+        server connects to — as permitted by nominative fair use. No sponsorship or
+        endorsement is implied.
+      </p>
+      <p class="disclaimer" style="opacity: 0.7; font-size: 0.8rem; margin-top: 0.6rem">
+        This project accesses TikTok exclusively through the official TikTok for
+        Developers APIs and is subject to TikTok's Developer Terms of Service and platform
+        policies. You are responsible for your own use of the TikTok APIs and for
+        complying with all applicable TikTok terms. The software is provided "as is",
+        without warranty of any kind.
+      </p>
+    </footer>
+  </body>
+</html>

@@ -67,7 +67,8 @@ every tool):
 
 **Manifest in code.** `src/tools/index.ts` exports one `PACKAGES` structure —
 the single source consumed by (1) server registration, (2) the manifest
-snapshot test, (3) README tool-table generation, (4) `server.json` generation.
+snapshot test, (3) README tool-table generation, (4) the `server.json` sync check (its "N tools" claim — the file itself is
+hand-curated, never generated).
 The table above is what that snapshot is checked against; doc and code must not
 drift.
 
@@ -114,6 +115,16 @@ Auto-injected into every tool schema:
 - Unknown value ⇒ local error `unknown_account` (§ 3.0). When
   `TT_LOCK_PROFILE` is set, any explicit `account` other than the locked
   profile fails the same way.
+- Matching is **case-insensitive**: the value is trimmed and upper-cased
+  (`canonicalProfileName`) before it is compared, the same rule the env keys
+  follow — `work`, ` Work ` and `WORK` all resolve profile `WORK`, and
+  `data.meta.account` reports the canonical `WORK`. The `TT_LOCK_PROFILE`
+  comparison uses the same rule. An `unknown_account` error echoes the value
+  as the caller spelled it.
+- A **whitespace-only** value (`"  "`) names no account: it trims to nothing
+  and resolves exactly like an omitted `account` — the active profile, or the
+  locked one under `TT_LOCK_PROFILE` — never `unknown_account`. (`""` is
+  rejected by the schema's `min(1)`.)
 - Exception: on `tiktok_list_publish_journal` the parameter is a **filter**,
   not a profile resolution — see § 3.7.
 
@@ -130,10 +141,17 @@ budget, never mint a `plan_id`, and never touch the network.
 Oversized results are shaped by dropping trailing items, never fields
 mid-item. `data.meta.truncation = { truncated: true, reason: "char_budget" |
 "item_cap" | "cursor_stuck", returned, resume_cursor? }`, plus a cause-specific
-`note` hint. The three reasons are three different instructions: `char_budget`
-and `item_cap` are resumable and say so with a `resume_cursor`; `cursor_stuck`
-means the upstream stopped paginating (CC-C3) and deliberately carries none,
-because handing the cursor back would only buy the same page again.
+`note` hint. The three reasons are three different instructions: `item_cap`
+is resumable and says so with a `resume_cursor`; `cursor_stuck` means the
+upstream stopped paginating (CC-C3) and deliberately carries none, because
+handing the cursor back would only buy the same page again; `char_budget` is
+**not** cursor-resumable. When items are elided to fit
+`TT_RESULT_CHAR_BUDGET` (or only `data.meta` is kept), the result carries no
+cursor at all — `meta.next_cursor` is removed and the marker has no
+`resume_cursor` — because every cursor the tool had points past the whole
+fetched page and would skip the elided items; upstream cursors are opaque, so
+there is no cursor for "item N" to put in its place. The `note` says to narrow
+the request instead (fewer ids, a smaller page size).
 Truncation runs after redaction, never splits a UTF-16 surrogate pair, and
 never removes `ok`/`error`/`hints` (CC-G7).
 
@@ -196,7 +214,7 @@ surface. The presence of `plan_id` alone selects the step:
 - **Store:** in-process memory only, never persisted — a server restart
   invalidates all plans, and re-preview is the *designed* recovery.
   `Map<plan_id, { digest, profile, open_id, tool, created_at, used }>`; cap
-  `TT_PLAN_MAX_OUTSTANDING` = 32 (oldest evicted); TTL `TT_PLAN_TTL_S` = 600.
+  `TT_PLAN_MAX_OUTSTANDING` = 32 (oldest evicted, used plans before live ones); TTL `TT_PLAN_TTL_S` = 600.
 
 #### 2.6.3 Execute (`plan_id` present) — pipeline order is normative
 
@@ -208,7 +226,12 @@ surface. The presence of `plan_id` alone selects the step:
    `possible_duplicate` — leaves the bucket exactly as it found it.
 3. **Re-resolve** the payload through the same code path as the preview:
    re-stat the file (size/mtime/dev/ino must match the preview's resolution),
-   re-run the `creator_info` pre-flight on direct-post tools.
+   re-run the `creator_info` pre-flight on direct-post tools. The file
+   identity (`size:mtimeMs:dev:ino`) is bound to the plan itself
+   (`PlanRecord.fileIdentity`, CC-D3) — never sent upstream and never part of
+   the digest — so a file that changed since the preview fails verification
+   at step 5 with `plan_mismatch`, `details.reason: "file_changed"`, and its
+   own text (§ 3.0).
 4. Compute digest′ over the re-resolved payload.
 5. **Verify the plan**: exists ∧ not used ∧ not expired ∧ tool matches ∧
    digest matches ∧ open_id matches. The internal failure enum {unknown,
@@ -216,20 +239,50 @@ surface. The presence of `plan_id` alone selects the step:
    is surfaced as **exactly two** error codes: `plan_not_found`
    (unknown/expired/already_used) and `plan_mismatch`
    (payload/account/tool), with the § 3.0 texts.
-6. **Duplicate guard** (§ 2.6.5), unless `force: true`. A
-   `possible_duplicate` rejection happens **before** consumption, so the same
-   `plan_id` may be re-applied with `force` within its TTL after the user
-   verifies.
-7. **Take the rate token, then consume the plan atomically** (mark used) —
-   both *before* the init request is dispatched (CC-E7). The token is charged
-   last of the three refusals, so only a call that goes on to dispatch spends
-   one; if a concurrent apply emptied the bucket since step 2 the rejection is
-   `local_rate_limited` and the plan is still unconsumed, so the same
-   `plan_id` applies after the wait. A failed apply after the consume always
-   requires a fresh preview; a consumed plan is never revived.
+6. **Duplicate guard** (§ 2.6.5) — the journal check and the in-process
+   in-flight check — unless `force: true`. A `possible_duplicate` rejection
+   happens **before** consumption, so the same `plan_id` may be re-applied with
+   `force` within its TTL after the user verifies.
+7. **Peek the rate token, consume the plan atomically (mark used), then take
+   the token** — all *before* the init request is dispatched (CC-E7), with no
+   `await` between them. The peek comes first: if a concurrent apply emptied
+   the bucket since step 2 the rejection is `local_rate_limited` and the plan
+   is still unconsumed, so the same `plan_id` applies after the wait. The
+   consume comes next, so a plan lost in the window the duplicate guard's
+   file read opens (a concurrent apply consumed it) is refused
+   `plan_not_found` and **costs no token**. The take is last and cannot
+   refuse what the peek allowed — only a call that goes on to dispatch spends
+   a token. A failed apply after the consume always requires a fresh preview;
+   a consumed plan is never revived.
 8. Journal intent append, fsync'd (§ 2.9).
 9. Init dispatch (and chunk PUTs for `source: "file"`), then journal outcome
-   append.
+   append. A caller cancellation that lands while the send is in flight —
+   during the init or mid-upload — is `network_ambiguous`, journaled
+   `send_ambiguous` (a mid-upload one keeps the `publish_id` and the chunk,
+   and `details.publish_id` carries the id), because the init or the last
+   chunk may have completed anyway (CC-G4); the duplicate guard therefore
+   blocks a blind retry. A cancel that fired before the send began is still
+   a clean `error`. A transport failure (`network_error` / `timeout`) on the
+   **final** chunk is `network_ambiguous` for the same reason — the final
+   chunk's arrival completes the upload, and only its `201` may have been
+   lost — journaled `send_ambiguous` with the `publish_id` and chunk. Once
+   an attempt at the final chunk has lost its answer that way and been
+   replayed, **any** later failure of that chunk — retries exhausted on
+   `5xx`, or a terminal `403` / `404` / `400` answering the replay — is
+   `network_ambiguous` too, because the lost attempt may already have
+   completed the upload. A `416` on the final chunk whose reported progress
+   equals its last byte index (`total − 1`) is also `network_ambiguous`: until
+   probe P-11 pins the unit, that progress is either every byte or all but
+   one; progress of `total` or more completes the upload. A transport failure
+   on an earlier chunk stays `upload_interrupted` (`upload_failed`). A `2xx`
+   init answer without a readable `publish_id` is `network_ambiguous` as well,
+   journaled `send_ambiguous`: the init may have been accepted and only its
+   answer is unreadable, so it must not journal the `error` the duplicate
+   guard lets through. The same goes for an init answered by a gateway
+   rather than by TikTok — a `2xx` or `5xx` whose body is not JSON or not a
+   JSON object, or a `5xx` envelope without an `error.code`: like an init
+   timeout, it is `network_ambiguous`, journaled `send_ambiguous`. A `4xx`
+   and any answer with an explicit `error.code` keep their normal mapping.
 
 `force: true` overrides **only the duplicate guard**. It never bypasses
 validation, the plan verification, the rate bucket, or the write mode.
@@ -244,12 +297,36 @@ validation, the plan verification, the rate bucket, or the write mode.
 
 #### 2.6.5 Duplicate guard
 
-The guard scans a bounded tail of the journal's active generation. A prior
-attempt with the **same payload digest** within the last **10 minutes** whose
+The guard scans a bounded 256 KiB tail of the journal's active generation
+and, when the whole active file fits in that budget, the newest part of the
+rotated `.1` generation within the remaining budget — an intent rotated out
+of the active file still counts. A prior
+attempt **on the same profile** (compared by canonical spelling, CC-F4 — the
+same video on two accounts is two posts) with the **same payload digest**
+within the last **10 minutes** whose
 outcome is `ok` or `unknown` (including `send_ambiguous`, § 2.9) trips
 `possible_duplicate` unless `force: true`. Outcomes `error` and
 `upload_failed` never trip the guard — clean failures are freely retryable
-with a fresh preview.
+with a fresh preview. The `possible_duplicate` text names the matched
+attempt's profile.
+
+The journal alone cannot see an attempt that has not appended its intent yet:
+two applies of *different* plans for the same payload could both pass the
+journal check before either wrote one. So an in-process **in-flight guard**
+also refuses an unforced apply whose (profile, payload digest) is currently
+being dispatched by another call in the same process — `possible_duplicate`
+with `details.in_flight: true`, not retryable. The message tells the caller to
+wait for that attempt to finish, check `tiktok_list_publish_journal` and
+`tiktok_get_publish_status`, and only if no post was created re-preview and
+apply with `force: true`. The entry is registered **before** the journal
+read — registering it after would let a dispatch that appended its intent,
+posted and settled while the read was pending slip past both checks, so two
+concurrent identical applies could both pass — and it is released on every
+later refusal (journal duplicate, `local_rate_limited`, a plan lost at
+consume) and on any exception the guards throw after registering it, or,
+otherwise, when the dispatch settles. `force: true` skips the
+check like the journal check, but still registers the entry: a forced apply
+is a dispatch an unforced one for the same payload must not race.
 
 ### 2.7 `wait_for_completion` policy
 
@@ -337,7 +414,7 @@ seven. Per-tool sections list only additions.
 |---|---|---|
 | `invalid_params` | no | "Invalid arguments: <field>: <local validation reason>. Fix the arguments and call again. No request was sent to TikTok." |
 | `unknown_account` | no | "Unknown account '<name>'. Configured profiles: <list>. Omit account to use the default profile ('<default>')." |
-| `missing_scope` | no | "Account '<profile>' was authorized without scope <scope>, which this tool requires. Ask the user to run: npx tiktok-mcp-ai login --profile <profile> --scopes <scope> — then verify with tiktok_get_auth_status." |
+| `missing_scope` | no | "Account '<profile>' was authorized without scope <scope>, which this tool requires. Ask the user to run: npx tiktok-mcp-ai login --profile <profile> --scopes <scope> — then verify with tiktok_get_auth_status." Unconfigured form (the profile has no stored credentials at all — not listed, or it stores neither an access nor a refresh token, e.g. DEFAULT before the first login or a profile holding only app keys — or its record cannot be read), `details: { profile, missing_scope, configured: false }` and a `reauth` hint whose command carries no `--scopes`: "Account '<profile>' has no stored credentials, so it grants no scopes; this tool requires <scope>. Ask the user to run: npx tiktok-mcp-ai login --profile <profile> — then verify with tiktok_get_auth_status." |
 | `auth_expired` | no | "TikTok rejected the token for account '<profile>' and automatic refresh failed. Ask the user to run: npx tiktok-mcp-ai login --profile <profile>. Do not retry this call until re-login completes." |
 | `rate_limited` | yes | "TikTok rate limit reached for this endpoint. Wait until <retry_at> (<retry_after_s> s) and call again. Do not retry earlier." |
 | `upstream_error` | varies | "TikTok returned an error: <mapped taxonomy category — never raw upstream text>. log_id <log_id> (quote this when contacting TikTok support). <recovery action per taxonomy class>." |
@@ -352,10 +429,10 @@ seven. Per-tool sections list only additions.
 | `active_user_cap` | no | "This app is unaudited and already served its maximum of 5 posting users in the last 24 h (reached_active_user_cap). Do not retry today. The permanent fix is the developer passing TikTok's app audit." |
 | `pending_share_cap` | no | "TikTok blocked this draft: the account already has 5 unpublished API drafts from the last 24 h (spam_risk_too_many_pending_share). Ask the user to open TikTok's inbox notifications and publish or discard pending drafts, then try again." |
 | `plan_not_found` | no | "This plan_id is unknown, already used, or expired (plans are single-use and expire <ttl> minutes after the preview). Call the tool again WITHOUT plan_id to generate a fresh preview, show it to the user, and apply with the new plan_id only after the user approves." |
-| `plan_mismatch` | no | "The arguments (or the target account) differ from what this plan_id previewed. A plan applies only the exact previewed payload. Call the tool again WITHOUT plan_id to preview the changed arguments, show the new preview to the user, then apply with the new plan_id." |
-| `possible_duplicate` | no | "A publish attempt with an identical payload (same media, text and settings — the guard matches the whole resolved request, not any single field) on account '<profile>' was journaled at <ts> with outcome '<ok\|unknown>'<, publish_id <id>>. Verify with tiktok_get_publish_status and tiktok_list_publish_journal that no post was created. Only if confirmed, re-preview and apply with force: true." |
+| `plan_mismatch` | no | "The arguments (or the target account) differ from what this plan_id previewed. A plan applies only the exact previewed payload. Call the tool again WITHOUT plan_id to preview the changed arguments, show the new preview to the user, then apply with the new plan_id." File-changed form (CC-D3, § 2.6.3 step 3), `details: { reason: "file_changed" }`: "The file changed since plan: the file at file_path no longer matches the size, modification time and identity captured when the preview was generated. Generate a fresh preview and apply again." |
+| `possible_duplicate` | no | "A publish attempt with an identical payload (same media, text and settings — the guard matches the whole resolved request, not any single field) on account '<profile>' was journaled at <ts> with outcome '<ok\|unknown>'<, publish_id <id>>. Verify with tiktok_get_publish_status and tiktok_list_publish_journal that no post was created. Only if confirmed, re-preview and apply with force: true." In-flight form (§ 2.6.5), `details: { in_flight: true }`: "A publish attempt with an identical payload on account '<profile>' is being sent right now. Wait for it to finish, then check tiktok_list_publish_journal and tiktok_get_publish_status. Only if no post was created, re-preview and apply with force: true." |
 | `network_unsent` | no | "The network failed before the publish request was sent — TikTok received nothing and no post was created (journal outcome 'error'). When the connection recovers, generate a fresh preview and apply with the new plan_id." |
-| `network_ambiguous` | no | "The network failed after the publish request may already have been sent — the post MAY exist upstream. Do NOT apply again. Check tiktok_list_publish_journal (the latest entry will show outcome 'unknown') and tiktok_get_publish_status or tiktok_list_videos first; retry only if no post exists, with a fresh preview." |
+| `network_ambiguous` | no | "The network failed after the publish request may already have been sent — the post MAY exist upstream. Do NOT apply again. Check tiktok_list_publish_journal (the latest entry will show outcome 'unknown') and tiktok_get_publish_status or tiktok_list_videos first; retry only if no post exists, with a fresh preview." Also the answer to a caller cancellation that lands while the send is in flight (CC-G4); after the init it carries `details: { publish_id }`. |
 | `media_root_not_configured` | no | "source \"file\" is disabled: the operator has not set TT_MEDIA_ROOT (the only directory this server may read media from). Ask the user to set TT_MEDIA_ROOT in the server configuration and restart, or host the media on a verified URL and use source \"url\"." |
 | `file_outside_media_root` | no | "file_path resolves to <resolved_abs_path>, which is outside the configured media root <TT_MEDIA_ROOT>. This server only reads media inside that directory (operator policy). Ask the user to move the file there or to change TT_MEDIA_ROOT. Do not attempt alternative paths." |
 | `file_not_found` | no | "file_path <resolved_abs_path> does not exist or is not a regular file. Ask the user for the correct path under <TT_MEDIA_ROOT>." |
@@ -373,6 +450,55 @@ name a field their schema does not have. For those two tools the sentence
 under a verified prefix."* is replaced by *"Ask the user to host the media under
 a verified prefix."* — nothing else in the message changes.
 
+#### Upstream values in error and recovery text
+
+A catalog message is not only a diagnostic. "Check `tiktok_get_publish_status`
+for `<publish_id>`", "verify with `tiktok_list_videos` before retrying" — these
+are instructions, and a model acts on them exactly as it acts on a hint. § 5.2
+rule 3 states the consequence for hints; the same reasoning, and the same pair
+of checks, govern the two other channels this server writes instruction prose
+into:
+
+- `error.message` — every text in the tables above;
+- `data.fail_recovery` (§ 3.6) — prose in a data field, but prose that tells the
+  model what to do next.
+
+**The rule.** A placeholder in a catalog message is server-filled. A value that
+*originated upstream* may be filled in only as one of the two classes § 5.2
+rule 3 admits — a single opaque identifier the recommended next call must quote
+back, or a member of a closed vocabulary this server owns — and only through the
+checks that decide those classes (`hintToken`, `hintEnum` in `mcp/result.ts`).
+Everything else stays in `error.details` / `data`. A refused value is never
+truncated or escaped into the sentence: it is dropped, and the sentence names
+the structured field that still holds it, exactly as rule 3 prescribes. Three
+messages carry such a value, and each has a **sanctioned variant** for the case
+where the check refuses it:
+
+| Message | Admitted | Refused |
+|---|---|---|
+| `upload_interrupted` | "…retries (publish_id `<id>`)… Check tiktok_get_publish_status for `<id>`;…" | "…retries (the publish_id is in details.publish_id)… Check tiktok_get_publish_status for that publish_id;…" |
+| `possible_duplicate` | "…with outcome '`<ok\|unknown>`', publish_id `<id>`. Verify…" | the `, publish_id <id>` clause is omitted — the same sentence an attempt with no id already produces |
+| `fail_recovery`, *(unknown value)* row of Appendix A | "TikTok reported an unrecognized failure code '`<value>`'. Treat…" | "TikTok reported an unrecognized failure code (it is in fail_reason beside this text). Treat…" |
+
+In all three the structured field beside the text — `details.publish_id`,
+`data.fail_reason` — carries the unfiltered value, so nothing upstream is lost;
+only its route into a sentence is closed. Why refusal rather than a bounded
+truncation: a clipped identifier is worse than an absent one, because a model
+would quote it back and get `invalid_publish_id`, and clipping a `fail_reason`
+would render whatever prose it carried *inside* this server's own recovery
+sentence, which is the injection the rule exists to prevent.
+
+**Where this binds.** In the tool layer, where an error becomes a `ToolResult` —
+`src/tools/`, checked by a source walk in `test/result.test.ts` and by a
+poisoned-fixture sweep in `test/hint-guard.test.ts`. Two divergences below that
+layer are known and **not** covered: `core/http.ts` appends up to
+`UPSTREAM_TEXT_MAX` (200) characters of upstream text to the messages that
+become `upstream_error` and `oauth_error`, which is what the `upstream_error`
+row and the first note below already forbid; and `api/publish.ts` joins the
+upstream privacy-option list into `privacy_level_unavailable`. Both are recorded
+here rather than blessed: closing them means moving the guard to where those
+errors become `ToolResult`s, not widening the rule.
+
 **Per-tool additions** (defined in their sections): `publish_not_found`
 (§ 3.6), `journal_unreadable` (§ 3.7).
 
@@ -380,7 +506,8 @@ Notes:
 
 - `upstream_error` message composition never interpolates upstream free text
   (trust boundary, § 5); it names the mapped taxonomy class and preserves
-  `log_id` in the structured field.
+  `log_id` in the structured field. As built, `core/http.ts` does append a
+  capped upstream snippet — see the divergence recorded above.
 - Upstream cap/verification codes are remapped: `spam_risk_too_many_posts` →
   `daily_post_cap`, `reached_active_user_cap` → `active_user_cap`,
   `spam_risk_too_many_pending_share` → `pending_share_cap`,
@@ -481,7 +608,8 @@ Notes:
   | `fields` | string[] | no | enum; default set excludes `cover_image_url` | "Video fields to return. Omit for the default set (id, title, create_time, duration, stats, share_url)." |
 
 - **Output:** `{ videos: [...], meta: { has_more, next_cursor?,
-  truncation? } }`.
+  truncation? } }`. A `char_budget` truncation removes `next_cursor` (§ 2.4):
+  shrink `max_count` rather than paging on from an elided result.
 - **Errors:** shared catalog only. Cursor-loop guard (CC-C2): a non-advancing
   upstream cursor terminates the fetch with `truncated: true` and a `note`
   hint.
@@ -572,7 +700,10 @@ Notes:
   uploaded_bytes?, downloaded_bytes?, checked_at }`. `publish_id` is always
   present in the result, including on a poll timeout. `public_post_id` is
   normalized from upstream's misspelled `publicaly_available_post_id` (both
-  spellings accepted). `fail_recovery` carries the normative text from
+  spellings accepted) and is always a string of the exact decimal id: TikTok
+  sends these int64 ids as bare JSON numbers, and an integer beyond 2^53 is
+  kept as its exact source digits when the response is parsed instead of being
+  rounded to a different id. `fail_recovery` carries the normative text from
   Appendix A for the reported `fail_reason`.
 - **Wait semantics:** terminal-beats-deadline; timeout-is-not-error (§ 2.7).
   On timeout the result carries a `poll` hint with a fresh absolute
@@ -610,9 +741,9 @@ Notes:
 
   | Field | Type | Req | Constraints | `.describe()` |
   |---|---|---|---|---|
-  | `account` | string | no | | "Filter to one profile. Omit for all profiles." (a filter, not a profile resolution — no default profile is applied) |
+  | `account` | string | no | | "Filter to one profile. Omit for all profiles." (a filter, not a profile resolution — no default profile is applied; matched after trim and upper-case, like § 2.2; a whitespace-only value filters nothing, like an omitted one; under `TT_LOCK_PROFILE` the rows are always the locked profile's, and another name returns none) |
   | `limit` | integer | no | 1–100, default 20 | "Newest entries to return." |
-  | `since` | string | no | ISO-8601 | "Only entries at or after this UTC timestamp." |
+  | `since` | string | no | ISO-8601, strict: a date (`2026-01-01`, read as UTC midnight) or a date-time with `Z` or an explicit offset (`2026-01-01T12:00:00Z`, `2026-01-01T14:00:00+02:00`) | "Only entries at or after this UTC timestamp." (a zone-less date-time, which `Date.parse` would read as local time, or any looser string is `invalid_params` — "since must be an ISO-8601 UTC timestamp, e.g. \"2026-01-01T00:00:00Z\"" — never a silent empty result) |
 
 - **Output:** `{ entries: [{ ts, account, tool, title_excerpt, publish_id?,
   outcome, error_code? }], meta: { journal_path, total_matching,
@@ -719,7 +850,9 @@ Notes:
   "PROCESSING_UPLOAD" | "PROCESSING_DOWNLOAD", journal: "recorded" |
   "unavailable" }` + `poll` hint. With `wait_for_completion: true`,
   additionally the final observed `status` (+ `public_post_id` when
-  complete) — and on poll timeout a `poll` hint carrying `poll_after` like
+  complete; + `fail_reason` and `fail_recovery` when the observed status is a
+  terminal `FAILED` — the same pair, with the same Appendix A texts, that
+  `tiktok_get_publish_status` returns) — and on poll timeout a `poll` hint carrying `poll_after` like
   every other one (§ 2.7), with the graceful wording: *"Still
   PROCESSING_UPLOAD after 60 s — normal for large videos. Call
   tiktok_get_publish_status with publish_id <id> after <poll_after>; do not
@@ -771,7 +904,10 @@ Notes:
   `account` block is `{ profile, open_id_masked }`; `nickname` comes from
   `creator_info` and is therefore absent here. Apply success carries a
   `user_action` hint: *"Tell the user: open the TikTok app notification to
-  edit and publish the draft. Unopened drafts expire."*
+  edit and publish the draft. Unopened drafts expire."* — except when
+  `wait_for_completion` observed a terminal `FAILED`: that draft never reached
+  the inbox, so there is nothing to open and no `user_action` is given (the
+  `fail_reason`/`fail_recovery` pair of § 3.8 carries the outcome instead).
 - **Errors:** shared catalog; `pending_share_cap` is the signature error
   here. No `privacy_level_unavailable` / `branded_content_privacy_conflict`
   (the fields do not exist on this tool).
@@ -869,7 +1005,8 @@ Notes:
   `consent_line`, `account` without `nickname` — **except** that `payload`
   carries `post_info` (the title and description limits of § 3.10, resolved
   without a `creator_info` pre-flight) alongside `source`. Apply success
-  carries the same `user_action` hint as § 3.9.
+  carries the same `user_action` hint as § 3.9, withheld under the same rule
+  when the waited status is `FAILED`.
 - **Errors:** shared catalog; `pending_share_cap`, `url_prefix_unverified`
   (per URL, by index, with no `source: "file"` alternative), `invalid_params`
   for an out-of-range `photo_cover_index` or an over-long title/description.
@@ -907,7 +1044,9 @@ Notes:
    (`upload_url` is never persisted or returned). Recovery: fresh preview,
    fresh `plan_id`, apply — `upload_failed` does **not** trip the duplicate
    guard, so no `force` is needed. The ambiguous variant
-   (`network_ambiguous`, journal `unknown`) DOES trip the guard: verify via
+   (`network_ambiguous`, journal `send_ambiguous` or `unknown` — including
+   any failure of a final chunk whose earlier attempt lost its answer, § 2.6
+   step 9) DOES trip the guard: verify via
    status/journal/list, then use `force` deliberately.
 4. **Re-auth.** `auth_expired` + `reauth` hint with the exact CLI command —
    **[impossible]** the model re-authenticating by itself (login is a
@@ -934,7 +1073,7 @@ in CONTRACTS.md § mcp/result.ts.
 | `wait` | `retry_after_s: number`, `retry_at: ISO-8601 UTC` | Rate limits (upstream 429, local bucket), transient upstream throttles |
 | `poll` | `tool: string`, `publish_id: string`, `poll_after: ISO-8601 UTC` | After apply (default no-wait), after a status-poll timeout |
 | `approval_required` | `plan_id: string`, `expires_at: ISO-8601 UTC` | Every `mode: "plan"` preview |
-| `user_action` | `action: "login" \| "open_tiktok_app" \| "move_file" \| "host_media" \| "configure_server" \| "wait_for_audit"` | Anything only the human/operator can do |
+| `user_action` | `action: "login" \| "open_tiktok_app" \| "move_file" \| "host_media" \| "configure_server"` | A step only the human/operator can take *next*, before this call can proceed. A standing condition of the installation — an unaudited app, say — is a `note`. The step must still be able to unblock *this* call: on a write past the init the attempt exists upstream (CC-B4), so that failure carries a status `poll` or nothing, never a `user_action` |
 | `reauth` | `command: string` (exact CLI line), `profile: string` | `auth_expired`, `auth_removed`, revocation |
 | `note` | — | Informational: truncation cause, draft-inbox reminder, `journal: "unavailable"`, unaudited explanation |
 
@@ -945,22 +1084,68 @@ Every hint additionally has `text: string` — the model-facing sentence(s).
 1. `text` is 1–3 short imperative sentences, ≤ 300 characters total.
    Concrete values (tool names, profile names, timestamps, commands) are
    inlined; vague references ("try later", "the relevant tool") are
-   forbidden.
+   forbidden. The 300 is enforced at runtime in exactly one place — the
+   pagination note in `mcp/result.ts`, the only hint whose length depends on
+   a value no static reading can bound (the resume cursor), which drops the
+   cursor rather than exceed the cap. Every other hint is a fixed server
+   template plus values bounded by `MAX_HINT_TOKEN_CHARS` or by a server-owned
+   vocabulary, so an over-long one is a bug in this server's templates and is
+   caught by the source walk in `test/result.test.ts` before it ships.
+   Truncating hints at serialization was rejected: what a clip removes is the
+   end of the sentence, and that is where the negative imperative lives ("Do
+   not re-post.") — precisely the half a caller about to poll must not lose.
 2. Times are always **absolute ISO-8601 UTC in the text**, with relative
    seconds only in structured fields. Models cannot reliably do "in 37 s"
    arithmetic across turns; they can compare clocks.
 3. **Trust boundary — no upstream interpolation.** Hint text is composed
    exclusively from server-owned templates plus a whitelist of interpolants:
-   configured profile names, tool names, enum values, numbers, ISO
-   timestamps, and the server's own CLI command strings. TikTok-supplied
-   strings (error messages, titles, nicknames, any user content) never enter
-   a hint. Upstream text lives only in clearly-labeled data fields — a hint
-   is an instruction channel, and instructions must have exactly one author.
+   configured profile names, tool names, numbers, ISO timestamps, the
+   server's own CLI command strings, and members of the closed vocabularies
+   this server itself defines. TikTok-supplied strings (error messages,
+   titles, nicknames, any user content) never enter a hint. Upstream text
+   lives only in clearly-labeled data fields — a hint is an instruction
+   channel, and instructions must have exactly one author.
+
+   Exactly two upstream-*originated* values are admissible, and only after a
+   check at the hint boundary — the boundary, not the API layer, because the
+   API layer deliberately reports what it cannot recognize instead of
+   rejecting it:
+
+   a. **One opaque identifier the recommended next call must quote back** —
+      today only `publish_id`, which is why § 5.3's `poll` rendering inlines
+      it. Rule 1 forbids the vague alternative, and an identifier is a name,
+      not prose. Admissible only if it still looks like one: 1–64 characters
+      (`MAX_HINT_TOKEN_CHARS`), first character alphanumeric, the rest drawn
+      from `[A-Za-z0-9._~-]` — no whitespace, newline, quote or sentence
+      punctuation, so it can neither break out of its quotes nor carry an
+      instruction. A value that fails the check leaves the text, which then
+      names the field instead of the value; the unfiltered value always
+      remains one field away, in the hint's own `publish_id` or in `data`.
+      A *list* of upstream ids is never admissible — no single one has to be
+      quoted back, so rule 1 is satisfied by counts (CC-C7, `tools/video.ts`).
+   b. **A member of a closed vocabulary this server owns** — `PUBLISH_STATUSES`,
+      `PRIVACY_LEVELS`. What is inlined is the server's own literal *selected
+      by* the upstream value; nothing upstream is copied. A value matching no
+      member is free text, not an enum value: the text falls back to a
+      template that does not name it, and the raw value stays in `data`
+      (`data.status`, `data.creator.privacy_level_options`).
+
+   The bound and both checks live in `mcp/result.ts` — `MAX_HINT_TOKEN_CHARS`,
+   `hintToken`, `hintEnum`, `quotedHintToken`. Hint constructors go through
+   them; none interpolates an upstream-originated value directly.
+
+   This rule is not confined to `Hint.text`. The same reasoning, the same two
+   admissible classes and the same two checks govern the other prose a model
+   reads as instruction — `error.message` and `data.fail_recovery` — under
+   § 3.0 "Upstream values in error and recovery text", which lists the
+   sanctioned variant each of those messages falls back to.
 4. At most 3 hints per result, ordered most-actionable-first. A result that
    needs more than 3 is a design smell — fold the rest into `data`.
 5. Hints never contradict the error text; the error states cause + recovery,
    the hint operationalizes the recovery (exact call, exact time, exact
-   command).
+   command). The division of labour is about *content*, not about trust: an
+   instruction is an instruction in either channel, so both are held to
+   rule 3 (§ 3.0).
 
 ### 5.3 Examples (normative renderings)
 
@@ -979,7 +1164,18 @@ Every hint additionally has `text: string` — the model-facing sentence(s).
   (valid until 2026-07-22T09:40:00Z)." }`
 - `user_action` (draft): `{ type: "user_action", action: "open_tiktok_app",
   text: "Tell the user: open the TikTok app notification to edit and publish
-  the draft. Unopened drafts expire." }`
+  the draft. Unopened drafts expire." }` — on every draft apply except one whose
+  waited status is `FAILED` (§ 3.9).
+- `user_action` (`file_outside_media_root`): `{ type: "user_action", action:
+  "move_file", text: "Only the user can move files: ask them to put the file
+  inside the media root the error names, or to set TT_MEDIA_ROOT to a
+  directory that contains it and restart the server. Then call
+  tiktok_post_video again with the new file_path." }`
+- `user_action` (`url_prefix_unverified`): `{ type: "user_action", action:
+  "host_media", text: "Only the user can change where media is hosted: ask
+  them to serve it under a prefix listed in TT_VERIFIED_URL_PREFIXES, then
+  call tiktok_post_photos again with the new URL. Do not retry the same
+  URL." }`
 - `reauth`: `{ type: "reauth", profile: "brand", command: "npx tiktok-mcp-ai
   login --profile brand", text: "Ask the user to run: npx tiktok-mcp-ai login
   --profile brand — then verify with tiktok_get_auth_status before
@@ -1023,15 +1219,275 @@ authoritative.**
 
 ---
 
+## 7. Prompts and resources
+
+The tool surface above is the whole *write* surface and the whole *network*
+surface. Two more MCP primitives ride on top of it without adding either: a
+**prompt** is a rendered instruction that steers a client through the canonical
+flow of § 4 item 1, and a **resource** is a read-only tool exposed at a URI. Both
+are gated with the tool packages (§ 1, CONFIGURATION.md) — a prompt is listed
+when the package it steers to and every package whose tools its steps name are
+enabled, a resource when the tool it mirrors is — so `TT_TOOL_PACKAGES`, `TT_PACKAGES_DENY`, `TT_PACKAGES_READONLY` and
+`TT_WRITE_MODE=deny` need no second configuration. Names, URIs and arguments
+below are normative; the rendered prompt text and the resource descriptions are
+implementation, pinned by tests rather than restated here. A third utility,
+**argument completion** (§ 7.3), offers values for the arguments of both from
+local data alone — it adds no surface either.
+
+An unknown prompt name, an unknown resource URI, an invalid prompt argument and
+a completion ref that names none of them (§ 7.3) are **protocol errors**
+(JSON-RPC `-32602`, `McpError`), the same class as an unknown tool name — they
+are client bugs, not something a model can recover from by reading an
+envelope. Everything that can be recovered from stays an envelope
+(§ 2.1): a resource whose read fails upstream returns `ok: false` as JSON text,
+never a protocol error.
+
+### 7.1 Prompts
+
+Capability: `prompts: {}` — the list is fixed for the life of the process, so no
+`listChanged` is advertised.
+
+| Prompt | Package | Also requires | Arguments |
+|---|---|---|---|
+| `tiktok_post_video_guided` | `publish-write` | `publish` | `video` (required), `title`, `privacy_level`, `account` |
+| `tiktok_post_photos_guided` | `publish-write` | `publish` | `photo_urls` (required), `title`, `description`, `privacy_level`, `account` |
+| `tiktok_upload_draft_guided` | `publish-write` | `publish` | `video`, `photo_urls`, `title`, `description`, `account` — all optional; exactly one of `video` / `photo_urls` |
+
+Every flow's read steps (`tiktok_get_creator_info`, `tiktok_get_publish_status`,
+`tiktok_list_publish_journal`) live in the `publish` package, so each prompt
+declares `requires: ['publish']`: it is listed, served by `prompts/get` and
+completed only while **both** `publish-write` and `publish` are enabled. With
+`publish` off it is absent everywhere — `prompts/get` and a completion ref
+naming it answer `Unknown prompt` — rather than steering to tools the client
+cannot see.
+
+Every prompt renders **one `user` text message**: the situation in the user's
+own terms, then the numbered steps of the flow it steers, every tool named
+verbatim.
+
+`tiktok_post_video_guided` walks the client through § 4 item 1 with § 3.8's
+failure discipline attached: read `tiktok_get_creator_info`, preview with
+`tiktok_post_video` and no `plan_id` (mapping `video` to `source: "url"` +
+`video_url` when it starts with `https://`, else to `source: "file"` +
+`file_path`), show the options on `plan_incomplete` and *ask* rather than pick,
+show the preview and the `consent_line` and ask for explicit approval, execute
+with identical arguments plus the `plan_id`, follow the `poll` hint through
+`tiktok_get_publish_status` to `PUBLISH_COMPLETE`, and on `daily_post_cap` /
+`active_user_cap` stop, on `auth_expired` hand the login command to the user,
+on `possible_duplicate` verify through `tiktok_list_publish_journal` before
+`force`, and on `plan_mismatch` / `plan_not_found` re-preview rather than
+invent a token.
+
+`tiktok_post_photos_guided` is the same shape over § 3.10: read
+`tiktok_get_creator_info` for `privacy_level_options` and whether comments are
+disabled; preview with `tiktok_post_photos` and no `plan_id`, passing
+`photo_urls` as an array in the given order and `photo_cover_index` 0 unless the
+user named another cover, `title` / `description` / `privacy_level` when given,
+and `auto_add_music` only if the user wants music — without it the post plays
+silent, so the flow says to ask; on `plan_incomplete` show the options and ask;
+show `payload.post_info`, the derived rows, the `consent_line` and
+`payload.source`; approval in the user's own words; apply with identical
+arguments plus the `plan_id` (single-use, 10 minutes, `wait_for_completion`
+off); poll `tiktok_get_publish_status` to `PUBLISH_COMPLETE`. The failure
+discipline is the video flow's plus `url_prefix_unverified`, whose message
+names `photo_urls[<i>]`: the user must host that photo under a verified prefix
+— there is no file upload for photos — and a URL is never rewritten.
+
+`tiktok_upload_draft_guided` covers § 3.9 and § 3.11 with one prompt; the two
+media arguments decide which of four messages is rendered. A `video` ⇒ the
+`tiktok_upload_video_draft` flow; `photo_urls` ⇒ the
+`tiktok_upload_photos_draft` flow; both ⇒ a message that asks which one to send
+and lists no step; neither ⇒ a message that asks for one and lists no step. The
+two valid flows open by saying **not** to call `tiktok_get_creator_info` — a
+draft carries no privacy level or toggles, and a draft-only authorization
+(scope `video.upload` alone) may lack the scope that call needs — then preview
+without `plan_id` (always `mode: "plan"`), show `payload.source` (for a file,
+the chunk plan) and, for photos, `payload.post_info`, ask for approval, apply
+with identical arguments plus the `plan_id`, and poll to `SEND_TO_USER_INBOX`,
+after which the client tells the user to open the TikTok app inbox notification
+to edit and publish the draft (unopened drafts expire). On `pending_share_cap`
+the flow stops: TikTok allows 5 unpublished API drafts per account per 24 h, so
+the user publishes or discards drafts in the app, or waits. A photo draft
+passes `title` and `description` when given (`payload.post_info` shows them);
+a `title` or a `description` given with a `video` is stated as not sent — a
+video draft carries neither; the user writes them in the app — in one sentence
+when both are given.
+
+`photo_urls` is one string, because the protocol has string arguments only: it
+is split on commas and whitespace with blanks dropped, and the count and order
+are stated in the text ("3 photos, in this order: …"). A non-blank
+`photo_urls` that names no URL at all (`", ,"`) renders a message asking for
+them, with no steps — a rendered answer, not a `-32602`, because the argument
+was present; a blank one is the missing-required case below.
+
+Arguments are interpolated as sentences, and every user-supplied value in them
+— `video`, `title`, `description`, `account`, `privacy_level` and each photo
+URL — is **JSON-quoted** (`"My \"best\" clip"`), so a quote or a line break in
+a value cannot close the sentence and read as a step of its own. Each message
+stays under 2,500
+characters for a carousel of up to three URLs of realistic length (the bound
+the tests pin) — a longer carousel grows with its URLs.
+
+Argument rules (CC-G1's stance, applied at the protocol layer because
+`prompts/get` has no envelope to answer with):
+
+- An argument name the prompt does not declare ⇒ `-32602`
+  `Invalid arguments for prompt tiktok_post_video_guided: unknown argument "x"`.
+- Values are trimmed; a blank **optional** argument is treated as absent; a
+  blank or missing **required** one ⇒ `-32602 … missing required argument
+  "video"`.
+- The draft prompt's "both" and "neither" cases are likewise rendered text, not
+  protocol errors: all five of its arguments are optional, so nothing is missing
+  at the protocol layer, and "exactly one of `video` / `photo_urls`" is the
+  render's rule to state.
+
+### 7.2 Resources
+
+Capability: `resources: { listChanged: true }`.
+
+| URI | Name | Mirrors | Package |
+|---|---|---|---|
+| `tiktok://auth/status` | `tiktok_auth_status` | `tiktok_get_auth_status` (§ 3.1) | `auth` |
+| `tiktok://user/info` | `tiktok_user_info` | `tiktok_get_user_info` (§ 3.2) | `user` |
+| `tiktok://videos/recent` | `tiktok_videos_recent` | `tiktok_list_videos` (§ 3.3), one default page | `video` |
+| `tiktok://creator/info` | `tiktok_creator_info` | `tiktok_get_creator_info` (§ 3.5) | `publish` |
+| `tiktok://publish/journal` | `tiktok_publish_journal` | `tiktok_list_publish_journal` (§ 3.7), newest 20 across all profiles | `publish` |
+| `tiktok://publish/{publish_id}/status` | `tiktok_publish_status` | `tiktok_get_publish_status` (§ 3.6) with `wait_for_completion: false` | `publish` |
+
+Every resource is its tool called with the tool's **defaults** — the one fixed
+argument in the manifest is the status resource's `wait_for_completion: false`,
+because that tool's default polls for up to ~60 s and a snapshot that blocks is
+not a snapshot — through the same pipeline as `tools/call` (§ 2.2 account
+resolution, § 6.2 scope check, redaction, § 2.4 truncation under
+`TT_RESULT_CHAR_BUDGET`, § 2.5 token discipline), so a snapshot can never show
+something the tool would have refused. Consequences that follow from that and
+are contract:
+
+- **Account.** The profile rides in the query: `tiktok://user/info?account=work`.
+  `resources/templates/list` advertises `tiktok://user/info{?account}` for each
+  resource. Omitted ⇒ § 2.2's default; unknown ⇒ the tool's `unknown_account`
+  envelope as JSON text. `account` is the only query key. On
+  `tiktok://publish/journal` the query is the tool's **filter** (§ 2.2's one
+  exception): it narrows the rows to that profile and does not choose who
+  reads, so an unknown name yields an empty list rather than `unknown_account`.
+  Under `TT_LOCK_PROFILE` the journal is filtered to the locked profile
+  whatever the query says; another name narrows it to nothing.
+- **Templates.** `resources/list` carries the concrete URIs only;
+  `resources/templates/list` carries every resource as an RFC 6570 template —
+  `tiktok://user/info{?account}` for a concrete one,
+  `tiktok://publish/{publish_id}/status{?account}` for the one with a path
+  parameter. A `{name}` segment is a tool argument: reading
+  `tiktok://publish/v_abc/status` runs `tiktok_get_publish_status` with
+  `publish_id: "v_abc"` and `wait_for_completion: false`. The value is exactly
+  one non-empty path segment, percent-decoded (`tiktok://publish/v%2F1/status`
+  reads `v/1`); a concrete URI wins over a template that would also match it;
+  an empty segment (`tiktok://publish//status`) or a malformed escape
+  (`%E0%A4%A`) ⇒ `-32602 Unknown resource`. Reading the template *verbatim* is
+  not a protocol error: the braces survive percent-encoding and decoding, so
+  `{publish_id}` reaches the tool as an ordinary id, and the tool answers for
+  it as for any id TikTok does not know.
+- **Polling.** A read of `tiktok://publish/{publish_id}/status` is one status
+  request (TikTok allows 30 per minute, § 3.6); a client that wants to follow
+  processing reads again, or calls the tool with `wait_for_completion` left on.
+- **Read result.** One `contents` entry: `uri` echoes the request verbatim
+  (query included), `mimeType: "application/json"`, `text` is the § 2.1
+  envelope exactly as `tools/call` would mirror it in its text block —
+  `ok`, `data`, `error`, `hints`, `data.meta.account` stamped. A client that
+  wants `structuredContent` calls the tool.
+- **Paging.** `tiktok://videos/recent` is the first page and nothing else — the
+  envelope's `next_cursor` is the handle (absent after a `char_budget`
+  truncation, § 2.4), and the next page is
+  `tiktok_list_videos` with it. A snapshot that paginated would be a snapshot
+  that costs an unbounded number of requests.
+- **Unknown URI.** A URI that does not name a listed resource — a scheme other
+  than `tiktok://`, a trailing slash, a fragment (any `#`, an empty trailing
+  one included), userinfo or a port, a tab, CR or LF anywhere in it, a `.` or `..` path segment (plain or `%2e`-encoded), a
+  query key that is not literally `account` (an escape never spells it), an
+  `account` without `=`, an empty pair (`?&account=x`), a repeated or blank
+  `account`, a path that no concrete URI and no template matches, or a
+  resource whose package is not enabled — ⇒ `-32602`
+  `Unknown resource: <uri as sent>`. These are refused rather than repaired
+  because the WHATWG `URL` parser would silently normalize them into a
+  different URI. The `account` value is percent-decoded only — `+` stays a
+  plus, never a space.
+- **Availability.** A resource carries the same `[UNAVAILABLE: …]` marker as its
+  tool (§ 6.1), in front of its description — the template too: the status
+  resource lists as `[UNAVAILABLE: requires scope video.publish or
+  video.upload; …]` when no profile grants either. On a credential-store change
+  (§ 6.3) `notifications/resources/list_changed` is emitted together with
+  `notifications/tools/list_changed`. Reading an unavailable resource yields the
+  tool's `missing_scope` envelope — the marker is advisory here too.
+- **Cancellation.** A read forwards the request's cancellation to the tool
+  (CC-G4), so an abandoned read holds no network call open.
+
+### 7.3 Argument completion
+
+Capability: `completions: {}`. A client asks `completion/complete` with a
+`ref` — `{ "type": "ref/prompt", "name": "<prompt>" }` or
+`{ "type": "ref/resource", "uri": "<uri>" }` — an `argument` `{ name, value }`
+where `value` is what the user has typed so far, and optionally
+`context.arguments`, the arguments already filled in. The answer is
+`completion: { values, total, hasMore }`. Every source is **local data**: a
+completion never sends a request to TikTok and reads no token, so a client may
+ask on every keystroke.
+
+| Argument | Where | Source |
+|---|---|---|
+| `account` | every prompt; every resource (the `{?account}` variable — concrete URI or template) | the configured profile names (§ 2.2), read fresh from the credential store on each request; under `TT_LOCK_PROFILE` the locked name alone, because that is the only name a call would accept |
+| `privacy_level` | `tiktok_post_video_guided`, `tiktok_post_photos_guided` | the four privacy levels (§ 3.8): `PUBLIC_TO_EVERYONE`, `MUTUAL_FOLLOW_FRIENDS`, `FOLLOWER_OF_CREATOR`, `SELF_ONLY` |
+| `publish_id` | `tiktok://publish/{publish_id}/status` | the ids in the write-ahead journal (§ 3.7): newest attempt first, each id once, attempts without an id skipped; `context.arguments.account`, when present and non-blank, keeps that profile's attempts only — compared case-insensitively after trim, the filter `tiktok_list_publish_journal` applies; a blank account is no filter; under `TT_LOCK_PROFILE` only the locked profile's attempts, and another account narrows to nothing; no journal yet is no ids. The folded journal is reused while neither generation's size, mtime or inode has changed — a `stat` of each replaces the read; any append, rotation or replacement re-reads both generations |
+| `video`, `photo_urls`, `title`, `description` | the prompts | nothing — `{ "values": [], "total": 0, "hasMore": false }` is the answer, not an error |
+
+Rules:
+
+- **Matching.** `value` is a prefix, compared case-insensitively: `de` offers
+  `DEFAULT` and `DEMO`, `Mutual_` offers `MUTUAL_FOLLOW_FRIENDS`, and `ONLY`
+  offers nothing — a substring is not a prefix. An empty `value` offers the
+  whole source. The source's own order is kept, never re-sorted.
+- **Cap.** At most 100 values are sent — the protocol's limit. `total` counts
+  every match and `hasMore` is `true` only when there were more than 100, so a
+  capped answer is distinguishable from a complete one; exactly 100 matches is
+  not "more".
+- **Refs.** A prompt is named as listed. A resource is named by the URI it was
+  listed under — the concrete URI (`tiktok://videos/recent`) or the template
+  (`tiktok://publish/{publish_id}/status{?account}`); the template without its
+  query part (`tiktok://publish/{publish_id}/status`) is accepted too. A read
+  URI with the parameter filled in (`tiktok://publish/v_abc/status`) names no
+  listed resource.
+- **Protocol errors** (`-32602`, the class above): a prompt that is not listed
+  — one of a disabled package included — ⇒ `Unknown prompt: <name>`; a resource
+  ref that matches no listed URI or template — a read URI, a resource whose
+  package is not enabled — ⇒ `Unknown resource: <uri as sent>`; an argument the
+  prompt does not declare ⇒ `Invalid arguments for prompt <name>: unknown
+  argument "<argument>"`; a name that is neither `account` nor a path parameter
+  of the resource ⇒ `Invalid arguments for resource <uri>: unknown argument
+  "<argument>"` — on `tiktok://videos/recent`, `max_count` is an argument of the
+  tool, not a variable of the URI.
+- **No network, ever.** No source calls TikTok; the journal and the credential
+  store are read the way the tools read them (`tiktok_list_publish_journal`,
+  § 2.2), and a completion is never a reason to refresh a token.
+- **Local failures complete to nothing.** Once the ref and argument are valid,
+  any failure computing the candidates — an unreadable journal, an unreadable
+  credential store — is logged as a `completion failed` warning on stderr and
+  answered `{ "values": [], "total": 0, "hasMore": false }`, never a JSON-RPC
+  error that would carry a local path to the client.
+- **Not on the wire.** Where an argument completes from is server data:
+  `prompts/list` describes an argument by `name`, `description` and `required`
+  only, and `resources/templates/list` is unchanged. A client learns what
+  completes by asking.
+
+---
+
 ## Appendix A — `fail_reason` → recovery mapping
 
 Normative `fail_recovery` texts returned by `tiktok_get_publish_status`
-(§ 3.6) when `status: "FAILED"`:
+(§ 3.6) when `status: "FAILED"`, and by the four write tools' applied result
+when `wait_for_completion: true` observed a terminal `FAILED` (§ 3.8):
 
 | `fail_reason` | Recovery text (normative) |
 |---|---|
 | `file_format_check_failed` | "The file is not a format TikTok accepts (MP4/WebM/MOV). Re-encode and post again with a fresh preview." |
-| `duration_check_failed` | "Video duration is outside this account's allowed range (max <max_video_post_duration_sec> s per creator info). Trim or re-encode." |
+| `duration_check_failed` | "Video duration is outside this account's allowed range (call tiktok_get_creator_info for max_video_post_duration_sec). Trim or re-encode." |
 | `frame_rate_check_failed` | "Frame rate is outside TikTok's 23–60 FPS range. Re-encode." |
 | `picture_size_check_failed` | "Dimensions are outside TikTok's limits (videos 360–4096 px; photos up to 1080p). Resize." |
 | `video_pull_failed` / `photo_pull_failed` | "TikTok could not download the media URL. It must be HTTPS, serve the bytes without redirects, and stay reachable for about an hour. Fix the hosting and post again." |
@@ -1039,8 +1495,17 @@ Normative `fail_recovery` texts returned by `tiktok_get_publish_status`
 | `auth_removed` | "The user revoked this app's access in TikTok settings. Ask the user to run the login CLI again." |
 | `spam_risk_text` | "TikTok's spam filter rejected the title or description wording. Change the text and post again." |
 | `spam_risk` / `spam_risk_too_many_posts` | "TikTok applied an account-level posting throttle. Do not retry today." |
-| `internal` | "TikTok internal error. A later retry with a fresh preview may succeed. Quote log_id <log_id> if the user contacts TikTok support." |
+| `internal` | "TikTok internal error. A later retry with a fresh preview may succeed. Quote this publish_id and the time of the attempt if the user contacts TikTok support." |
 | *(unknown value)* | "TikTok reported an unrecognized failure code '<value>'. Treat the post as not published; verify with tiktok_list_videos before retrying." |
+
+`fail_recovery` is prose the model reads as instruction, so § 3.0 "Upstream
+values in error and recovery text" governs it. Every row above is selected by
+`fail_reason`; only the *(unknown value)* row would quote it, and it does so
+through `hintToken`. A `fail_reason` that is not an opaque token yields the
+sanctioned variant *"TikTok reported an unrecognized failure code (it is in
+fail_reason beside this text). Treat the post as not published; verify with
+tiktok_list_videos before retrying."* — `data.fail_reason` carries the raw value
+in either case, and the recovery action is identical.
 
 ---
 

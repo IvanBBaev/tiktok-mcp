@@ -228,28 +228,47 @@ const UNKNOWN_VERSION = '0.0.0-unknown';
 let cachedVersion: string | undefined;
 
 /**
- * The package version, read from `package.json` at runtime.
+ * The version declared by the `package.json` at `url`, or {@link UNKNOWN_VERSION}.
+ *
+ * Split out from {@link packageVersion} for the reason every seam here is split
+ * out: the choice of *which* file is the part a test cannot make — it is fixed
+ * to this build's own layout — while reading one and making sense of what comes
+ * back is ordinary code over an ordinary URL. A file that is missing, is not
+ * JSON, is JSON but not an object, or is an object whose `version` is absent,
+ * empty or not a string all degrade the same way, because `--version` must
+ * never crash the CLI.
+ */
+export async function versionAt(url: URL): Promise<string> {
+  try {
+    const parsed: unknown = JSON.parse(await readFile(url, 'utf8'));
+    if (typeof parsed === 'object' && parsed !== null) {
+      const declared = (parsed as { version?: unknown }).version;
+      if (typeof declared === 'string' && declared !== '') return declared;
+    }
+  } catch {
+    // Nothing to undo: the caller gets the same fallback as a well-formed file
+    // with nothing usable in it.
+  }
+  return UNKNOWN_VERSION;
+}
+
+/**
+ * The package version, read from `package.json` at runtime and then cached.
  *
  * Deliberately not an `import ... with { type: 'json' }`: that would emit a
  * copy of `package.json` into `build/` and make the published layout depend on
- * the compiler's JSON handling. A missing or malformed file degrades to
- * {@link UNKNOWN_VERSION} — `--version` must never crash the CLI.
+ * the compiler's JSON handling. The `../../../` hop is this file's own layout
+ * claim, and three places prove it holds rather than one: `package.json` is in
+ * the published tarball (`pack-manifest.json:78`, regenerated and `--check`ed by
+ * `scripts/gen-pack-manifest.ts` against `npm pack --dry-run`), the installed
+ * layout resolves it through this exact hop in the packed-tarball smoke
+ * (`scripts/smoke-pack.ts:9` names this failure, and `:502-516` drives
+ * `--version` on the installed binary), and the working tree reads the same file
+ * through the same relative URL in `test/cli.test.ts:85-93`.
  */
 export async function packageVersion(): Promise<string> {
-  if (cachedVersion !== undefined) return cachedVersion;
-  let version = UNKNOWN_VERSION;
-  try {
-    const raw = await readFile(new URL('../../../package.json', import.meta.url), 'utf8');
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed === 'object' && parsed !== null) {
-      const declared = (parsed as { version?: unknown }).version;
-      if (typeof declared === 'string' && declared !== '') version = declared;
-    }
-  } catch {
-    version = UNKNOWN_VERSION;
-  }
-  cachedVersion = version;
-  return version;
+  cachedVersion ??= await versionAt(new URL('../../../package.json', import.meta.url));
+  return cachedVersion;
 }
 
 /**

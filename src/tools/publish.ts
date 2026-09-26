@@ -41,12 +41,14 @@ import {
   isTerminalStatus,
   type PublishStatus,
 } from '../api/publish.js';
+import { canonicalProfileName } from '../core/config.js';
 import type { Clock } from '../core/clock.js';
 import { defineTool, toolInput, type ToolCtx } from '../mcp/define.js';
 import { invalidParamsError, publishToolError } from '../mcp/errors.js';
 import {
   foldAttempts,
   journalExists,
+  journalOptionsFor,
   readMerged,
   resolveJournalPath,
   type FoldedOutcome,
@@ -60,7 +62,7 @@ import {
   takePublishToken,
   type RateLimitRefusal,
 } from '../mcp/plan.js';
-import type { Hint, ToolResult } from '../mcp/result.js';
+import { hintToken, quotedHintToken, type Hint, type ToolResult } from '../mcp/result.js';
 
 /** The read-side vocabulary — `send_ambiguous` never reaches a caller. */
 export type JournalOutcome = 'ok' | 'error' | 'upload_failed' | 'unknown';
@@ -88,6 +90,9 @@ export interface ListJournalData {
 }
 
 const DEFAULT_LIMIT = 20;
+/** `since`: a date, or a date-time with `Z` or an explicit offset (never local time). */
+const ISO_UTC_TIMESTAMP =
+  /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
 const MAX_LIMIT = 100;
 
 const DESCRIPTION =
@@ -270,6 +275,11 @@ export interface PollOutcome {
  * timeout — and **timeout-is-not-error** — running out of budget yields the
  * last observed status with `timedOut: true`, never a thrown error. The caller
  * turns that into `ok: true` plus a fresh `poll` hint.
+ *
+ * The first request is unconditional; the loop's condition is then the one
+ * thing that ends a poll well — a terminal status, or not having been asked to
+ * wait for one — and its body is the one thing that ends it badly, the
+ * deadline. The return past the loop is the good ending.
  */
 export async function pollPublishStatus(
   api: ApiContext,
@@ -282,12 +292,10 @@ export async function pollPublishStatus(
   const base = api.settings.statusPollIntervalMs;
   const signalOpt = opts.signal === undefined ? {} : { signal: opts.signal };
 
-  for (let step = 0; ; step += 1) {
-    const status = await getPublishStatus(api, publishId, signalOpt);
-    const checkedAtMs = clock.now();
-    if (!opts.waitForCompletion || isTerminalStatus(status.status)) {
-      return { status, checkedAtMs, timedOut: false };
-    }
+  let step = 0;
+  let status = await getPublishStatus(api, publishId, signalOpt);
+  let checkedAtMs = clock.now();
+  while (opts.waitForCompletion && !isTerminalStatus(status.status)) {
     const remaining = deadline - checkedAtMs;
     const delay = pollDelayMs(step, base);
     const jittered = delay * (1 + POLL_JITTER_FRACTION * (random() * 2 - 1));
@@ -295,17 +303,16 @@ export async function pollPublishStatus(
     // it produces would arrive after the caller was promised a reply.
     if (remaining <= jittered) return { status, checkedAtMs, timedOut: true };
     await sleepBounded(clock, jittered, opts.signal);
+    step += 1;
+    status = await getPublishStatus(api, publishId, signalOpt);
+    checkedAtMs = clock.now();
   }
+  return { status, checkedAtMs, timedOut: false };
 }
 
 /** The journal wiring every publish tool uses — env file, size cap, logger. */
 export function journalOptions(ctx: ToolCtx): JournalOptions {
-  const { settings } = ctx.api;
-  return {
-    ...(settings.envFile === undefined ? {} : { envFile: settings.envFile }),
-    maxBytes: settings.journalMaxBytes,
-    logger: ctx.log,
-  };
+  return journalOptionsFor(ctx.api.settings, ctx.log);
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +416,7 @@ export interface PublishStatusData {
   publish_id: string;
   status: string;
   fail_reason?: string;
+  /** Server prose telling the caller what to do — never upstream free text. */
   fail_recovery?: string;
   public_post_id?: string;
   uploaded_bytes?: number;
@@ -456,8 +464,13 @@ type PublishStatusInput = z.infer<typeof PUBLISH_STATUS_INPUT>;
  * `internal` names the publish_id instead of a `log_id` (the upstream envelope
  * carries `log_id` only on failures, and a reported FAILED status is a success
  * at the HTTP level). Everything else is verbatim.
+ *
+ * The text this returns is prose that tells a model what to do next, so § 3.0's
+ * "Upstream values in error and recovery text" governs it exactly as § 5.2
+ * rule 3 governs a hint: the *(unknown value)* row is the only one that would
+ * quote upstream data, and it does so through {@link hintToken}.
  */
-function failRecovery(reason: string): string {
+export function failRecovery(reason: string): string {
   switch (reason) {
     case 'file_format_check_failed':
       return (
@@ -499,11 +512,20 @@ function failRecovery(reason: string): string {
         'TikTok internal error. A later retry with a fresh preview may succeed. Quote this ' +
         'publish_id and the time of the attempt if the user contacts TikTok support.'
       );
-    default:
-      return (
-        `TikTok reported an unrecognized failure code '${reason}'. Treat the post as not ` +
-        'published; verify with tiktok_list_videos before retrying.'
-      );
+    default: {
+      // The one branch whose text is not a pure server template: everything
+      // else here is selected by `reason`, this one would quote it. § 3.0
+      // "Upstream values in error and recovery text" admits it only as an
+      // opaque token; a value that is not one is named by pointing at
+      // `data.fail_reason`, which carries it unfiltered either way.
+      const code = hintToken(reason);
+      return code === undefined
+        ? 'TikTok reported an unrecognized failure code (it is in fail_reason beside this ' +
+            'text). Treat the post as not published; verify with tiktok_list_videos before ' +
+            'retrying.'
+        : `TikTok reported an unrecognized failure code '${code}'. Treat the post as not ` +
+            'published; verify with tiktok_list_videos before retrying.';
+    }
   }
 }
 
@@ -527,8 +549,9 @@ function stillProcessingHint(publishId: string, pollAfter: string): Hint {
     publish_id: publishId,
     poll_after: pollAfter,
     text:
-      `Still processing. Call tiktok_get_publish_status with publish_id "${publishId}" after ` +
-      `${pollAfter} to confirm the post went live. Do not re-post.`,
+      `Still processing. Call tiktok_get_publish_status with ` +
+      `${quotedHintToken('publish_id', publishId)} after ${pollAfter} to confirm the post ` +
+      'went live. Do not re-post.',
   };
 }
 
@@ -618,7 +641,15 @@ export const listPublishJournalTool = defineTool<ListJournalInput, ListJournalDa
   },
   input: LIST_JOURNAL_INPUT,
   handler: async (args, ctx): Promise<ToolResult<ListJournalData>> => {
-    const sinceMs = args.since === undefined ? undefined : Date.parse(args.since);
+    // Strict on the form, not only on parseability: `Date.parse` also takes
+    // "1" or "Jan 1 2026", and reads a zone-less date-time in the host's local
+    // time — a window shifted by the UTC offset. A date alone is UTC midnight.
+    const sinceMs =
+      args.since === undefined
+        ? undefined
+        : ISO_UTC_TIMESTAMP.test(args.since)
+          ? Date.parse(args.since)
+          : Number.NaN;
     if (sinceMs !== undefined && !Number.isFinite(sinceMs))
       return {
         ok: false,
@@ -636,8 +667,18 @@ export const listPublishJournalTool = defineTool<ListJournalInput, ListJournalDa
     const { records, skippedLines } = await readMerged(opts);
     const attempts = foldAttempts(records);
 
+    // The same spelling rule as a profile-selecting `account` (CC-F4). Under
+    // TT_LOCK_PROFILE the process sees one profile, so the lock is a filter
+    // the caller cannot widen — another name narrows the answer to nothing.
+    // A blank `account` names nobody, so it filters nothing (like completion).
+    const account =
+      args.account === undefined
+        ? undefined
+        : canonicalProfileName(args.account) || undefined;
+    const locked = ctx.api.settings.lockProfile;
     const matching = attempts.filter((attempt) => {
-      if (args.account !== undefined && attempt.profile !== args.account) return false;
+      if (locked !== undefined && attempt.profile !== locked) return false;
+      if (account !== undefined && attempt.profile !== account) return false;
       if (sinceMs === undefined) return true;
       const at = Date.parse(attempt.ts);
       // An unparsable timestamp survived the record validator but cannot be

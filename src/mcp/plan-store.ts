@@ -36,6 +36,19 @@ export interface PlanRecord {
   createdAt: number;
   /** Flipped by the first successful {@link consumePlan}; never flipped back. */
   used: boolean;
+  /**
+   * The local file's identity at preview time (CC-D3) — size, mtime, device and
+   * inode, as one opaque string — or absent for a payload with no local file.
+   *
+   * Bound here rather than folded into {@link digest} on purpose. The digest is
+   * also the duplicate guard's key (§ 2.6.5), and a re-copied or re-touched file
+   * with the same bytes is the same post: an identity inside the digest would
+   * let the guard wave a genuine duplicate through. Nor is it ever sent
+   * upstream — it exists only so an apply can refuse a file that was swapped
+   * for another of the same size between the preview a user approved and the
+   * bytes about to leave.
+   */
+  fileIdentity?: string;
 }
 
 /** `plan_` + 32 lowercase hex chars (TOOLS.md § 2.6.2). */
@@ -113,13 +126,18 @@ function sweepExpired(now: number, ttlMs: number): void {
   }
 }
 
-/** Evicts the oldest plan by `createdAt`; ties break on insertion order. */
+/** Evicts the oldest used plan, else the oldest plan, by `createdAt`; ties break on insertion order. */
 function evictOldest(): void {
+  // A used plan goes first: it can only ever answer `plan_not_found`, which an
+  // unknown id answers too, while a live one still has a publish waiting on it.
   let oldestId: string | undefined;
-  let oldestAt = Number.POSITIVE_INFINITY;
+  let oldestKey = Number.POSITIVE_INFINITY;
   for (const [id, record] of plans) {
-    if (record.createdAt < oldestAt) {
-      oldestAt = record.createdAt;
+    const key = record.used
+      ? record.createdAt - Number.MAX_SAFE_INTEGER
+      : record.createdAt;
+    if (key < oldestKey) {
+      oldestKey = key;
       oldestId = id;
     }
   }
@@ -172,7 +190,8 @@ export type ConsumeFailure =
   | 'already_used'
   | 'payload_mismatch'
   | 'account_mismatch'
-  | 'tool_mismatch';
+  | 'tool_mismatch'
+  | 'file_changed';
 
 /** What the apply call claims the plan approved. */
 export interface PlanExpectation {
@@ -181,6 +200,8 @@ export interface PlanExpectation {
   profile: string;
   openId: string;
   tool: string;
+  /** The re-resolved file's identity, compared verbatim with the preview's. */
+  fileIdentity?: string;
 }
 
 export type ConsumeResult = { ok: true } | { ok: false; reason: ConsumeFailure };
@@ -198,24 +219,34 @@ function digestEquals(a: string, b: string): boolean {
 }
 
 /**
- * Everything {@link consumePlan} checks, *without* marking the plan used.
+ * The verdict plus the record it was reached about.
  *
- * The execute pipeline verifies at step 5 but consumes only at step 7, with the
- * duplicate guard in between (TOOLS.md § 2.6.3). A `possible_duplicate`
- * rejection has to leave the same `plan_id` appliable with `force: true`, which
- * it would not if verification consumed.
+ * {@link verifyPlan} and {@link consumePlan} run the identical checks and
+ * differ only in what they do afterwards, so the checks live here once. The
+ * record travels out with the verdict because `consumePlan` needs the very
+ * object the checks were performed on: re-reading the `Map` after the fact
+ * would reintroduce a `PlanRecord | undefined` the type system cannot narrow
+ * away, and the resulting dead branch would have to be excluded from coverage
+ * rather than tested. `verifyPlan` drops the record on the way out, so the
+ * exported result type stays the two-armed {@link ConsumeResult}.
+ */
+type LocatedPlan =
+  { ok: true; record: PlanRecord } | { ok: false; reason: ConsumeFailure };
+
+/**
+ * Runs every check a consume attempt makes, without mutating the store.
  *
  * Expiry is checked before `used` (the doc lists them the other way round):
  * lazy eviction has to happen on access, and an expired-but-used plan is more
  * honestly reported as expired. Both map to `plan_not_found`, so the
  * distinction is invisible to callers.
  */
-export function verifyPlan(
+function locatePlan(
   id: string,
   expect: PlanExpectation,
   clock: Clock,
   options: PlanStoreOptions = {},
-): ConsumeResult {
+): LocatedPlan {
   const limits = limitsOf(options);
   const now = clock.now();
   const record = plans.get(id);
@@ -232,7 +263,33 @@ export function verifyPlan(
   if (!digestEquals(record.digest, expect.digest)) {
     return { ok: false, reason: 'payload_mismatch' };
   }
-  return { ok: true };
+  // Last, because a changed digest already says more: the arguments differ.
+  // Both sides absent is equal, which is every URL-sourced and photo payload.
+  if (record.fileIdentity !== expect.fileIdentity) {
+    return { ok: false, reason: 'file_changed' };
+  }
+  return { ok: true, record };
+}
+
+/**
+ * Everything {@link consumePlan} checks, *without* marking the plan used.
+ *
+ * The execute pipeline verifies at step 5 but consumes only at step 7, with the
+ * duplicate guard in between (TOOLS.md § 2.6.3). A `possible_duplicate`
+ * rejection has to leave the same `plan_id` appliable with `force: true`, which
+ * it would not if verification consumed.
+ *
+ * The checks themselves live in {@link locatePlan}; this drops the record it
+ * returns, so callers cannot reach in and flip `used` behind the store's back.
+ */
+export function verifyPlan(
+  id: string,
+  expect: PlanExpectation,
+  clock: Clock,
+  options: PlanStoreOptions = {},
+): ConsumeResult {
+  const located = locatePlan(id, expect, clock, options);
+  return located.ok ? { ok: true } : located;
 }
 
 /**
@@ -254,13 +311,12 @@ export function consumePlan(
   clock: Clock,
   options: PlanStoreOptions = {},
 ): ConsumeResult {
-  const verdict = verifyPlan(id, expect, clock, options);
-  if (!verdict.ok) return verdict;
-  const record = plans.get(id);
-  // `verifyPlan` just proved the entry exists and is unused, synchronously and
-  // with no `await` in between — so the mark below is still atomic.
-  if (record === undefined) return { ok: false, reason: 'unknown' };
-  record.used = true;
+  const located = locatePlan(id, expect, clock, options);
+  if (!located.ok) return located;
+  // The mark is atomic because `locatePlan` handed back the record itself:
+  // nothing is re-read between the check and the write, so there is no window
+  // for an interleaving to widen and no `undefined` arm to explain away.
+  located.record.used = true;
   return { ok: true };
 }
 

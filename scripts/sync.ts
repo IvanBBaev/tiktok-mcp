@@ -17,12 +17,18 @@
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { syncCoverage } from './cc-coverage.js';
+import { syncDoctorDoc } from './doctor-doc-sync.js';
 import { syncEnvExample } from './gen-env-example.js';
+import { syncFloorsDoc } from './floors-doc-sync.js';
 import { syncManifest } from './gen-manifest.js';
 import { syncPackManifest } from './gen-pack-manifest.js';
 import { syncReadme } from './gen-readme.js';
 import { repoPath } from './lib/repo.js';
 import { syncServerJson } from './serverjson-sync.js';
+import { syncIgnoreHints } from './ignore-hints.js';
+import { syncSite } from './site-sync.js';
+import { syncToolsDoc } from './tools-doc-sync.js';
 
 interface Gate {
   name: string;
@@ -81,6 +87,29 @@ const GATES: readonly Gate[] = [
   { name: 'pack-audit', run: syncPackManifest },
   // Check-only: server.json is hand-curated, so this gate reports in both modes.
   { name: 'serverjson-sync', run: () => syncServerJson() },
+  // Mostly check-only: the site's pages are hand-authored, so `--write` repairs
+  // the one derivable value (the JSON-LD softwareVersion) and reports the rest.
+  { name: 'site-sync', run: (check) => syncSite(check) },
+  // Check-only: the repair for an unpinned corner case is a test, and a script
+  // that wrote one would be forging the evidence this gate exists to demand.
+  { name: 'cc-coverage', run: () => syncCoverage() },
+  // Check-only, and deliberately so: TOOLS.md is a ratified spec, and drift is
+  // as likely to mean "the code lost a decision" as "the doc is stale". A
+  // script that overwrote the doc from the manifest would erase the question.
+  { name: 'tools-doc-sync', run: () => syncToolsDoc() },
+  // A generator, unlike the two gates above it: coverage-floors.json is the
+  // authority and `--ratchet` moves it, so the TESTING.md table is a rendering
+  // with no judgement in it. Nothing here reads or writes a floor value.
+  { name: 'floors-doc-sync', run: (check) => syncFloorsDoc(check) },
+  // Check-only, for the same reason as tools-doc-sync: the second column of
+  // TROUBLESHOOTING.md's check table is prose only a person can write, so a row
+  // this gate generated would satisfy it with an empty explanation.
+  { name: 'doctor-doc-sync', run: () => syncDoctorDoc() },
+  // Check-only, and it is the one gate whose subject is a *number* rather than
+  // an artifact: a `c8 ignore` hint removes a branch from the denominator, so a
+  // stale one inflates coverage silently and forever. Nothing here can repair a
+  // rotted citation — the repair is a person re-reading the cited code.
+  { name: 'ignore-hints', run: () => syncIgnoreHints() },
   { name: 'build-freshness', run: () => buildFreshness() },
 ];
 

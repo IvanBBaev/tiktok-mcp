@@ -9,7 +9,9 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { test } from 'node:test';
 
 import {
@@ -21,10 +23,12 @@ import {
   packageVersion,
   runCli,
   usageText,
+  versionAt,
   type CliDeps,
 } from '../src/cli/index.js';
 import type { EnvFileSnapshot } from '../src/core/config.js';
 import { registerSecret } from '../src/core/redact.js';
+import { fsSandbox } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -56,6 +60,7 @@ function snapshotOf(values: Record<string, string>): EnvFileSnapshot {
   return {
     path: '/nowhere/.env',
     exists: true,
+    mode: 0o600,
     values: new Map(Object.entries(values)),
     schema: 1,
     warnings: [],
@@ -89,6 +94,38 @@ test('--version prints the version from package.json', async () => {
   assert.equal(await runCli(['--version'], io.deps), EXIT_OK);
   assert.equal(io.out(), `${declared}\n`);
   assert.equal(await packageVersion(), declared);
+});
+
+/** `cli/index.ts`'s own fallback, spelled out rather than imported: a test that
+ *  reads the constant it asserts against cannot notice the constant changing. */
+const FALLBACK = '0.0.0-unknown';
+
+test('a package.json that cannot be read or made sense of yields the fallback', async () => {
+  // The degradation `--version` promises, driven through the half of the seam a
+  // test owns: the URL. Every shape that carries no usable version — missing
+  // file, not JSON, JSON that is not an object, no `version`, an empty one, one
+  // that is not a string — ends at the same fallback rather than throwing.
+  const box = await fsSandbox();
+  try {
+    const at = async (name: string, body: string): Promise<string> => {
+      const file = pathToFileURL(join(box.dir, name));
+      await writeFile(file, body, 'utf8');
+      return await versionAt(file);
+    };
+
+    assert.equal(await versionAt(pathToFileURL(join(box.dir, 'absent.json'))), FALLBACK);
+    assert.equal(await at('malformed.json', '{not json'), FALLBACK);
+    assert.equal(await at('array.json', '[]'), FALLBACK);
+    assert.equal(await at('null.json', 'null'), FALLBACK);
+    assert.equal(await at('bare.json', '{}'), FALLBACK);
+    assert.equal(await at('empty.json', '{"version":""}'), FALLBACK);
+    assert.equal(await at('number.json', '{"version":1}'), FALLBACK);
+    // And the shape that does carry one, so the fallback is not the only answer
+    // this function knows how to give.
+    assert.equal(await at('good.json', '{"version":"9.9.9"}'), '9.9.9');
+  } finally {
+    await box.cleanup();
+  }
 });
 
 test('-V is the same as --version', async () => {
@@ -192,11 +229,72 @@ test('errRaw is the one sink that does not redact — the authorize URL', () => 
   assert.equal(io.err(), `${url}\n`);
 });
 
+test('the default sinks are the real stdout and stderr, and still redact', () => {
+  const secret = 'cli-test-default-sink-secret-value';
+  registerSecret(secret);
+  const seen: string[] = [];
+  const tap =
+    (tag: string) =>
+    (chunk: unknown): boolean => {
+      seen.push(`${tag}:${String(chunk)}`);
+      return true;
+    };
+
+  // Deliberately synchronous end to end: the runner's own reporter writes to
+  // these same streams, and nothing else may run while they are swapped out.
+  // `write` is inherited from the stream prototype, so assigning only shadows
+  // it and `delete` puts the real one back untouched.
+  try {
+    process.stdout.write = tap('out');
+    process.stderr.write = tap('err');
+    const sink = cliIo({});
+    sink.out(`result ${secret}\n`);
+    sink.err(`diagnostic ${secret}\n`);
+    sink.errRaw(`raw ${secret}\n`);
+  } finally {
+    delete (process.stdout as Partial<NodeJS.WriteStream>).write;
+    delete (process.stderr as Partial<NodeJS.WriteStream>).write;
+  }
+
+  // cc-g3: results go to stdout, everything else to stderr — and the wiring of
+  // the two defaults is the only thing standing behind that split.
+  assert.deepEqual(seen, [
+    'out:result [REDACTED]\n',
+    'err:diagnostic [REDACTED]\n',
+    `err:raw ${secret}\n`,
+  ]);
+});
+
 test('cliIo defaults isTTY to "both streams are a terminal"', () => {
   const expected = process.stdin.isTTY === true && process.stdout.isTTY === true;
   assert.equal(cliIo({}).isTTY, expected);
   assert.equal(cliIo({ isTTY: true }).isTTY, true);
   assert.equal(cliIo({ isTTY: false }).isTTY, false);
+});
+
+test('a terminal on one stream only is not interactive', () => {
+  const realIn = process.stdin.isTTY;
+  const realOut = process.stdout.isTTY;
+
+  // Synchronous end to end, like the sink test above: the two flags are read
+  // straight out of `process`, so nothing else may run while they are flipped.
+  try {
+    process.stdin.isTTY = true;
+    process.stdout.isTTY = false;
+    // `tiktok-mcp-ai login > out.txt` from a real terminal. A redirected stdout
+    // is what says a script is driving, and a script has to get the CC-A11
+    // refusal rather than a prompt nobody is there to answer.
+    assert.equal(cliIo({}).isTTY, false);
+
+    process.stdout.isTTY = true;
+    assert.equal(cliIo({}).isTTY, true);
+
+    process.stdin.isTTY = false;
+    assert.equal(cliIo({}).isTTY, false);
+  } finally {
+    process.stdin.isTTY = realIn;
+    process.stdout.isTTY = realOut;
+  }
 });
 
 // ---------------------------------------------------------------------------

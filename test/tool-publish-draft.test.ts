@@ -29,7 +29,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -38,7 +38,12 @@ import { planChunks } from '../src/api/upload.js';
 import { createLogger } from '../src/core/log.js';
 import { loadSettings } from '../src/core/settings.js';
 import type { ToolCtx } from '../src/mcp/define.js';
-import { resetRateBuckets } from '../src/mcp/plan.js';
+import {
+  publishRateLimits,
+  resetRateBuckets,
+  resolvePublishBucket,
+  takePublishToken,
+} from '../src/mcp/plan.js';
 import { PLAN_ID_PATTERN, resetPlanStore } from '../src/mcp/plan-store.js';
 import type { Hint, ToolError, ToolResult } from '../src/mcp/result.js';
 import type {
@@ -299,6 +304,14 @@ async function writeClip(path: string, size = 4096): Promise<number> {
   return size;
 }
 
+/** Spend the whole publish budget the way a minute of applies would. */
+function drainPublishBucket(ctx: ToolCtx): void {
+  const limits = publishRateLimits(ctx.api.settings);
+  for (let i = resolvePublishBucket(limits).capacity; i > 0; i -= 1) {
+    takePublishToken(ctx.api.profile, ctx.api.clock, limits);
+  }
+}
+
 /**
  * Await `pending` while pushing virtual time forward in slices. The poll loop
  * registers its next sleep only once the read before it resolved, so a single
@@ -521,6 +534,98 @@ test('§ 3.9: applying a url plan posts source_info to the inbox init and journa
 });
 
 // ---------------------------------------------------------------------------
+// apply refusals — the steps that say no before the inbox init (§ 2.6.3)
+// ---------------------------------------------------------------------------
+
+test('§ 2.6.3 step 2: an empty rate bucket refuses the draft apply and spends no plan', async () => {
+  await withCtx({}, async (ctx, box) => {
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => {
+      const preview = previewOf(await run(ctx, { source: 'url', video_url: VIDEO_URL }));
+      drainPublishBucket(ctx);
+      const refused = await run(ctx, {
+        source: 'url',
+        video_url: VIDEO_URL,
+        plan_id: preview.plan_id,
+      });
+      assert.equal(errorOf(refused).code, 'local_rate_limited');
+      assert.equal(stub.calls.length, 0);
+
+      // The refusal cost nothing: with a token back the same plan still applies.
+      resetRateBuckets();
+      return await run(ctx, {
+        source: 'url',
+        video_url: VIDEO_URL,
+        plan_id: preview.plan_id,
+      });
+    });
+
+    assert.equal(appliedOf(result).publish_id, DRAFT_PUBLISH_ID);
+    // Only the accepted apply reached the journal; the refusal wrote nothing.
+    assert.equal(linesOf(await readJournal(box), 'intent').length, 1);
+  });
+});
+
+test('§ 2.6.3 step 3: a file that vanished after the preview refuses the apply, unsent', async () => {
+  await withCtx({}, async (ctx, box) => {
+    const path = join(box.media, 'clip.mp4');
+    await writeClip(path);
+
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => {
+      const preview = previewOf(await run(ctx, { source: 'file', file_path: path }));
+      // The apply re-resolves the source; the bytes the user approved are gone.
+      await rm(path);
+      return await run(ctx, {
+        source: 'file',
+        file_path: path,
+        plan_id: preview.plan_id,
+      });
+    });
+
+    const error = errorOf(result);
+    assert.equal(error.code, 'file_not_found');
+    assert.ok(error.message.includes(path));
+    assert.equal(countPath(stub, INBOX_INIT_PATH), 0);
+    assert.equal(putCalls(stub).length, 0);
+    // Nothing was attempted, so the journal was never even opened — there is
+    // no record to reconcile against the account.
+    await assert.rejects(
+      async () => await readJournal(box),
+      (cause: NodeJS.ErrnoException) => cause.code === 'ENOENT',
+    );
+  });
+});
+
+test('§ 3.9: a plan_id that is not this server’s shape is refused before any request', async () => {
+  await withCtx({}, async (ctx) => {
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () =>
+      run(ctx, { source: 'url', video_url: VIDEO_URL, plan_id: 'not-a-plan-id' }),
+    );
+
+    const error = errorOf(result);
+    assert.equal(error.code, 'invalid_params');
+    assert.ok(error.message.includes('plan_id'));
+    assert.equal(stub.calls.length, 0);
+  });
+});
+
+test('TT_WRITE_MODE=apply uploads the draft with no plan and journals the empty plan_id', async () => {
+  await withCtx({ TT_WRITE_MODE: 'apply' }, async (ctx, box) => {
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () =>
+      run(ctx, { source: 'url', video_url: VIDEO_URL }),
+    );
+
+    assert.equal(appliedOf(result).publish_id, DRAFT_PUBLISH_ID);
+    assert.equal(countPath(stub, INBOX_INIT_PATH), 1);
+    // The honest record of "nothing approved this".
+    assert.equal(oneLine(await readJournal(box), 'intent')['plan_id'], '');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // local validation — nothing leaves the process (TOOLS.md § 3.0)
 // ---------------------------------------------------------------------------
 
@@ -536,6 +641,40 @@ test('§ 3.9 / CC-D10: a video_url outside every verified prefix is refused befo
     assert.ok(error.message.includes('video_url'));
     assert.ok(error.message.includes('TT_VERIFIED_URL_PREFIXES'));
     assert.ok(error.message.includes('No request was sent'));
+    assert.equal(stub.calls.length, 0);
+  });
+});
+
+test('§ 5.1: both draft refusals name the operator step, not just the cause', async () => {
+  await withCtx({}, async (ctx, box) => {
+    const stub = fakeApi();
+    await withFetch(stub, async () => {
+      const byUrl = await run(ctx, {
+        source: 'url',
+        video_url: 'https://evil.example.net/clip.mp4',
+      });
+      assert.equal(errorOf(byUrl).code, 'url_prefix_unverified');
+      assert.equal(hintsOf(byUrl).length, 1);
+      const [urlHint] = hintsOf(byUrl);
+      assert.equal(urlHint?.type, 'user_action');
+      assert.equal(urlHint?.action, 'host_media');
+      assert.ok(urlHint?.text.includes('tiktok_upload_video_draft'));
+      // § 5.2 rule 3: the caller's URL stays in the error, not in the hint.
+      assert.ok(!urlHint?.text.includes('evil.example.net'));
+
+      const outside = join(box.dir, 'outside.mp4');
+      await writeClip(outside);
+      const byFile = await run(ctx, { source: 'file', file_path: outside });
+      assert.equal(errorOf(byFile).code, 'file_outside_media_root');
+      assert.equal(hintsOf(byFile).length, 1);
+      const [fileHint] = hintsOf(byFile);
+      assert.equal(fileHint?.type, 'user_action');
+      assert.equal(fileHint?.action, 'move_file');
+      assert.ok(fileHint?.text.includes('tiktok_upload_video_draft'));
+      assert.ok(fileHint?.text.includes('TT_MEDIA_ROOT'));
+      assert.ok(!fileHint?.text.includes(outside));
+    });
+
     assert.equal(stub.calls.length, 0);
   });
 });

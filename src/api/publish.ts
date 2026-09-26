@@ -521,24 +521,34 @@ export function validatePhotoSource(
  * How TikTok gets the video: it downloads it from a verified URL, or the client
  * PUTs the bytes to the `upload_url` the init returns.
  */
-export type VideoSource =
-  | { source: 'PULL_FROM_URL'; videoUrl: string }
-  | {
-      source: 'FILE_UPLOAD';
-      videoSize: number;
-      chunkSize: number;
-      totalChunkCount: number;
-    };
+export interface PullFromUrlSource {
+  source: 'PULL_FROM_URL';
+  videoUrl: string;
+}
 
-export interface VideoPostInit {
+export interface FileUploadSource {
+  source: 'FILE_UPLOAD';
+  videoSize: number;
+  chunkSize: number;
+  totalChunkCount: number;
+}
+
+export type VideoSource = PullFromUrlSource | FileUploadSource;
+
+/**
+ * `S` is the source the init is asked for, and it decides the result shape
+ * ({@link PublishInitResult}): a call site that hands over a `FILE_UPLOAD` gets
+ * an `uploadUrl` it does not have to check for.
+ */
+export interface VideoPostInit<S extends VideoSource = VideoSource> {
   /** From {@link resolveVideoPostInfo} — never hand-built at the call site. */
   postInfo: Record<string, unknown>;
-  source: VideoSource;
+  source: S;
   signal?: AbortSignal;
 }
 
-export interface DraftUploadInit {
-  source: VideoSource;
+export interface DraftUploadInit<S extends VideoSource = VideoSource> {
+  source: S;
   signal?: AbortSignal;
 }
 
@@ -551,12 +561,24 @@ export interface PhotoPostInit {
   signal?: AbortSignal;
 }
 
-/** What an init hands back: the handle to poll, and (FILE_UPLOAD only) where to PUT. */
-export interface PublishInitResult {
-  publishId: string;
-  /** Valid for 1 hour. Carries the `upload_token` — a secret, never surfaced. */
-  uploadUrl?: string;
+/**
+ * What an init hands back, by the source it was asked for: the handle to poll,
+ * and — for a `FILE_UPLOAD`, whose whole point is the PUT — where to PUT. A
+ * pull init has no use for an `upload_url`, but one it answers with anyway is
+ * passed through as it came.
+ */
+export interface PublishInitResults {
+  PULL_FROM_URL: { publishId: string; uploadUrl?: string };
+  FILE_UPLOAD: {
+    publishId: string;
+    /** Valid for 1 hour. Carries the `upload_token` — a secret, never surfaced. */
+    uploadUrl: string;
+  };
 }
+
+/** The result for a source `S`; left unspecified, the union over both kinds. */
+export type PublishInitResult<S extends VideoSource = VideoSource> =
+  PublishInitResults[S['source']];
 
 interface InitPayload {
   publish_id?: unknown;
@@ -575,10 +597,26 @@ function sourceInfoBody(source: VideoSource): Record<string, unknown> {
   };
 }
 
+/**
+ * A 2xx init without a readable `publish_id` is not "nothing was created": the
+ * init may have been accepted and only its answer is unreadable. Reporting it
+ * as a plain upstream error would journal `error`, which the duplicate guard
+ * lets through, and invite a second post (CC-G4) — so it is ambiguous.
+ */
 function readPublishId(payload: InitPayload, endpoint: string): string {
   const id = payload.publish_id;
   if (typeof id !== 'string' || id === '') {
-    throw malformedPayload(endpoint, 'publish_id string');
+    const shape = malformedPayload(endpoint, 'publish_id string');
+    throw new TikTokError({
+      kind: 'network',
+      code: 'network_ambiguous',
+      message:
+        `${shape.message} The init may still have been accepted, so the outcome is unknown ` +
+        'and it is NOT retried.',
+      remediation:
+        'Check the publish journal for an intent without an outcome and verify upstream state before creating a new attempt.',
+      cause: shape,
+    });
   }
   return id;
 }
@@ -596,30 +634,69 @@ function readUploadUrl(payload: InitPayload): string | undefined {
     const token = new URL(url).searchParams.get('upload_token');
     if (token !== null) registerSecret(token);
   } catch {
-    // Not a parseable URL; `core/http` refuses to PUT to it later. Nothing to register.
+    // Not a parseable URL; `core/http` refuses to PUT to it later, and the
+    // refusal quotes it — so a token it still spells is registered by hand.
+    const token = /upload_token=([^&#\s]+)/.exec(url)?.[1];
+    if (token !== undefined) registerSecret(token);
   }
   return url;
 }
 
 /**
+ * One reader per source kind, each typed by the result shape its kind promises.
+ * Both read the `upload_url` first, so its token is a secret before anything
+ * else can throw.
+ *
  * A `FILE_UPLOAD` init that answers without an `upload_url` leaves the caller
- * holding a `publish_id` it can never feed bytes to, so it is refused here
- * rather than a directory later: the tool layer's classification then reads the
- * failure correctly — an attempt exists upstream, and nothing was uploaded.
+ * holding a `publish_id` it can never feed bytes to, so it is refused here as an
+ * upstream shape change. Nothing can be posted from it — TikTok posts only what
+ * an upload completes — so the tool layer's `error` is true and a new attempt is
+ * safe; the minted id is named in the message for whoever checks upstream.
  */
-function initResult(
+const INIT_READERS: {
+  [K in VideoSource['source']]: (
+    payload: InitPayload,
+    endpoint: string,
+  ) => PublishInitResults[K];
+} = {
+  PULL_FROM_URL: (payload, endpoint) => {
+    const uploadUrl = readUploadUrl(payload);
+    return {
+      publishId: readPublishId(payload, endpoint),
+      ...(uploadUrl === undefined ? {} : { uploadUrl }),
+    };
+  },
+  FILE_UPLOAD: (payload, endpoint) => {
+    const uploadUrl = readUploadUrl(payload);
+    if (uploadUrl === undefined) {
+      const minted = payload.publish_id;
+      throw malformedPayload(
+        endpoint,
+        typeof minted === 'string' && minted !== ''
+          ? `upload_url string for a FILE_UPLOAD init (publish_id ${minted} was minted and will never receive bytes)`
+          : 'upload_url string for a FILE_UPLOAD init',
+      );
+    }
+    return { publishId: readPublishId(payload, endpoint), uploadUrl };
+  },
+};
+
+/**
+ * A source's kind as the key its type promised. A helper rather than an inline
+ * `req.source.source` because the inline read widens to the union of kinds,
+ * and with it the reader lookup would too; `S['source']` is what keeps the
+ * lookup's result the shape of the one source the caller handed over.
+ */
+function sourceKind<S extends VideoSource>(source: S): S['source'] {
+  return source.source;
+}
+
+function initResult<K extends VideoSource['source']>(
   payload: InitPayload,
   endpoint: string,
-  requireUploadUrl: boolean,
-): PublishInitResult {
-  const uploadUrl = readUploadUrl(payload);
-  if (requireUploadUrl && uploadUrl === undefined) {
-    throw malformedPayload(endpoint, 'upload_url string for a FILE_UPLOAD init');
-  }
-  return {
-    publishId: readPublishId(payload, endpoint),
-    ...(uploadUrl === undefined ? {} : { uploadUrl }),
-  };
+  kind: K,
+): PublishInitResults[K] {
+  return INIT_READERS[kind](payload, endpoint);
 }
 
 const VIDEO_INIT_PATH = '/v2/post/publish/video/init/';
@@ -635,10 +712,10 @@ const STATUS_PATH = '/v2/post/publish/status/fetch/';
  * is off. Two byte-identical inits are assumed to create two posts until probe
  * P-12 says otherwise (TIKTOK-API.md § 4.2).
  */
-export async function initVideoPost(
+export async function initVideoPost<S extends VideoSource>(
   ctx: ApiContext,
-  req: VideoPostInit,
-): Promise<PublishInitResult> {
+  req: VideoPostInit<S>,
+): Promise<PublishInitResult<S>> {
   const payload = await apiRequest<InitPayload>(ctx, {
     method: 'POST',
     path: VIDEO_INIT_PATH,
@@ -646,7 +723,7 @@ export async function initVideoPost(
     body: { post_info: req.postInfo, source_info: sourceInfoBody(req.source) },
     ...(req.signal === undefined ? {} : { signal: req.signal }),
   });
-  return initResult(payload, VIDEO_INIT_PATH, req.source.source === 'FILE_UPLOAD');
+  return initResult(payload, VIDEO_INIT_PATH, sourceKind(req.source));
 }
 
 /**
@@ -654,10 +731,10 @@ export async function initVideoPost(
  * the user writes the caption and picks the privacy level inside the app — so
  * no `creator_info` pre-flight and none of the validation above applies.
  */
-export async function initDraftUpload(
+export async function initDraftUpload<S extends VideoSource>(
   ctx: ApiContext,
-  req: DraftUploadInit,
-): Promise<PublishInitResult> {
+  req: DraftUploadInit<S>,
+): Promise<PublishInitResult<S>> {
   const payload = await apiRequest<InitPayload>(ctx, {
     method: 'POST',
     path: INBOX_INIT_PATH,
@@ -665,7 +742,7 @@ export async function initDraftUpload(
     body: { source_info: sourceInfoBody(req.source) },
     ...(req.signal === undefined ? {} : { signal: req.signal }),
   });
-  return initResult(payload, INBOX_INIT_PATH, req.source.source === 'FILE_UPLOAD');
+  return initResult(payload, INBOX_INIT_PATH, sourceKind(req.source));
 }
 
 /**
@@ -731,9 +808,9 @@ interface StatusPayload {
 /**
  * Post ids arrive as JSON numbers (int64) and are carried as strings, because
  * every consumer — the journal, the result formatter, the share URL — wants
- * text. Ids above 2^53 have already lost precision in `JSON.parse` before this
- * runs; nothing at this layer can recover it, and re-serializing a float would
- * only hide that. Non-numeric entries are echoed as given.
+ * text. An id above 2^53 already arrives here as its exact source digits —
+ * `core/http` keeps an unsafe integer as a string at parse time, the only point
+ * where the precision still exists. Non-numeric entries are echoed as given.
  */
 function readPostIds(value: unknown): readonly string[] | undefined {
   if (!Array.isArray(value)) return undefined;

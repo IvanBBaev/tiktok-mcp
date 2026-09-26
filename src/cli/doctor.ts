@@ -16,8 +16,11 @@
  * - **One check never aborts the rest.** A check that throws becomes a `fail`
  *   row of its own and the remaining checks still run — the whole value of this
  *   command is the *complete* picture, especially when something is broken.
- * - **Findings print as each check finishes**, so the CC-F3 "fix it now?"
- *   prompt appears under the row that motivated it rather than after the report.
+ * - **Findings print as each check finishes**, so the report is readable while
+ *   it is still being produced. The CC-F3 "fix it now?" prompt is therefore
+ *   asked with the env-file row above it and its own permissions row not yet
+ *   printed — which is why the question restates the mode it is about instead of
+ *   pointing at a row that only exists once the answer is in.
  * - **`--json` prints one document and nothing else** — the rows, the header and
  *   the summary are only the human rendering of the same report, so a consumer
  *   parses stdout whole instead of scraping lines.
@@ -30,8 +33,7 @@
  */
 
 import { chmod, readdir, stat } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
-import { createInterface } from 'node:readline/promises';
+import { basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createApiContext, maskOpenId } from '../api/context.js';
@@ -47,16 +49,24 @@ import {
   type EnvFileSnapshot,
   type ProfileCredentials,
 } from '../core/config.js';
-import { envLockDir } from '../core/env-lock.js';
+import { DEFAULT_STALE_MS, canonicalPath, envLockDir } from '../core/env-lock.js';
 import { isTikTokError } from '../core/errors.js';
 import { createLogger, type Logger } from '../core/log.js';
 import {
   DEFAULT_PROFILE,
+  isLoopbackHost,
   loadSettings,
   resolveEnabledPackages,
   type Settings,
 } from '../core/settings.js';
-import { allTools } from '../tools/index.js';
+import {
+  foldAttempts,
+  journalExists,
+  readMerged,
+  resolveJournalPath,
+  type JournalOptions,
+} from '../mcp/journal.js';
+import { allTools, type ToolPackageSpec } from '../tools/index.js';
 import {
   cliIo,
   CLI_NAME,
@@ -67,6 +77,7 @@ import {
   type CliDeps,
   type CliIo,
 } from './index.js';
+import { ask } from './prompt.js';
 
 // ---------------------------------------------------------------------------
 // findings
@@ -129,6 +140,14 @@ export interface DoctorContext {
    * platforms from one test run, and `import.meta.url` is not overridable.
    */
   readonly modulePath: string;
+  /**
+   * The tool manifest the scope matrix is read from; defaults to the live one
+   * (`allTools()`). A seam for the same reason {@link modulePath} is one: the
+   * "enabled but not implemented" row is about a package that ships no tools,
+   * which today's manifest cannot produce and a future one can, so the only way
+   * to hold the row honest is to hand the check a manifest that has such a gap.
+   */
+  readonly packages?: readonly ToolPackageSpec[];
   readonly clock: Clock;
   readonly logger: Logger;
   /** The resolved env-file path — the read source and the write target. */
@@ -197,13 +216,38 @@ function quote(path: string): string {
   return JSON.stringify(path);
 }
 
+/**
+ * An error as one block of prose: the message, then its remediation on its own
+ * line.
+ *
+ * The prose form of what {@link findingFromError} already decides, so the two
+ * renderings of one failure cannot disagree: `--json` reports an unreadable
+ * configuration as a `fail` finding, and this is that same finding written out
+ * for a human. Classifying in one place also means the shapes only the `unknown`
+ * in the signature admits — a `TikTokError` carrying no remediation, a thrown
+ * non-`Error` — are handled where the tests that break a check already drive
+ * them, instead of a second copy here that no caller can reach.
+ */
 function describeError(error: unknown): string {
-  if (isTikTokError(error)) {
-    return error.remediation === undefined
-      ? error.message
-      : `${error.message}\n${error.remediation}`;
-  }
-  return error instanceof Error ? error.message : String(error);
+  const { text, remediation } = findingFromError(error);
+  return remediation === undefined ? text : `${text}\n${remediation}`;
+}
+
+/**
+ * A profile `readProfile` refused, as the tokens row's `fail`. The error code is
+ * kept in the text because it is the stable half of the message — what a bug
+ * report or a `--json` consumer can match on. A throw that carries no
+ * remediation of its own still gets one, since a `fail` row with nothing to do
+ * about it is a dead end.
+ */
+function profileReadFailure(ctx: DoctorContext, err: unknown): Finding {
+  const base = findingFromError(err);
+  const code = isTikTokError(err) ? ` (${err.code})` : '';
+  return fail(
+    `profile ${ctx.profile} could not be read${code}: ${base.text}`,
+    base.remediation ??
+      `Check ${quote(ctx.envFilePath)} for a damaged value, then re-run ${loginCommand(ctx.profile)}.`,
+  );
 }
 
 /** The command every remediation tells the user to run for `profile`. */
@@ -259,8 +303,10 @@ const permissionsCheck: Check = {
       ];
     }
 
+    // `EnvFileSnapshot` is discriminated on `exists`, so the guard above has
+    // already narrowed this to the arm that read a real file and `mode` is a
+    // `number` — there is no "no mode" case left to defend against.
     const mode = ctx.snapshot.mode;
-    if (mode === undefined) return [];
     if ((mode & 0o777) === 0o600) return [ok(`mode ${octal(mode)}`)];
 
     const chmodLine = `chmod 600 ${quote(ctx.envFilePath)}`;
@@ -362,7 +408,7 @@ const envLockCheck: Check = {
   id: 'env-lock',
   title: 'env lock',
   run: async (ctx) => {
-    const lockDir = envLockDir(ctx.envFilePath);
+    const lockDir = envLockDir(await canonicalPath(ctx.envFilePath));
     let mtimeMs: number;
     try {
       mtimeMs = (await stat(lockDir)).mtimeMs;
@@ -371,7 +417,7 @@ const envLockCheck: Check = {
     }
     // Liveness is mtime-only, never a PID (`core/env-lock`): a heartbeat that
     // stopped is the whole signal, and the holder file stays private to it.
-    const staleMs = ctx.settings?.envLockStaleMs ?? 15_000;
+    const staleMs = ctx.settings?.envLockStaleMs ?? DEFAULT_STALE_MS;
     const age = ctx.clock.now() - mtimeMs;
     if (age > staleMs) {
       return [
@@ -418,12 +464,30 @@ const profilesCheck: Check = {
   },
 };
 
+/** `readProfile` failures another row already reports; see the tokens row. */
+const REPORTED_ELSEWHERE: readonly string[] = [
+  'missing_credentials',
+  'unknown_profile',
+  'invalid_profile_name',
+];
+
 const tokensCheck: Check = {
   id: 'tokens',
   title: 'tokens',
   run: async (ctx) => {
-    // The credentials / profiles rows already carry the reason it is missing.
-    if (ctx.credentials === undefined) return [];
+    if (ctx.credentials === undefined) {
+      // The credentials / profiles rows already carry these reasons — the last
+      // one because the profiles row's own `listProfiles` throws it again and
+      // the runner turns that throw into its row.
+      if (REPORTED_ELSEWHERE.some((code) => hasCode(ctx.credentialsError, code))) {
+        return [];
+      }
+      // Every other read failure — a damaged expiry (`invalid_timestamp`,
+      // CC-H2), or anything that is not a `TikTokError` at all — has no other
+      // row to land in. Returning nothing here would print a clean report and
+      // exit 0 over a profile the server cannot even load, so it fails here.
+      return [profileReadFailure(ctx, ctx.credentialsError)];
+    }
     const credentials = ctx.credentials;
     if (credentials.refreshToken === undefined) {
       return [
@@ -522,7 +586,7 @@ const scopesCheck: Check = {
         : ok(`granted: ${granted.join(', ')}`),
     ];
 
-    const tools = allTools().filter((spec) => enabled.has(spec.package));
+    const tools = allTools(ctx.packages).filter((spec) => enabled.has(spec.package));
     const blocked = tools.filter((spec) =>
       spec.scopes.some((scope) => !granted.includes(scope)),
     );
@@ -548,7 +612,11 @@ const scopesCheck: Check = {
     }
 
     // An enabled package that ships no tools in this build is a roadmap hole,
-    // not a configuration mistake — but silence would read as "it works".
+    // not a configuration mistake — but silence would read as "it works". The
+    // row is here for the next package that is declared before it is written
+    // (ROADMAP.md:68, "Optional: Research API package (`research`)"); today's
+    // manifest gives all five at least one tool, which is why the manifest is a
+    // seam ({@link DoctorContext.packages}) rather than an excluded branch.
     const empty = [...enabled].filter(
       (pkg) => !tools.some((spec) => spec.package === pkg),
     );
@@ -654,29 +722,127 @@ const mediaRootCheck: Check = {
 };
 
 /**
- * CC-E10 — a journal holding an intent without an outcome means a publish whose
- * fate is unknown, and reconciling those is doctor's job.
+ * Rotation's own lock, `journal.ndjson.lock` (`mcp/journal`). A leftover one
+ * costs nothing but the rotation — appends never take it — and the next
+ * rotation breaks it once stale, so like the env-lock row this only reports.
+ * Rotation passes no `staleMs`, so the module default applies here, not
+ * `TT_ENV_LOCK_STALE_MS`.
+ */
+async function journalLockFinding(
+  ctx: DoctorContext,
+  journalPath: string,
+): Promise<Finding | undefined> {
+  const lockDir = envLockDir(await canonicalPath(journalPath));
+  let mtimeMs: number;
+  try {
+    mtimeMs = (await stat(lockDir)).mtimeMs;
+  } catch {
+    return undefined;
+  }
+  const age = ctx.clock.now() - mtimeMs;
+  if (age > DEFAULT_STALE_MS) {
+    return warn(
+      `a stale rotation lock has been held for ${humanDuration(age)} at ${lockDir}; ` +
+        'the journal is not rotated until the next rotation breaks it',
+      `If no server is running you may remove it: rm -rf ${quote(lockDir)}`,
+    );
+  }
+  return info(`rotation lock held right now (${humanDuration(age)} old)`);
+}
+
+/**
+ * CC-E10 — an intent with no outcome is a publish whose fate nobody knows, and
+ * reconciling those is what this row is for.
  *
- * The record schema lands with `mcp/journal.ts` (TD-3); until then this check
- * reports what it can see without inventing a format — that the file exists and
- * how large it is. TD-3 replaces this body; it does not add a second check.
+ * The reconciliation is `mcp/journal.ts`'s own — `readMerged` then
+ * `foldAttempts`, the pair `tiktok_list_publish_journal` folds with, where
+ * `"unknown"` is that module's derived outcome and not a second definition of
+ * one. A parser here would be a second reader of the format, and the two would
+ * part company on the first schema change. Unlike `mcp/http.ts` (see the
+ * transport check) the import costs nothing at startup: `mcp/journal.ts` reaches
+ * for `core/` only, all of which this command has already loaded.
+ *
+ * Both generations are read whole rather than tailed. A tail can cut an intent
+ * away from its outcome and turn a finished attempt into a false `"unknown"` —
+ * the one alarm this row must not raise.
+ *
+ * Deliberately not implemented: a grace period for an outcome that has not
+ * landed *yet*. A publish running while doctor reads is counted as unresolved,
+ * the conservative direction the duplicate guard also takes (CC-H1) — the false
+ * alarm costs one `tiktok_get_publish_status` call, and the silence it would buy
+ * costs a post nobody knows about.
+ *
+ * Nothing out of a record reaches the row: no `open_id`, no `publish_id`, no
+ * title excerpt. Counts, and the path — the category the env-file, env-lock and
+ * media-root rows already print, and the one CONTRIBUTING § "Reporting a bug"
+ * tells the user to expect in shareable output.
  */
 const journalCheck: Check = {
   id: 'publish-journal',
   title: 'publish journal',
   run: async (ctx) => {
-    const path = join(dirname(ctx.envFilePath), 'journal.ndjson');
-    try {
-      const stats = await stat(path);
+    const opts: JournalOptions = { envFile: ctx.envFilePath };
+    const path = resolveJournalPath(opts);
+
+    // An audit file this command cannot open is not a broken installation — the
+    // server publishes fine without one — so this is a `warn` and not the `fail`
+    // an uncaught throw would become. The thrown message is written for the
+    // model ("Ask the user to check the file"); doctor is talking to that user
+    // already, so the row says it in doctor's own voice.
+    const read = await readMerged(opts).catch(() => undefined);
+    if (read === undefined) {
       return [
-        info(
-          `${path} — ${unit(stats.size, 'byte', 'bytes')}; intent/outcome reconciliation ` +
-            'arrives with the publish tools',
+        warn(
+          `${path} exists but cannot be read, so no attempt in it could be reconciled`,
+          'Check its owner and mode — the journal is written 0600 by the account that publishes.',
         ),
       ];
-    } catch {
-      return [ok('no publish has been recorded yet')];
     }
+
+    const attempts = foldAttempts(read.records);
+    const unresolved = attempts.filter((attempt) => attempt.outcome === 'unknown').length;
+    const findings: Finding[] = [];
+    if (attempts.length === 0) {
+      // A journal with no attempt in it is either a fresh install or a file
+      // whose every line was unreadable; only `journalExists` tells those apart,
+      // and neither is a check that passed — nothing was verified.
+      findings.push(
+        (await journalExists(opts))
+          ? info(`${path} — no attempt is recorded in it yet`)
+          : info('no publish has been recorded yet'),
+      );
+    } else if (unresolved === 0) {
+      findings.push(
+        ok(
+          `${path} — ${unit(attempts.length, 'attempt', 'attempts')} recorded, ` +
+            'every one with an outcome',
+        ),
+      );
+    } else {
+      findings.push(
+        warn(
+          `${path} — ${unit(attempts.length, 'attempt', 'attempts')} recorded, ` +
+            `${String(unresolved)} without an outcome: the request may have been sent and ` +
+            'no answer was recorded, so the post may exist',
+          'Reconcile them with tiktok_list_publish_journal, then confirm each one with ' +
+            'tiktok_get_publish_status or tiktok_list_videos.',
+        ),
+      );
+    }
+    const lock = await journalLockFinding(ctx, path);
+    if (lock !== undefined) findings.push(lock);
+    if (read.skippedLines > 0) {
+      // Damage, not doubt: the attempts counted above are intact and a torn last
+      // line is what a crash mid-append leaves. Nothing can repair it, which is
+      // why this row carries no remediation and stays informational.
+      findings.push(
+        info(
+          `${unit(read.skippedLines, 'unreadable line', 'unreadable lines')} skipped — ` +
+            'usually a truncated last write after a crash',
+        ),
+      );
+    }
+    return findings;
   },
 };
 
@@ -707,7 +873,10 @@ const transportCheck: Check = {
           'TT_HTTP_TOKEN required on every request',
       ),
     ];
-    if (settings.httpInsecure) {
+    // On loopback the flag is redundant (nothing needs acknowledging there), and
+    // the bind is neither reachable off-box nor exposed to rebinding past the
+    // pinned Host check, so neither warning would be true.
+    if (settings.httpInsecure && !isLoopbackHost(settings.httpHost)) {
       findings.push(
         warn(
           `TT_HTTP_INSECURE=1: this bind is reachable off-box, and this server speaks ` +
@@ -715,6 +884,15 @@ const transportCheck: Check = {
           'Terminate TLS in front of the server, or bind TT_HTTP_HOST to 127.0.0.1.',
         ),
       );
+      if (settings.httpAllowedHosts === undefined) {
+        findings.push(
+          warn(
+            'TT_HTTP_ALLOWED_HOSTS is unset: past loopback the Host/Origin check ' +
+              'cannot stop DNS rebinding, so TT_HTTP_TOKEN is the only layer left',
+            'Set TT_HTTP_ALLOWED_HOSTS to the host names clients use to reach this server.',
+          ),
+        );
+      }
     }
     return await Promise.resolve(findings);
   },
@@ -817,9 +995,14 @@ export function doctorUsage(): string {
 export function parseDoctorArgs(argv: readonly string[]): ParseResult {
   const flags: DoctorFlags = { offline: false, json: false, help: false };
 
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
-    if (arg === undefined) continue;
+  // Iterated through `entries()` rather than by index: `argv[i]` under
+  // `noUncheckedIndexedAccess` is `string | undefined` however tightly the loop
+  // bounds it, and guarding that would be a branch nothing can ever take.
+  // `consumed` is the index a `--flag value` pair ate — the one lookahead where
+  // the `| undefined` is real, because the value may be past the end.
+  let consumed = -1;
+  for (const [i, arg] of argv.entries()) {
+    if (i === consumed) continue;
     const eq = arg.indexOf('=');
     const name = eq === -1 ? arg : arg.slice(0, eq);
     const inline = eq === -1 ? undefined : arg.slice(eq + 1);
@@ -828,11 +1011,19 @@ export function parseDoctorArgs(argv: readonly string[]): ParseResult {
     if (name === '--profile') {
       if (inline !== undefined) value = inline;
       else {
-        i += 1;
-        value = argv[i];
+        consumed = i + 1;
+        value = argv[consumed];
       }
-      if (value === undefined || value === '') {
+      // `--profile --json` is a missing value, not a profile named "--json".
+      const flagLike = inline === undefined && value?.startsWith('-') === true;
+      if (value === undefined || value === '' || flagLike) {
         return { ok: false, message: `${name} needs a value.` };
+      }
+      try {
+        value = normalizeProfileName(value);
+      } catch (error) {
+        // `normalizeProfileName` throws only a `configError`.
+        return { ok: false, message: (error as Error).message };
       }
     } else if (inline !== undefined) {
       return { ok: false, message: `${name} does not take a value.` };
@@ -942,8 +1133,17 @@ export interface DoctorReportCheck {
  * has to read an empty stdout to learn what happened. The two exceptions are a
  * usage error (stderr, exit 2) and `--help`, which still prints the usage text.
  *
- * Nothing in here is timed or hashed: two runs of the same configuration produce
- * byte-identical documents, which is what makes this diffable in CI.
+ * Nothing in here is timed or hashed *against the run*: no start time, no
+ * duration, no ordering by wall clock. Two runs of one configuration on one
+ * clock produce byte-identical documents.
+ *
+ * The document is not independent of the clock, though, and CI should not be
+ * told that it is: the rows that exist to warn about time say how much time is
+ * left (`expires in 21 days`, CC-A5) or how long something has been held (a
+ * stale env lock, CC-F5). A profile doctor is happy with carries none of those
+ * rows and diffs clean indefinitely; a profile doctor is warning about diffs
+ * clean only against a run of the same age — which is the warning doing its job,
+ * not a defect in the schema.
  */
 export interface DoctorReport {
   readonly schema: 'tiktok-mcp-ai/doctor-report';
@@ -992,30 +1192,23 @@ export function renderJsonReport(report: DoctorReport): string {
 // the command
 // ---------------------------------------------------------------------------
 
-/** The default prompt: one line from stdin, asked on stderr — never on stdout. */
-async function defaultPrompt(question: string): Promise<string> {
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    return await rl.question(question);
-  } finally {
-    rl.close();
-  }
-}
-
-async function ask(deps: CliDeps, question: string): Promise<string> {
-  return await (deps.prompt ?? defaultPrompt)(question);
-}
-
 /**
  * The default for {@link DoctorContext.modulePath}.
  *
  * A module URL that is not a `file:` one (never true of a published install, but
- * possible under an experimental loader) leaves the install check without a
- * subject instead of failing the whole run over a diagnostic.
+ * possible under an experimental loader) yields an empty path rather than failing
+ * the whole run over a diagnostic. The install check then finds no `_npx` segment
+ * and reports "not running from the npx cache" — the same answer an ordinary
+ * global install gets, which is the safe direction to be wrong about a hint.
+ *
+ * @param url The module URL to resolve. Defaults to this module's own, which is
+ *   what production wants and what `import.meta.url` cannot be made to say
+ *   otherwise; it is a parameter so the non-`file:` arm is reachable from a test
+ *   through the real function instead of being excluded from coverage.
  */
-function resolveModulePath(): string {
+export function resolveModulePath(url: string = import.meta.url): string {
   try {
-    return fileURLToPath(import.meta.url);
+    return fileURLToPath(url);
   } catch {
     return '';
   }
@@ -1119,7 +1312,8 @@ export async function runDoctor(deps: CliDeps = {}): Promise<number> {
       io.out(
         renderJsonReport(
           // `profile` is null because resolving it is one of the steps that just
-          // failed (an invalid `--profile` is thrown by `normalizeProfileName`).
+          // failed (an invalid `TT_ACTIVE_PROFILE` or `TT_LOCK_PROFILE`; `--profile` is
+          // refused earlier, by `parseDoctorArgs`).
           doctorReport(
             null,
             flags.offline,

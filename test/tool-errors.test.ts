@@ -11,6 +11,7 @@ import {
   missingScopeError,
   publishToolError,
   toolErrorFrom,
+  unconfiguredProfileScopeError,
   unknownAccountError,
 } from '../src/mcp/errors.js';
 
@@ -126,6 +127,27 @@ test('missing_scope names the profile, the scope and the login command', () => {
       'then verify with tiktok_get_auth_status.',
   );
   assert.deepEqual(err.details, { profile: 'WORK', missing_scope: 'video.publish' });
+});
+
+test('missing_scope for a profile with no credentials asks for a plain login', () => {
+  const err = unconfiguredProfileScopeError('WORK', 'video.publish');
+  assert.equal(err.code, 'missing_scope');
+  assert.equal(err.retryable, false);
+  assert.equal(
+    err.message,
+    "Account 'WORK' has no stored credentials, so it grants no scopes; this tool " +
+      'requires video.publish. Ask the user to run: npx tiktok-mcp-ai login --profile WORK — ' +
+      'then verify with tiktok_get_auth_status.',
+  );
+  // "Authorized without scope X" would be false here, and `--scopes X` would
+  // grant X alone instead of every scope the enabled packages need.
+  assert.doesNotMatch(err.message, /--scopes/);
+  assert.doesNotMatch(err.message, /authorized without/);
+  assert.deepEqual(err.details, {
+    profile: 'WORK',
+    missing_scope: 'video.publish',
+    configured: false,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -256,6 +278,18 @@ test('a remap keeps log_id and the upstream spelling as structured evidence', ()
   assert.equal(err.details?.['api_code'], 'spam_risk_too_many_posts');
 });
 
+test('cc-e6: the pending-share cap says where to go and what to do there', () => {
+  // The mapping alone is not the corner case: `pending_share_cap` is only
+  // actionable if the message names the inbox the drafts are sitting in and
+  // the two ways out of it. Nothing here is retryable — a retry is what filled
+  // the inbox in the first place.
+  const err = publishToolError(upstream('spam_risk_too_many_pending_share'));
+  assert.equal(err.code, 'pending_share_cap');
+  assert.equal(err.retryable, false);
+  assert.ok(err.message.includes('inbox'));
+  assert.match(err.message, /publish or discard/u);
+});
+
 test('cc-d10: an upstream domain refusal reads as the same failure as the local one', () => {
   const err = publishToolError(upstream('url_ownership_unverified'));
   assert.equal(err.code, 'url_prefix_unverified');
@@ -284,4 +318,25 @@ test('a TikTokError without an api_code is not remapped by accident', () => {
 
 test('a plain throw still becomes internal_error rather than a publish diagnosis', () => {
   assert.equal(publishToolError(new Error('boom')).code, 'internal_error');
+});
+
+test('a remap of an error TikTok sent without a log_id omits the field entirely', () => {
+  // `log_id` is evidence, not decoration: an absent one must leave the key out
+  // rather than carry `undefined`, so nothing downstream renders "log_id:
+  // undefined" as if TikTok had said it (§ 3.0, the same rule CC-B9 pins for
+  // the plain mapping).
+  const err = publishToolError(
+    new TikTokError({
+      code: 'upstream_error',
+      kind: 'api',
+      message: 'TikTok rejected the request.',
+      retryable: false,
+      apiCode: 'reached_active_user_cap',
+    }),
+  );
+  assert.equal(err.code, 'active_user_cap');
+  assert.ok(!('log_id' in err));
+  // The remap still keeps the upstream spelling, which is all the evidence
+  // there is when the log_id is missing.
+  assert.equal(err.details?.['api_code'], 'reached_active_user_cap');
 });

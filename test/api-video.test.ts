@@ -178,6 +178,28 @@ test('a videos member that is not an array reads as an upstream shape change', a
   });
 });
 
+for (const [label, element] of [
+  ['null', null],
+  ['a string', 'v1'],
+  ['an object without an id', { title: 'no id' }],
+  ['an object with a numeric id', { id: 42 }],
+] as const) {
+  test(`a videos element that is ${label} reads as an upstream shape change`, async () => {
+    const stub = scriptFetch([
+      ttEnvelope({ videos: [{ id: 'v1' }, element], has_more: false }),
+    ]);
+    await withFetch(stub, async () => {
+      await assert.rejects(listVideos(apiCtx(), {}), (error: unknown) => {
+        assert.ok(isTikTokError(error));
+        assert.equal(error.code, 'upstream_error');
+        assert.ok(error.message.includes('/v2/video/list/'));
+        assert.ok(error.message.includes('videos[].id'));
+        return true;
+      });
+    });
+  });
+}
+
 test('an undocumented field name fails locally, before any request', async () => {
   const stub = scriptFetch([]);
   await withFetch(stub, async () => {
@@ -295,6 +317,21 @@ test('a missing videos member on query is an empty answer, not a crash', async (
   const result = await withFetch(stub, async () => queryVideos(apiCtx(), ['v1']));
 
   assert.deepEqual(result, { videos: [], missingIds: ['v1'] });
+});
+
+test('a query answer whose element has no string id is an upstream shape change', async () => {
+  // Without the check, `missingIds` would be computed against `undefined` and
+  // report a video TikTok did return as missing.
+  const stub = scriptFetch([ttEnvelope({ videos: [{ title: 'no id' }] })]);
+  await withFetch(stub, async () => {
+    await assert.rejects(queryVideos(apiCtx(), ['v1']), (error: unknown) => {
+      assert.ok(isTikTokError(error));
+      assert.equal(error.code, 'upstream_error');
+      assert.ok(error.message.includes('/v2/video/query/'));
+      assert.ok(error.message.includes('videos[].id'));
+      return true;
+    });
+  });
 });
 
 test('an already-aborted signal stops the query at the transport', async () => {

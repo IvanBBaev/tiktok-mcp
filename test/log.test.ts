@@ -314,6 +314,49 @@ test('cc-g3 a registered secret never reaches the stderr sink', () => {
   assert.ok(!raw.includes(secret), 'the seeded secret leaked to stderr');
 });
 
+test('fields land as top-level record keys, each redacted in place', () => {
+  // `buildRecord` spreads the bound and per-call fields into a plain object and
+  // hands it to `redactRecord`, which is typed record-in, record-out: the
+  // redacted entries spread straight into the envelope, never under a `fields`
+  // sub-object, whatever shapes the values take — a denied key, an Error, a
+  // nested denial, a non-plain object, a cycle. The cycle closes one level
+  // down because the top-level record is the spread copy, not the caller's
+  // object: the caller's object is walked once as a value and marked where it
+  // points back at itself.
+  const log = createLogger({ clock: frozenClock() });
+  const fields: Record<string, unknown> = {
+    attempt: 1,
+    client_secret: 'FIELD-VALUE-CANARY',
+    error: new Error('boom'),
+    hints: [{ type: 'note', session_cookie: 'FIELD-VALUE-CANARY' }],
+    denied_shape: new Map([['k', 'FIELD-VALUE-CANARY']]),
+  };
+  fields.journal = fields;
+
+  const { out, err } = capture(() => {
+    log.info('shaped', fields);
+  });
+
+  const redactedFields = {
+    attempt: 1,
+    client_secret: '[REDACTED]',
+    error: { name: 'Error', message: 'boom' },
+    hints: [{ type: 'note', session_cookie: '[REDACTED]' }],
+    denied_shape: '[REDACTED]',
+  };
+  assert.deepEqual(out, []);
+  assert.deepEqual(parseLines(err), [
+    {
+      ts: FIXED_EPOCH_ISO,
+      level: 'info',
+      msg: 'shaped',
+      ...redactedFields,
+      journal: { ...redactedFields, journal: '[CIRCULAR]' },
+    },
+  ]);
+  assert.ok(!err.join('').includes('FIELD-VALUE-CANARY'), 'a denied value leaked');
+});
+
 test('the silent logger writes to neither stream, at any level', () => {
   // The fallback for `logger?` options across core/*: importing a module must
   // never write to a stream its embedder did not open (CC-G3).

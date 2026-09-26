@@ -25,7 +25,7 @@
  *   replay never reads credentials, never touches `resetTokenCache` and never
  *   observes the module-level token state in `src/core/oauth.ts`. A fixture is
  *   about TikTok's wire contract; the OAuth state machine has its own tests.
- * - **`TT_MAX_RETRIES` is pinned to 1.** A fixture records one request and one
+ * - **`TT_MAX_RETRIES` is pinned to 0.** A fixture records one request and one
  *   response; replaying the retry ladder on top of that would need a script of
  *   N identical responses and would prove nothing about the envelope, while a
  *   fixture that happens to hold a retryable status (a 500) would otherwise
@@ -82,7 +82,7 @@ export const REPLAY_ORIGIN = 'https://open.tiktokapis.com';
 export function replayContext(): ApiContext {
   return createApiContext({
     profile: 'DEFAULT',
-    settings: loadSettings({ ...baselineEnv(), TT_MAX_RETRIES: '1' }),
+    settings: loadSettings({ ...baselineEnv(), TT_MAX_RETRIES: '0' }),
     log: createLogger({ level: 'error' }),
     clock: mockClock(),
     refresh: () => Promise.resolve(REPLAY_ACCESS_TOKEN),

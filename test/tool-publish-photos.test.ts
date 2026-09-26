@@ -31,7 +31,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -46,7 +46,14 @@ import {
   takePublishToken,
 } from '../src/mcp/plan.js';
 import { PLAN_ID_PATTERN, resetPlanStore } from '../src/mcp/plan-store.js';
-import type { Hint, ToolError, ToolResult } from '../src/mcp/result.js';
+import {
+  MAX_HINTS,
+  MAX_HINT_CHARS,
+  truncateResult,
+  type Hint,
+  type ToolError,
+  type ToolResult,
+} from '../src/mcp/result.js';
 import type {
   AppliedData,
   DraftPreview,
@@ -496,6 +503,14 @@ test('§ 2.6.1 a photo preview reports the rate bucket without spending from it'
   });
 });
 
+/**
+ * The warning rides *alongside* the step the caller is in the middle of — the
+ * approval on a complete preview, the privacy choice on an incomplete one — so
+ * its type is the load-bearing part: an unaudited app is a standing condition
+ * of the installation, not something the human must do before this call can
+ * proceed. TOOLS.md § 4 (flow 2) and § 5.1 both give the case to `note`, and a
+ * `user_action` here would tell a model to halt a flow meant to continue.
+ */
 test('§ 3.10 an unaudited account carries the SELF_ONLY warning on both preview shapes', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi({
@@ -504,11 +519,80 @@ test('§ 3.10 an unaudited account carries the SELF_ONLY warning on both preview
     await withFetch(stub, async () => {
       const complete = await run(ctx, previewArgs());
       const incomplete = await run(ctx, previewArgs({ privacy_level: undefined }));
-      for (const result of [complete, incomplete]) {
+      for (const [result, leading] of [
+        [complete, 'approval_required'],
+        [incomplete, 'user_action'],
+      ] as const) {
         assert.equal(previewOf(result).audit_restrictions_active, true);
-        assert.ok(hintsOf(result).some((hint) => hint.text.includes('SELF_ONLY')));
+        const hints = hintsOf(result);
+        // § 5.2: at most three hints, most actionable first — the warning is
+        // appended to the step in hand, it never displaces it.
+        assert.ok(hints.length <= 3);
+        assert.equal(hints[0]?.type, leading);
+        assert.ok(hints.some((hint) => hint.text.includes('SELF_ONLY')));
+        // Selected by "audit": on the incomplete shape the privacy question
+        // names SELF_ONLY too, since that is the one option on offer.
+        const warnings = hints.filter((hint) => hint.text.includes('audit'));
+        assert.equal(warnings.length, 1);
+        const warning = warnings[0];
+        assert.equal(warning?.type, 'note');
+        assert.equal(warning?.action, undefined);
+        assert.ok((warning?.text.length ?? 0) <= 300);
       }
     });
+  });
+});
+
+test('§ 3.10 every optional carousel flag the caller sets reaches post_info', async () => {
+  await withCtx({}, async (ctx) => {
+    const result = await withFetch(fakeApi(), async () =>
+      run(
+        ctx,
+        previewArgs({
+          privacy_level: 'PUBLIC_TO_EVERYONE',
+          disable_comment: true,
+          auto_add_music: true,
+          brand_content_toggle: true,
+          brand_organic_toggle: true,
+          is_aigc: false,
+        }),
+      ),
+    );
+
+    // Snake case stops at the tool boundary, so what the user approves is what
+    // TikTok is sent — a flag silently dropped here would be a post that does
+    // not match its own preview.
+    assert.deepEqual(previewOf(result).payload.post_info, {
+      title: TITLE,
+      description: DESCRIPTION,
+      privacy_level: 'PUBLIC_TO_EVERYONE',
+      disable_comment: true,
+      auto_add_music: true,
+      brand_content_toggle: true,
+      brand_organic_toggle: true,
+      is_aigc: false,
+    });
+    // An explicit `is_aigc` is the caller's, so the server default is not
+    // applied and nothing is reported as derived from it.
+    assert.equal(
+      previewOf(result).derived?.some((e) => e.field === 'is_aigc'),
+      false,
+    );
+  });
+});
+
+test('§ 2.6.1 a creator_info refusal fails the photo preview instead of planning without it', async () => {
+  await withCtx({}, async (ctx) => {
+    const stub = fakeApi({
+      creator: () => ttEnvelope({}, { code: 'creator_info_broken', message: 'nope' }),
+    });
+    const result = await withFetch(stub, async () => run(ctx, previewArgs()));
+
+    const error = errorOf(result);
+    assert.equal(error.code, 'upstream_error');
+    assert.equal(error.retryable, false);
+    assert.equal(result.data, undefined);
+    assert.equal(countPath(stub, INIT_PATH), 0);
   });
 });
 
@@ -549,6 +633,34 @@ test('cc-d10 a photo_urls entry outside every verified prefix names the first of
   });
 });
 
+test('§ 5.1: both photo tools name host_media, and neither hint carries the URL', async () => {
+  await withCtx({}, async (ctx) => {
+    const stub = fakeApi();
+    const bad = { photo_urls: [PHOTO_URLS[0], 'https://evil.example.net/two.jpg'] };
+    const results = await withFetch(stub, async () => [
+      ['tiktok_post_photos', await run(ctx, previewArgs(bad))] as const,
+      ['tiktok_upload_photos_draft', await runDraft(ctx, draftArgs(bad))] as const,
+    ]);
+
+    for (const [tool, result] of results) {
+      assert.equal(errorOf(result).code, 'url_prefix_unverified', tool);
+      assert.equal(hintsOf(result).length, 1, tool);
+      const [hint] = hintsOf(result);
+      assert.equal(hint?.type, 'user_action', tool);
+      assert.equal(hint?.action, 'host_media', tool);
+      assert.ok((hint?.text.length ?? 999) <= 300, tool);
+      assert.ok(hint?.text.includes('TT_VERIFIED_URL_PREFIXES'), tool);
+      // The hint names the tool to call again, so a model holding two of them
+      // cannot pick the wrong one (§ 5.2 rule 1 — no vague references).
+      assert.ok(hint?.text.includes(tool), tool);
+      // § 5.2 rule 3: the offending URL stays in the error message.
+      assert.ok(!hint?.text.includes('evil.example.net'), tool);
+    }
+
+    assert.equal(stub.calls.length, 0);
+  });
+});
+
 test('cc-e9 a photo_cover_index past the end of photo_urls is refused before any request', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi();
@@ -567,6 +679,22 @@ test('cc-e9 a photo_cover_index past the end of photo_urls is refused before any
       run(ctx, previewArgs({ photo_cover_index: 2 })),
     );
     assert.equal(previewOf(ok).mode, 'plan');
+  });
+});
+
+test('cc-e9 the out-of-range cover message counts a single-photo carousel in the singular', async () => {
+  await withCtx({}, async (ctx) => {
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () =>
+      run(ctx, previewArgs({ photo_urls: [PHOTO_URLS[0]], photo_cover_index: 1 })),
+    );
+
+    // The refusal has to name the carousel the caller actually sent; "1 photos"
+    // reads as a bug in the server and invites a blind re-send.
+    const error = errorOf(result);
+    assert.equal(error.code, 'invalid_params');
+    assert.ok(error.message.includes('(1 photo)'));
+    assert.equal(stub.calls.length, 0);
   });
 });
 
@@ -742,6 +870,18 @@ test('§ 3.10 apply posts media_type PHOTO with the previewed carousel and journ
   });
 });
 
+test('§ 3.10 TT_WRITE_MODE=apply posts the carousel with no plan and journals an empty plan_id', async () => {
+  await withCtx({ TT_WRITE_MODE: 'apply' }, async (ctx, dir) => {
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => run(ctx, previewArgs()));
+
+    assert.equal(appliedOf(result).publish_id, 'v_pub_url~photo.123');
+    assert.equal(countPath(stub, INIT_PATH), 1);
+    // The honest record of "nothing approved this".
+    assert.equal(linesOf(await readJournal(dir), 'intent')[0]?.['plan_id'], '');
+  });
+});
+
 test('cc-e7 changing the carousel after the preview is plan_mismatch and sends no init', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi();
@@ -904,6 +1044,85 @@ test('§ 3.10 wait_for_completion polls until the terminal status and returns th
   });
 });
 
+/** Appendix A, verbatim — spelled out so a drifted mapping fails here. */
+const PHOTO_PULL_RECOVERY =
+  'TikTok could not download the media URL. It must be HTTPS, serve the bytes without ' +
+  'redirects, and stay reachable for about an hour. Fix the hosting and post again.';
+const CANCELLED_RECOVERY =
+  'The user cancelled this post in the TikTok app. Nothing to retry.';
+
+test('§ 3.10 a photo wait that ends in FAILED carries the fail_reason and its Appendix A recovery', async () => {
+  await withCtx({}, async (ctx) => {
+    const stub = fakeApi({
+      status: () => ttEnvelope({ status: 'FAILED', fail_reason: 'photo_pull_failed' }),
+    });
+    const result = await withFetch(stub, async () => {
+      const preview = previewOf(await run(ctx, previewArgs()));
+      return await run(
+        ctx,
+        previewArgs({ plan_id: preview.plan_id, wait_for_completion: true }),
+      );
+    });
+
+    const data = appliedOf(result);
+    assert.equal(data.status, 'FAILED');
+    assert.equal(data.fail_reason, 'photo_pull_failed');
+    assert.equal(data.fail_recovery, PHOTO_PULL_RECOVERY);
+    assert.equal(hintsOf(result).length, 0);
+  });
+});
+
+test('§ 3.11 a waited photo draft that ends in FAILED has its recovery and no inbox hint', async () => {
+  await withCtx({}, async (ctx) => {
+    const stub = fakeApi({
+      init: () => initResponse('v_inbox~photo.failed'),
+      status: () => ttEnvelope({ status: 'FAILED', fail_reason: 'publish_cancelled' }),
+    });
+    const result = await withFetch(stub, async () => {
+      const preview = draftPreviewOf(await runDraft(ctx, draftArgs()));
+      return await runDraft(
+        ctx,
+        draftArgs({ plan_id: preview.plan_id, wait_for_completion: true }),
+      );
+    });
+
+    const data = appliedOf(result);
+    assert.equal(data.publish_id, 'v_inbox~photo.failed');
+    assert.equal(data.status, 'FAILED');
+    assert.equal(data.fail_reason, 'publish_cancelled');
+    assert.equal(data.fail_recovery, CANCELLED_RECOVERY);
+    // Nothing is waiting in the inbox, so no hint may send the user there.
+    const hints = hintsOf(result);
+    assert.equal(
+      hints.some((hint) => hint.action === 'open_tiktok_app'),
+      false,
+    );
+    assert.equal(hints.length, 0);
+  });
+});
+
+test('§ 3.11 a waited photo draft that ends in FAILED without a reason sets neither fail field', async () => {
+  await withCtx({}, async (ctx) => {
+    const stub = fakeApi({
+      init: () => initResponse('v_inbox~photo.bare'),
+      status: () => ttEnvelope({ status: 'FAILED' }),
+    });
+    const result = await withFetch(stub, async () => {
+      const preview = draftPreviewOf(await runDraft(ctx, draftArgs()));
+      return await runDraft(
+        ctx,
+        draftArgs({ plan_id: preview.plan_id, wait_for_completion: true }),
+      );
+    });
+
+    const data = appliedOf(result);
+    assert.equal(data.status, 'FAILED');
+    assert.equal('fail_reason' in data, false);
+    assert.equal('fail_recovery' in data, false);
+    assert.equal(hintsOf(result).length, 0);
+  });
+});
+
 test('§ 2.7 a photo wait that runs out of time is still a success, with a still-processing hint', async () => {
   await withCtx(
     { TT_STATUS_POLL_INTERVAL_MS: '5000', TT_STATUS_POLL_TIMEOUT_MS: '60000' },
@@ -1016,6 +1235,141 @@ test('§ 3.11 a draft apply sends post_mode MEDIA_UPLOAD and leads with the inbo
     assert.equal(intent?.['tool'], 'tiktok_upload_photos_draft');
     assert.equal(intent?.['mode'], 'MEDIA_UPLOAD');
     assert.equal(intent?.['source'], 'PULL_FROM_URL');
+  });
+});
+
+/** The inbox draft the deepest hint chain below is built on. */
+const DEEP_CHAIN_PUBLISH_ID = 'v_inbox~photo.7';
+
+/**
+ * The § 5.2 caps, asserted on the envelope the caller actually receives.
+ *
+ * Deliberately duplicated in `tool-publish-write.test.ts` rather than lifted
+ * into `test/helpers.ts`: the two files pin the same property on two different
+ * tools, and a shared copy invites editing it for one tool's convenience while
+ * the other silently stops checking what it thinks it checks. The numbers are
+ * imported, not retyped — a local `3` would only agree with itself.
+ *
+ * `truncated` is the assertion that carries this, not a scan for the
+ * truncator's own note: `withNote` in `mcp/result.ts` *declines* to append that
+ * note once a result already holds {@link MAX_HINTS} hints, so at the cap a
+ * shortened payload has no slot left to announce itself in. The deep-equal
+ * beside it says the hints that ship are the hints the tool wrote — none
+ * appended, none rewritten on the way out.
+ */
+function assertHintsIntact(result: ToolResult<unknown>, budget: number): void {
+  const hints = hintsOf(result);
+  assert.ok(
+    hints.length <= MAX_HINTS,
+    `${String(hints.length)} hints exceed the § 5.2 cap of ${String(MAX_HINTS)}`,
+  );
+  for (const hint of hints) {
+    assert.ok(
+      hint.text.length <= MAX_HINT_CHARS,
+      `hint over ${String(MAX_HINT_CHARS)}: ${hint.text}`,
+    );
+  }
+
+  // The detector, proved before it is trusted: the same envelope carrying a
+  // payload no budget this size can hold *is* reported as truncated. Without
+  // this, the assertion below would pass just as happily on a truncator that
+  // had stopped reporting anything at all.
+  const overflowing = truncateResult(
+    { ...result, data: { blob: 'x'.repeat(budget + 1) } },
+    budget,
+  );
+  assert.equal(overflowing.truncated, true, 'the elision check is vacuous');
+
+  const shipped = truncateResult(result, budget);
+  assert.equal(shipped.truncated, false, 'the result was shortened to fit the budget');
+  assert.deepEqual(shipped.result.hints, hints, 'truncation rewrote the hints');
+}
+
+test('cc-g7: the deepest photo hint chain fills all three slots and ships every one of them', async () => {
+  // The carousel twin of the same chain in `tool-publish-write.test.ts`, and
+  // the one thing no static scan of the hint literals can see: the three hints
+  // are written at three different sites and only the runtime knows they meet.
+  //
+  //   1. `draftInboxHint()`, prepended by `executePhotosDraft` in this module;
+  //   2. `waitIfAsked`'s still-processing poll, unshifted onto whatever the
+  //      dispatch handed it;
+  //   3. `dispatchWrite`'s journal-unavailable note, the array those two grew.
+  //
+  // A fourth hint added inside any one of them would be dropped in silence:
+  // the draft still reached the inbox, the result still returned, and the only
+  // casualty is the guidance the model needed next.
+  await withCtx(
+    { TT_STATUS_POLL_INTERVAL_MS: '5000', TT_STATUS_POLL_TIMEOUT_MS: '60000' },
+    async (ctx, dir, clock) => {
+      // A directory where the journal file belongs: every append fails and
+      // nothing else does, so the note is earned rather than injected.
+      await mkdir(join(dir, 'journal.ndjson'), { recursive: true });
+      // Never terminal, so the wait can only end at its deadline. A photo
+      // draft that settles reaches `SEND_TO_USER_INBOX`, which would stop the
+      // poll and take the middle hint away.
+      const stub = fakeApi({
+        init: () => initResponse(DEEP_CHAIN_PUBLISH_ID),
+        status: () => ttEnvelope({ status: 'PROCESSING_DOWNLOAD' }),
+      });
+
+      const result = await withFetch(stub, async () => {
+        const preview = draftPreviewOf(await runDraft(ctx, draftArgs()));
+        return await runVirtual(
+          clock,
+          runDraft(
+            ctx,
+            draftArgs({ plan_id: preview.plan_id, wait_for_completion: true }),
+          ),
+        );
+      });
+
+      // § 2.7: the timeout is not a failure — the draft is in the inbox.
+      const data = appliedOf(result);
+      assert.equal(data.publish_id, DEEP_CHAIN_PUBLISH_ID);
+      assert.equal(data.status, 'PROCESSING_DOWNLOAD');
+      assert.equal(data.journal, 'unavailable');
+      assert.equal(result.journal, 'unavailable');
+
+      // § 5.2 rule 4, most actionable first: the step only the human can take,
+      // then the call the model should make, then the caveat on the guard.
+      const hints = hintsOf(result);
+      assert.deepEqual(
+        hints.map((hint) => hint.type),
+        ['user_action', 'poll', 'note'],
+      );
+      assert.equal(hints[0]?.action, 'open_tiktok_app');
+      assert.ok(hints[0]?.text.includes('Unopened drafts expire.'));
+      assert.equal(hints[1]?.tool, 'tiktok_get_publish_status');
+      assert.equal(hints[1]?.publish_id, DEEP_CHAIN_PUBLISH_ID);
+      // `PROCESSING_DOWNLOAD` is a `PUBLISH_STATUSES` member, so § 5.2 rule 3
+      // renders this server's own literal for it; an unrecognized status would
+      // read `processing` here instead.
+      assert.ok(hints[1]?.text.includes('Still PROCESSING_DOWNLOAD after 60 s'));
+      assert.ok(hints[2]?.text.includes('duplicate guard'));
+      // The fixture id passes the rule-3 token shape, so the note names it —
+      // quoted, in the one form `quotedHintToken` emits. An id that failed the
+      // shape check would leave this sentence entirely, which is why the whole
+      // quoted phrase is asserted rather than a bare substring.
+      assert.ok(hints[2]?.text.includes(`publish_id "${DEEP_CHAIN_PUBLISH_ID}"`));
+
+      // Read as one statement: three hints, all of them inside the caps, all of
+      // them still there once the result has been through the char budget.
+      assertHintsIntact(result, ctx.api.settings.resultCharBudget);
+      // Not merely under the cap — *at* it. This chain has no headroom, so a
+      // fourth hint anywhere in it changes this line and nothing else.
+      assert.equal(hints.length, MAX_HINTS);
+    },
+  );
+});
+
+test('§ 3.11 TT_WRITE_MODE=apply uploads the photo draft with no plan and an empty plan_id', async () => {
+  await withCtx({ TT_WRITE_MODE: 'apply' }, async (ctx, dir) => {
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => runDraft(ctx, draftArgs()));
+
+    assert.equal(appliedOf(result).publish_id, 'v_pub_url~photo.123');
+    assert.equal(countPath(stub, CREATOR_PATH), 0);
+    assert.equal(linesOf(await readJournal(dir), 'intent')[0]?.['plan_id'], '');
   });
 });
 

@@ -734,7 +734,8 @@ test('cc-b2 ttRequest reports a non-JSON body instead of crashing on it', async 
         ttRequest({
           method: 'GET',
           url: API_URL,
-          retryClass: 'init',
+          retryClass: 'read',
+          maxAttempts: 1,
           clock: mockClock(),
         }),
       ),
@@ -757,7 +758,8 @@ test('cc-b2 ttRequest reports an empty body as a body, not as success', async ()
         ttRequest({
           method: 'GET',
           url: API_URL,
-          retryClass: 'init',
+          retryClass: 'read',
+          maxAttempts: 1,
           clock: mockClock(),
         }),
       ),
@@ -774,7 +776,8 @@ test('cc-b2 ttRequest truncates a huge non-JSON body in the message', async () =
         ttRequest({
           method: 'GET',
           url: API_URL,
-          retryClass: 'init',
+          retryClass: 'read',
+          maxAttempts: 1,
           clock: mockClock(),
         }),
       ),
@@ -792,7 +795,8 @@ test('ttRequest rejects a JSON value that is not an object', async () => {
         ttRequest({
           method: 'GET',
           url: API_URL,
-          retryClass: 'init',
+          retryClass: 'read',
+          maxAttempts: 1,
           clock: mockClock(),
         }),
       ),
@@ -859,6 +863,111 @@ test('ttRequest resolves the whole object when the endpoint sends no data member
   assert.equal(value['creator_nickname'], 'me');
 });
 
+for (const [label, data] of [
+  ['null', null],
+  ['a string', 'x'],
+  ['a number', 7],
+  ['an array', []],
+] as const) {
+  test(`an init whose ok envelope carries ${label} as data is ambiguous and never retried`, async () => {
+    const clock = mockClock();
+    const play = playFetch([
+      jsonResponse({ data, error: { code: 'ok', message: '' } }),
+      ttEnvelope({ publish_id: 'never-reached' }),
+    ]);
+    const err = ttError(
+      await withFetch(play.fetch, () =>
+        rejection(
+          drive(
+            clock,
+            ttRequest({
+              method: 'POST',
+              url: API_URL,
+              body: {},
+              retryClass: 'init',
+              maxAttempts: 5,
+              clock,
+            }),
+          ),
+        ),
+      ),
+    );
+    assert.equal(play.calls.length, 1);
+    assert.equal(err.kind, 'network');
+    assert.equal(err.code, 'network_ambiguous');
+    assert.equal(err.retryable, false);
+    assert.match(err.message, /HTTP 200 with error\.code "ok"/);
+    assert.match(err.message, /`data` that is not an object/);
+    assert.match(err.message, /NOT retried/);
+  });
+}
+
+test('an init whose envelope has no error member and a null data is ambiguous too', async () => {
+  const clock = mockClock();
+  const play = playFetch([jsonResponse({ data: null })]);
+  const err = ttError(
+    await withFetch(play.fetch, () =>
+      rejection(
+        drive(
+          clock,
+          ttRequest({
+            method: 'POST',
+            url: API_URL,
+            body: {},
+            retryClass: 'init',
+            clock,
+          }),
+        ),
+      ),
+    ),
+  );
+  assert.equal(play.calls.length, 1);
+  assert.equal(err.code, 'network_ambiguous');
+});
+
+for (const [label, data] of [
+  ['null', null],
+  ['an array', [{ id: 'v1' }]],
+] as const) {
+  test(`a read whose ok envelope carries ${label} as data is an upstream error, not retried`, async () => {
+    const clock = mockClock();
+    const play = playFetch([
+      jsonResponse({ data, error: { code: 'ok', message: '' } }),
+      ttEnvelope({ never: 'reached' }),
+    ]);
+    const err = ttError(
+      await withFetch(play.fetch, () =>
+        rejection(
+          drive(
+            clock,
+            ttRequest({
+              method: 'GET',
+              url: API_URL,
+              retryClass: 'read',
+              maxAttempts: 3,
+              clock,
+            }),
+          ),
+        ),
+      ),
+    );
+    assert.equal(play.calls.length, 1);
+    assert.equal(err.kind, 'api');
+    assert.equal(err.code, 'upstream_error');
+    assert.equal(err.retryable, false);
+    assert.match(err.message, /`data` that is not an object/);
+    assert.match(err.message, /upstream response-shape change/);
+  });
+}
+
+test('an empty data object is still a success, not a malformed one', async () => {
+  const stub = scriptFetch([ttEnvelope({})]);
+  const value = await withFetch(stub, () =>
+    ttRequest({ method: 'GET', url: API_URL, retryClass: 'read', clock: mockClock() }),
+  );
+  assert.deepEqual(value, {});
+});
+
 test('ttRequest never lets a registered bearer reach the error text', async () => {
   const bearer = 'fake-access-token-leak-probe-9f8e7d';
   const stub = scriptFetch([new Response(`gateway said: ${bearer}`, { status: 500 })]);
@@ -868,7 +977,8 @@ test('ttRequest never lets a registered bearer reach the error text', async () =
         ttRequest({
           method: 'GET',
           url: API_URL,
-          retryClass: 'init',
+          retryClass: 'read',
+          maxAttempts: 1,
           bearer,
           clock: mockClock(),
         }),
@@ -1118,7 +1228,14 @@ test('cc-b3 ttRequest honours Retry-After in HTTP-date form', async () => {
 });
 
 test('cc-b3 ttRequest falls back to backoff for a malformed Retry-After', async () => {
-  for (const header of ['-5', '1.5', 'soon', '   ', 'Thu, 99 Xxx 2026 00:00:00 GMT']) {
+  for (const header of [
+    '-5',
+    '1.5',
+    'soon',
+    '   ',
+    'Thu, 99 Xxx 2026 00:00:00 GMT',
+    '9'.repeat(400), // all digits, but Number() makes it Infinity
+  ]) {
     const clock = mockClock();
     const { logger, records } = recordingLogger();
     const play = playFetch([
@@ -1485,6 +1602,66 @@ test('ttRequest blocks a DNS answer that points at a non-routable address', asyn
     'fd00::1',
     'fe80::1',
     '::ffff:127.0.0.1',
+    '198.18.0.1', // RFC 2544 benchmarking range
+    '198.19.255.254',
+    'ff02::1', // IPv6 all-nodes multicast
+    '999.1.1.1', // dotted-quad shape, not a valid address — fail closed
+    'not-an-ip', // a resolver answer is always a literal; anything else fails closed
+    '192.0.0.1', // IETF protocol assignments 192.0.0/24
+    '192.0.2.1', // TEST-NET-1
+    '198.51.100.1', // TEST-NET-2
+    '203.0.113.1', // TEST-NET-3
+    // IPv6 spellings of the same few addresses — classified by value, not text.
+    '0:0:0:0:0:0:0:1', // loopback, uncompressed
+    '::', // unspecified
+    '[::1]', // bracketed, as a URL host carries it
+    ' ::1 ', // surrounding whitespace
+    'fe80::1%en0', // link-local with a zone id
+    'FE80::1', // upper case
+    '::ffff:7f00:1', // IPv4-mapped loopback, hex-spelled
+    '::10.0.0.1', // deprecated IPv4-compatible form of a private IPv4
+    '64:ff9b::a00:1', // NAT64 well-known prefix translating 10.0.0.1
+    '64:ff9b::10.0.0.1', // the same, dotted
+    '64:ff9b:1::1', // NAT64 local-use 64:ff9b:1::/48
+    '2002:0a00:0001::', // 6to4 wrapping 10.0.0.1
+    '2002:7f00:1::1', // 6to4 wrapping 127.0.0.1
+    '2001::1', // Teredo 2001:0::/32
+    '2001:db8::1', // documentation 2001:db8::/32
+    '100::1', // discard-only 100::/64
+    'fc00::1', // unique-local, lower half of fc00::/7
+    'fec0::1', // deprecated site-local fec0::/10
+    'feff::1', // top of fec0::/10
+    '192.88.99.1', // deprecated 6to4 relay anycast 192.88.99.0/24
+    '::1:0:0', // h5 neither 0 nor ffff: the reserved rest of 0000::/8
+    '0:0:0:0:1::1', // h4 set: outside ::/80, still inside 0000::/8
+    '0:0:0:1::', // h3 set: inside 0000::/8
+    '64::1', // shares h0 with NAT64 but not h1: inside 0000::/8
+    '1::', // one step above ::/96, still inside 0000::/8
+    'ff::1', // top of 0000::/8
+    '::ffff:0:7f00:1', // SIIT ::ffff:0:0:0/96 translating 127.0.0.1
+    '::ffff:0:10.0.0.1', // the same prefix, dotted, translating 10.0.0.1
+    '::ffff:1:808:808', // h4 ffff but h5 set: neither mapped nor SIIT, in 0000::/8
+    '2001:20::1', // ORCHIDv2 inside IETF protocol assignments 2001::/23
+    '2001:1ff::1', // top of 2001::/23
+    '3fff::1', // documentation 3fff::/20
+    '3fff:fff::1', // top of 3fff::/20
+    '5f00::1', // SRv6 SIDs 5f00::/16
+    '5f00:ffff::1', // top of 5f00::/16
+    // Only global unicast 2000::/3 is ever public: everything outside it is
+    // refused as one rule, including the unassigned IETF-reserved space.
+    '100:0:0:1::1', // outside discard-only 100::/64, still outside 2000::/3
+    '100:1::1', // the same, h1 set
+    '101::1', // reserved 100::/8
+    '1fff:ffff::1', // just below 2000::/3
+    '4000::1', // just above 2000::/3
+    '5eff:ffff::1', // reserved 4000::/2, just below SRv6 SIDs 5f00::/16
+    '5f01::1', // reserved 4000::/2, just above SRv6 SIDs 5f00::/16
+    '8000::1', // reserved 8000::/1
+    'e000::1', // reserved e000::/4
+    'fb00::1', // just below unique-local fc00::/7, still reserved
+    'fe70::1', // just below link-local fe80::/10, still reserved
+    '3fff:0fff::', // top /32 of documentation 3fff::/20, unabbreviated
+    '2002:c0a8:0101::1', // 6to4 wrapping 192.168.1.1
   ];
 
   for (const address of nonRoutable) {
@@ -1534,6 +1711,78 @@ test('ttRequest proceeds when every DNS answer is routable', async () => {
   );
   assert.equal(stub.calls.length, 1);
   assert.equal(dns.calls.length, 1);
+});
+
+/**
+ * The other half of the table above. A guard that fails closed is only useful
+ * if it also fails *open* on the addresses one step outside each range — that
+ * is the half a widened pattern would silently break, and the half no
+ * "everything private is refused" assertion can see.
+ */
+test('ttRequest admits the addresses one step outside every blocked range', async () => {
+  const routable = [
+    '1.0.0.1', // 0/8 is refused, 1/8 is not
+    '9.255.255.255', // just below 10/8
+    '11.0.0.1', // just above 10/8
+    '126.255.255.255', // just below 127/8
+    '128.0.0.1', // just above 127/8
+    '169.253.255.255', // just below 169.254/16
+    '169.255.0.1', // just above 169.254/16
+    '172.15.255.255', // just below 172.16/12
+    '172.32.0.1', // just above 172.16/12
+    '192.167.255.255', // just below 192.168/16
+    '192.169.0.1', // just above 192.168/16
+    '100.63.255.255', // just below 100.64/10
+    '100.128.0.1', // just above 100.64/10
+    '198.17.255.255', // just below 198.18/15
+    '198.20.0.1', // just above 198.18/15
+    '223.255.255.255', // just below multicast 224/4
+    '192.0.1.1', // between IETF 192.0.0/24 and TEST-NET-1 192.0.2/24
+    '192.0.3.1', // just above TEST-NET-1
+    '198.51.101.1', // just above TEST-NET-2
+    '198.51.99.1', // just below TEST-NET-2
+    '203.0.114.1', // just above TEST-NET-3
+    '203.1.113.1', // TEST-NET-3's third octet under a different second octet
+    '::ffff:8.8.8.8', // an IPv4-mapped address whose IPv4 is routable
+    '::ffff:808:808', // the same, hex-spelled
+    '::8.8.8.8', // IPv4-compatible form of a routable IPv4
+    '::ffff:0:808:808', // SIIT ::ffff:0:0:0/96 translating a routable 8.8.8.8
+    '::ffff:0:8.8.8.8', // the same, dotted
+    '2606:4700::1111',
+    '2606:4700:1:2:3:4:5:6', // eight explicit groups, no :: to expand
+    '64:ff9b::808:808', // NAT64 well-known prefix translating 8.8.8.8
+    '64:ff9b:0:0:0:1::', // inside 64:ff9b::/64 but outside the /96
+    '64:ff9b:0:1::', // h3 set: outside the /96
+    '64:ff9b:2::1', // one step above the local-use 64:ff9b:1::/48
+    '2002:0808:0808::', // 6to4 wrapping a routable IPv4
+    '2001:4860::1', // 2001::/16 outside Teredo and documentation
+    '2001:db9::1', // just above documentation 2001:db8::/32
+    '2001:200::1', // one step above IETF protocol assignments 2001::/23
+    '3ffe:ffff::1', // just below documentation 3fff::/20
+    '3fff:1000::1', // one step above documentation 3fff::/20
+    '192.88.98.255', // just below 6to4 relay anycast 192.88.99.0/24
+    '192.88.100.1', // just above it
+    '192.89.99.1', // its third octet under a different second octet
+    '2000::1', // the bottom of global unicast 2000::/3
+    '3fff:ffff::1', // the top of 2000::/3, above documentation 3fff::/20
+    '2606:4700::1',
+    '2002:0808:0808::1', // 6to4 wrapping a routable IPv4, with a host part
+  ];
+
+  for (const address of routable) {
+    const stub = scriptFetch([ttEnvelope({ ok: true })]);
+    const dns = fakeLookup([{ address, family: address.includes(':') ? 6 : 4 }]);
+    await withFetch(stub, () =>
+      ttRequest({
+        method: 'GET',
+        url: API_URL,
+        retryClass: 'read',
+        lookup: dns.lookup,
+        clock: mockClock(),
+      }),
+    );
+    assert.equal(stub.calls.length, 1, `${address} must be allowed through`);
+  }
 });
 
 test('ttRequest turns a DNS failure into a retryable network error', async () => {
@@ -1880,6 +2129,7 @@ test('putChunk omits uploadedBytes when Content-Range is absent or malformed', a
     { 'content-range': 'bytes */8388608' },
     { 'content-range': 'items 0-3/8' },
     { 'content-range': 'bytes 0-abc/8' },
+    { 'content-range': `bytes 0-${'9'.repeat(400)}/${'9'.repeat(400)}` },
   ]) {
     const clock = mockClock();
     const play = playFetch([
@@ -2066,4 +2316,732 @@ test('cc-h1 putChunk times out an attempt on the injected clock', async () => {
   assert.equal(result.status, 201);
   assert.equal(play.calls.length, 2);
   assert.equal(clock.pending(), 0);
+});
+
+// ---------------------------------------------------------------------------
+// upstream text: the cap, the redaction order, and the fields it must bind on
+//
+// Everything below this line is upstream-controlled text on its way into an
+// error message. `UPSTREAM_TEXT_MAX` is the cap; a hostile or broken server is
+// the only thing that decides how long these strings are, so the cap has to
+// bind on all of them and redaction has to run before the cut, not after it.
+// ---------------------------------------------------------------------------
+
+test('ttRequest truncates an over-long upstream error message with an ellipsis', async () => {
+  const stub = scriptFetch([
+    jsonResponse({ error: { code: 'spam_risk', message: 'M'.repeat(300) } }, 400),
+  ]);
+  const err = ttError(
+    await withFetch(stub, () =>
+      rejection(
+        ttRequest({
+          method: 'POST',
+          url: API_URL,
+          body: {},
+          retryClass: 'init',
+          clock: mockClock(),
+        }),
+      ),
+    ),
+  );
+  assert.equal(err.message.includes(`${'M'.repeat(200)}…`), true);
+  assert.equal(err.message.includes('M'.repeat(201)), false);
+});
+
+test('ttRequest caps an over-long upstream error code and log_id too', async () => {
+  const stub = scriptFetch([
+    jsonResponse(
+      { error: { code: 'C'.repeat(300), message: 'short', log_id: 'L'.repeat(300) } },
+      400,
+    ),
+  ]);
+  const err = ttError(
+    await withFetch(stub, () =>
+      rejection(
+        ttRequest({
+          method: 'POST',
+          url: API_URL,
+          body: {},
+          retryClass: 'init',
+          clock: mockClock(),
+        }),
+      ),
+    ),
+  );
+  // The message is bounded by the cap, not by whatever the server felt like
+  // sending: two capped fields plus the fixed frame, nowhere near 600 chars.
+  assert.equal(err.message.includes(`${'C'.repeat(200)}…`), true);
+  assert.equal(err.message.includes('C'.repeat(201)), false);
+  assert.equal(err.message.includes(`${'L'.repeat(200)}…`), true);
+  assert.equal(err.message.includes('L'.repeat(201)), false);
+  // The structured fields deliberately keep the upstream value verbatim — they
+  // are machine-readable identifiers, and the cap is a message-length rule.
+  assert.equal(err.apiCode, 'C'.repeat(300));
+  assert.equal(err.logId, 'L'.repeat(300));
+});
+
+test('ttRequest reports a non-2xx envelope that carries no error member', async () => {
+  const stub = scriptFetch([jsonResponse({ data: { partial: true } }, 502)]);
+  const err = ttError(
+    await withFetch(stub, () =>
+      rejection(
+        ttRequest({
+          method: 'POST',
+          url: API_URL,
+          body: {},
+          retryClass: 'read',
+          maxAttempts: 1,
+          clock: mockClock(),
+        }),
+      ),
+    ),
+  );
+  // Neither field exists upstream, so the message falls back to the status and
+  // to the CC-B9 "absent" spelling, and neither is invented on the error.
+  assert.match(err.message, /: HTTP 502 \(HTTP 502, log_id absent\)$/);
+  assert.equal(err.apiCode, undefined);
+  assert.equal(err.logId, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// init class: a gateway answer without an envelope is an ambiguous send
+// ---------------------------------------------------------------------------
+
+/** One `init` POST against a single canned response; resolves to what it threw. */
+async function initFailure(response: Response): Promise<TikTokError> {
+  const stub = scriptFetch([response]);
+  const err = ttError(
+    await withFetch(stub, () =>
+      rejection(
+        ttRequest({
+          method: 'POST',
+          url: API_URL,
+          body: {},
+          retryClass: 'init',
+          clock: mockClock(),
+        }),
+      ),
+    ),
+  );
+  assert.equal(stub.calls.length, 1, 'a publish init is sent exactly once');
+  return err;
+}
+
+for (const [label, response] of [
+  [
+    'a 502 HTML gateway page',
+    () => new Response('<html>502 Bad Gateway</html>', { status: 502 }),
+  ],
+  ['an empty 200', () => new Response(null, { status: 200 })],
+  ['a truncated 200 body', () => new Response('{"data":{"publish_id"', { status: 200 })],
+  ['a 200 JSON array', () => new Response('[1,2,3]', { status: 200 })],
+  ['a 503 JSON string', () => new Response('"unavailable"', { status: 503 })],
+  [
+    'a 502 envelope with no error member',
+    () => jsonResponse({ data: { partial: true } }, 502),
+  ],
+  [
+    'a 500 envelope whose error carries no code',
+    () => jsonResponse({ error: { message: 'boom' } }, 500),
+  ],
+] as const) {
+  test(`cc-b4 an init answered with ${label} is network_ambiguous, never retried`, async () => {
+    const err = await initFailure(response());
+    assert.equal(err.kind, 'network');
+    assert.equal(err.code, 'network_ambiguous');
+    assert.equal(err.retryable, false);
+    assert.match(err.message, /without a TikTok error envelope/);
+    assert.match(err.message, /NOT retried/);
+    assert.match(err.remediation ?? '', /publish journal/);
+  });
+}
+
+test('cc-b2 an init answered with a 4xx HTML page stays an upstream_error', async () => {
+  // A 4xx means the gateway refused the request before TikTok saw it: the
+  // outcome is known, so it is not reported as ambiguous.
+  const err = await initFailure(
+    new Response('<html>403 Forbidden</html>', { status: 403 }),
+  );
+  assert.equal(err.kind, 'api');
+  assert.equal(err.code, 'upstream_error');
+  assert.equal(err.retryable, false);
+  assert.match(err.message, /not the documented JSON envelope/);
+});
+
+test('cc-b2 an init answered with a 4xx non-object JSON value stays an upstream_error', async () => {
+  const err = await initFailure(new Response('null', { status: 400 }));
+  assert.equal(err.code, 'upstream_error');
+  assert.match(err.message, /JSON value that is not an object/);
+});
+
+test('cc-b9 an init 5xx envelope with an explicit error.code stays an upstream_error', async () => {
+  const err = await initFailure(
+    jsonResponse({ error: { code: 'internal_error', message: 'x', log_id: 'l-1' } }, 500),
+  );
+  assert.equal(err.kind, 'api');
+  assert.equal(err.code, 'upstream_error');
+  assert.equal(err.apiCode, 'internal_error');
+  assert.equal(err.retryable, false);
+});
+
+test('a read answered with a 502 HTML page is still a retryable upstream_error', async () => {
+  const stub = scriptFetch([new Response('<html>502</html>', { status: 502 })]);
+  const err = ttError(
+    await withFetch(stub, () =>
+      rejection(
+        ttRequest({
+          method: 'GET',
+          url: API_URL,
+          retryClass: 'read',
+          maxAttempts: 1,
+          clock: mockClock(),
+        }),
+      ),
+    ),
+  );
+  assert.equal(err.code, 'upstream_error');
+  assert.equal(err.retryable, true);
+});
+
+test('cc-b2 ttRequest redacts a bearer that straddles the body-snippet cap', async () => {
+  // The token starts inside the first 200 characters and ends well past them:
+  // truncating first would leave a readable prefix that exact-value redaction
+  // can no longer match, because it is no longer the value that was registered.
+  const bearer = `fake-access-token-straddle-${'Z'.repeat(300)}`;
+  const stub = scriptFetch([
+    new Response(`${'padding '.repeat(20)}${bearer}`, { status: 500 }),
+  ]);
+  const err = ttError(
+    await withFetch(stub, () =>
+      rejection(
+        ttRequest({
+          method: 'GET',
+          url: API_URL,
+          retryClass: 'read',
+          maxAttempts: 1,
+          bearer,
+          clock: mockClock(),
+        }),
+      ),
+    ),
+  );
+  assert.equal(err.message.includes('fake-access-token-straddle'), false);
+  assert.equal(err.message.includes('ZZZ'), false);
+  assert.match(err.message, /\[REDACTED\]/);
+});
+
+test('cc-b2 ttRequest redacts a bearer that straddles the upstream-text cap', async () => {
+  const bearer = `fake-access-token-detail-${'Y'.repeat(300)}`;
+  const stub = scriptFetch([
+    jsonResponse(
+      { error: { code: 'x', message: `${'padding '.repeat(20)}${bearer}` } },
+      400,
+    ),
+  ]);
+  const err = ttError(
+    await withFetch(stub, () =>
+      rejection(
+        ttRequest({
+          method: 'GET',
+          url: API_URL,
+          retryClass: 'init',
+          bearer,
+          clock: mockClock(),
+        }),
+      ),
+    ),
+  );
+  assert.equal(err.message.includes('fake-access-token-detail'), false);
+  assert.equal(err.message.includes('YYY'), false);
+  assert.match(err.message, /\[REDACTED\]/);
+});
+
+test('cc-b8 ttRequest carries the log_id of a rate-limited envelope', async () => {
+  const clock = mockClock();
+  const play = playFetch([
+    new Response(
+      JSON.stringify({
+        error: { code: 'rate_limit_exceeded', message: 'slow down', log_id: 'rl-log-7' },
+      }),
+      { status: 429, headers: { 'retry-after': '30' } },
+    ),
+  ]);
+  const err = ttError(
+    await withFetch(play.fetch, () =>
+      rejection(
+        drive(
+          clock,
+          ttRequest({
+            method: 'POST',
+            url: API_URL,
+            body: {},
+            retryClass: 'init',
+            clock,
+          }),
+        ),
+      ),
+    ),
+  );
+  assert.equal(err.code, 'rate_limited');
+  assert.equal(err.apiCode, 'rate_limit_exceeded');
+  assert.equal(err.logId, 'rl-log-7');
+});
+
+// ---------------------------------------------------------------------------
+// what only a broken or hostile server produces
+// ---------------------------------------------------------------------------
+
+test('cc-b6 ttRequest recognises a redirect reported only as an error code', async () => {
+  // Undici does not promise the wording; on some paths the only evidence is the
+  // `code` on the cause, and the classification must not depend on the prose.
+  const clock = mockClock();
+  const play = playFetch([
+    new TypeError('fetch failed', {
+      cause: Object.assign(new Error('unexpected end of input'), {
+        code: 'ERR_FETCH_REDIRECT',
+      }),
+    }),
+  ]);
+  const err = ttError(
+    await withFetch(play.fetch, () =>
+      rejection(
+        drive(
+          clock,
+          ttRequest({ method: 'GET', url: API_URL, retryClass: 'read', clock }),
+        ),
+      ),
+    ),
+  );
+  assert.equal(err.code, 'egress_blocked');
+  assert.equal(play.calls.length, 1, 'a redirect is never retried');
+});
+
+test('cc-b2 ttRequest retries a read whose 5xx body is not JSON, but not a 4xx', async () => {
+  for (const [status, expected] of [
+    [502, 2],
+    [400, 1],
+  ] as const) {
+    const clock = mockClock();
+    const play = playFetch([
+      new Response('<html>gateway</html>', { status }),
+      ttEnvelope({ ok: true }),
+    ]);
+    const outcome = await withFetch(play.fetch, () =>
+      drive(
+        clock,
+        ttRequest({
+          method: 'GET',
+          url: API_URL,
+          retryClass: 'read',
+          maxAttempts: 2,
+          random: () => 0,
+          clock,
+        }).then(
+          () => 'resolved',
+          () => 'rejected',
+        ),
+      ),
+    );
+    assert.equal(play.calls.length, expected, `HTTP ${String(status)}`);
+    assert.equal(outcome, status === 502 ? 'resolved' : 'rejected');
+  }
+});
+
+test('cc-b2 ttRequest retries a read whose 5xx body is a bare JSON array', async () => {
+  for (const [status, expected] of [
+    [503, 2],
+    [422, 1],
+  ] as const) {
+    const clock = mockClock();
+    const play = playFetch([
+      new Response('[1, 2, 3]', {
+        status,
+        headers: { 'content-type': 'application/json' },
+      }),
+      ttEnvelope({ ok: true }),
+    ]);
+    const outcome = await withFetch(play.fetch, () =>
+      drive(
+        clock,
+        ttRequest({
+          method: 'GET',
+          url: API_URL,
+          retryClass: 'read',
+          maxAttempts: 2,
+          random: () => 0,
+          clock,
+        }).then(
+          () => 'resolved',
+          () => 'rejected',
+        ),
+      ),
+    );
+    assert.equal(play.calls.length, expected, `HTTP ${String(status)}`);
+    assert.equal(outcome, status === 503 ? 'resolved' : 'rejected');
+  }
+});
+
+test('cc-b3 ttRequest treats a Retry-After date in the past as no wait at all', async () => {
+  const clock = mockClock();
+  const { logger, records } = recordingLogger();
+  const play = playFetch([
+    // One minute before BASELINE_NOW_MS — a clock skew, not a wait instruction.
+    new Response('busy', {
+      status: 503,
+      headers: { 'retry-after': 'Wed, 31 Dec 2025 23:59:00 GMT' },
+    }),
+    ttEnvelope({ ok: true }),
+  ]);
+  await withFetch(play.fetch, () =>
+    drive(
+      clock,
+      ttRequest({ method: 'GET', url: API_URL, retryClass: 'read', clock, logger }),
+    ),
+  );
+  const retry = logsLike(records, 'tiktok request retry')[0];
+  assert.equal(retry?.fields?.['retry_after_s'], 0);
+  assert.equal(retry?.fields?.['retry_at'], new Date(BASELINE_NOW_MS).toISOString());
+  assert.equal(play.calls.length, 2);
+});
+
+test('putChunk keeps an absurd Content-Range digit count out of uploadedBytes', async () => {
+  const clock = mockClock();
+  const play = playFetch([
+    new Response('', {
+      status: 416,
+      headers: { 'content-range': `bytes 0-${'9'.repeat(400)}/${'9'.repeat(400)}` },
+    }),
+  ]);
+  const result = await withFetch(play.fetch, () =>
+    drive(clock, putChunk(chunkOptions({ clock }))),
+  );
+  // `Number()` overflows to Infinity; a resync offset that is not a real number
+  // is worse than none, so the field is dropped rather than reported.
+  assert.deepEqual(result, { status: 416 });
+});
+
+// ---------------------------------------------------------------------------
+// oauthRequest: the guard, the bodyless call, and the same cap
+// ---------------------------------------------------------------------------
+
+test('oauthRequest still guards a loopback-allowed URL it cannot parse', async () => {
+  const play = playFetch([]);
+  const { logger, records } = recordingLogger();
+  const err = ttError(
+    await withFetch(play.fetch, () =>
+      rejection(
+        oauthRequest({
+          method: 'POST',
+          url: 'http://[::1',
+          body: {},
+          allowLoopbackOrigin: true,
+          logger,
+          clock: mockClock(),
+        }),
+      ),
+    ),
+  );
+  // The loopback exemption is for a parsed loopback origin, not for anything
+  // the caller labels one: an unparsable URL falls through to the allowlist.
+  assert.equal(err.code, 'egress_blocked');
+  assert.equal(play.calls.length, 0);
+  assert.equal(logsLike(records, 'egress blocked').length, 1);
+});
+
+test('oauthRequest sends no body and no content-type when the caller omits one', async () => {
+  const stub = scriptFetch([jsonResponse({ ok: true })]);
+  await withFetch(stub, () =>
+    oauthRequest({ method: 'GET', url: OAUTH_URL, clock: mockClock() }),
+  );
+  const call = stub.calls[0];
+  assert.equal('content-type' in (call?.headers ?? {}), false);
+  assert.equal(call?.body, undefined);
+});
+
+test('oauthRequest caps an over-long upstream error, description and log_id', async () => {
+  const stub = scriptFetch([
+    jsonResponse(
+      {
+        error: 'E'.repeat(300),
+        error_description: 'D'.repeat(300),
+        log_id: 'L'.repeat(300),
+      },
+      400,
+    ),
+  ]);
+  const err = ttError(
+    await withFetch(stub, () =>
+      rejection(
+        oauthRequest({ method: 'POST', url: OAUTH_URL, body: {}, clock: mockClock() }),
+      ),
+    ),
+  );
+  assert.equal(err.code, 'oauth_error');
+  for (const letter of ['E', 'D', 'L']) {
+    assert.equal(err.message.includes(`${letter.repeat(200)}…`), true, letter);
+    assert.equal(err.message.includes(letter.repeat(201)), false, letter);
+  }
+  assert.equal(err.apiCode, 'E'.repeat(300));
+});
+
+test('cc-b9 oauthRequest formats a missing log_id as "absent" on both shapes', async () => {
+  const flat = ttError(
+    await withFetch(scriptFetch([jsonResponse({ error: 'invalid_grant' }, 400)]), () =>
+      rejection(
+        oauthRequest({ method: 'POST', url: OAUTH_URL, body: {}, clock: mockClock() }),
+      ),
+    ),
+  );
+  assert.equal(flat.code, 'oauth_error');
+  assert.match(flat.message, /log_id absent\)$/);
+  assert.equal(flat.logId, undefined);
+
+  const bare = ttError(
+    await withFetch(scriptFetch([jsonResponse({ hint: 'nothing useful' }, 500)]), () =>
+      rejection(
+        oauthRequest({ method: 'POST', url: OAUTH_URL, body: {}, clock: mockClock() }),
+      ),
+    ),
+  );
+  assert.equal(bare.code, 'upstream_error');
+  assert.match(bare.message, /without an OAuth error field \(log_id absent\)\.$/);
+  assert.equal(bare.logId, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// the default seams
+//
+// Every other test injects a clock. These three do not, which is the only way
+// the documented `clock` default is exercised — and it is only safe because a
+// first-attempt success never waits and the timeout waiter is torn down in a
+// `finally`. A leaked timer here shows up as a hung runner, not as a red test.
+// ---------------------------------------------------------------------------
+
+test('ttRequest falls back to the system clock when the caller injects none', async () => {
+  const stub = scriptFetch([ttEnvelope({ ok: true })]);
+  const value = await withFetch(stub, () =>
+    ttRequest<{ ok: boolean }>({ method: 'GET', url: API_URL, retryClass: 'read' }),
+  );
+  assert.deepEqual(value, { ok: true });
+  assert.equal(stub.calls.length, 1);
+});
+
+test('oauthRequest falls back to the system clock when the caller injects none', async () => {
+  const stub = scriptFetch([jsonResponse({ access_token: 'fake-oauth-access-2' })]);
+  const value = await withFetch(stub, () =>
+    oauthRequest<Record<string, unknown>>({
+      method: 'POST',
+      url: OAUTH_URL,
+      body: { grant_type: 'refresh_token' },
+    }),
+  );
+  assert.equal(value['access_token'], 'fake-oauth-access-2');
+});
+
+test('putChunk falls back to the system clock when the caller injects none', async () => {
+  const play = playFetch([new Response('', { status: 201 })]);
+  const result = await withFetch(play.fetch, () => putChunk(chunkOptions()));
+  assert.deepEqual(result, { status: 201 });
+});
+
+test('cc-b8 ttRequest rate-limits a 429 that carries no error code at all', async () => {
+  const clock = mockClock();
+  const play = playFetch([new Response('{}', { status: 429 })]);
+  const err = ttError(
+    await withFetch(play.fetch, () =>
+      rejection(
+        drive(
+          clock,
+          ttRequest({
+            method: 'POST',
+            url: API_URL,
+            body: {},
+            retryClass: 'init',
+            clock,
+          }),
+        ),
+      ),
+    ),
+  );
+  // The status alone is the rate-limit signal (CC-B8); nothing is invented to
+  // stand in for the code or the log_id the server did not send.
+  assert.equal(err.code, 'rate_limited');
+  assert.equal(err.apiCode, undefined);
+  assert.equal(err.logId, undefined);
+  assert.match(err.remediation ?? '', /^Wait until /);
+});
+
+/** 429 bodies an edge in front of TikTok answers with: no envelope object at all. */
+const NON_ENVELOPE_429_BODIES: readonly { label: string; body: string }[] = [
+  { label: 'an empty body', body: '' },
+  {
+    label: 'an HTML page',
+    body: '<html><body><h1>429 Too Many Requests</h1></body></html>',
+  },
+  { label: 'a JSON array', body: '[{"error":{"code":"rate_limit_exceeded"}}]' },
+  { label: 'JSON null', body: 'null' },
+];
+
+for (const { label, body } of NON_ENVELOPE_429_BODIES) {
+  test(`cc-b8 ttRequest reads a 429 with ${label} as the rate limit, terminal for init`, async () => {
+    const clock = mockClock();
+    const play = playFetch([
+      new Response(body, { status: 429, headers: { 'retry-after': '45' } }),
+    ]);
+    const err = ttError(
+      await withFetch(play.fetch, () =>
+        rejection(
+          drive(
+            clock,
+            ttRequest({
+              method: 'POST',
+              url: API_URL,
+              body: {},
+              retryClass: 'init',
+              clock,
+            }),
+          ),
+        ),
+      ),
+    );
+    assert.equal(play.calls.length, 1, 'an init 429 is never retried');
+    assert.equal(err.kind, 'api');
+    assert.equal(err.code, 'rate_limited');
+    assert.equal(err.retryable, false);
+    assert.equal(err.apiCode, undefined);
+    assert.equal(err.logId, undefined);
+    assert.match(err.message, /never retried automatically/);
+    // Retry-After is honoured even though the body said nothing.
+    assert.equal(
+      err.remediation,
+      `Wait until ${new Date(BASELINE_NOW_MS + 45_000).toISOString()} (45 s) and call again. Do not retry earlier.`,
+    );
+  });
+
+  test(`cc-b8 ttRequest reads a 429 with ${label} as the rate limit, retryable for read`, async () => {
+    const clock = mockClock();
+    const play = playFetch([
+      new Response(body, { status: 429, headers: { 'retry-after': '12' } }),
+    ]);
+    const err = ttError(
+      await withFetch(play.fetch, () =>
+        rejection(
+          drive(
+            clock,
+            ttRequest({
+              method: 'GET',
+              url: API_URL,
+              retryClass: 'read',
+              maxAttempts: 1,
+              clock,
+            }),
+          ),
+        ),
+      ),
+    );
+    assert.equal(err.code, 'rate_limited');
+    assert.equal(err.retryable, true);
+    assert.equal(err.apiCode, undefined);
+    assert.equal(
+      err.remediation,
+      `Wait until ${new Date(BASELINE_NOW_MS + 12_000).toISOString()} (12 s) and call again. Do not retry earlier.`,
+    );
+  });
+}
+
+test('cc-b8 ttRequest retries a read 429 without an envelope after its Retry-After', async () => {
+  const clock = mockClock();
+  const { logger, records } = recordingLogger();
+  const play = playFetch([
+    new Response('<html>rate limited</html>', {
+      status: 429,
+      headers: { 'retry-after': '9' },
+    }),
+    ttEnvelope({ ok: true }),
+  ]);
+  const value = await withFetch(play.fetch, () =>
+    drive(
+      clock,
+      ttRequest({ method: 'GET', url: API_URL, retryClass: 'read', clock, logger }),
+    ),
+  );
+  assert.deepEqual(value, { ok: true });
+  assert.equal(play.calls.length, 2);
+  const retry = logsLike(records, 'tiktok request retry')[0];
+  assert.equal(retry?.fields?.['retry_after_s'], 9);
+  assert.equal(
+    retry?.fields?.['retry_at'],
+    new Date(BASELINE_NOW_MS + 9_000).toISOString(),
+  );
+});
+
+test('oauthRequest exempts a loopback origin only when it really is one', async () => {
+  // The exemption exists for the local PKCE callback listener. Everything it
+  // does not literally describe stays on the default-deny allowlist path.
+  for (const url of [
+    'ftp://127.0.0.1:8080/token',
+    'http://user:pw@127.0.0.1:8080/token',
+    'http://127.0.0.1.evil.tld/token',
+    'http://[::1].evil.tld/token',
+  ]) {
+    const play = playFetch([]);
+    const err = ttError(
+      await withFetch(play.fetch, () =>
+        rejection(
+          oauthRequest({
+            method: 'POST',
+            url,
+            body: {},
+            allowLoopbackOrigin: true,
+            clock: mockClock(),
+          }),
+        ),
+      ),
+    );
+    assert.equal(err.code, 'egress_blocked', url);
+    assert.equal(play.calls.length, 0, url);
+  }
+
+  const stub = scriptFetch([jsonResponse({ access_token: 'fake-oauth-access-3' })]);
+  const value = await withFetch(stub, () =>
+    oauthRequest<Record<string, unknown>>({
+      method: 'POST',
+      url: 'http://127.0.0.1:43110/token',
+      body: { grant_type: 'authorization_code' },
+      allowLoopbackOrigin: true,
+      clock: mockClock(),
+    }),
+  );
+  assert.equal(value['access_token'], 'fake-oauth-access-3');
+});
+
+test('oauthRequest and putChunk refuse an already-aborted caller signal', async () => {
+  const oauthReason = new Error('oauth aborted before the call');
+  const oauthPlay = playFetch([]);
+  const oauthErr = await withFetch(oauthPlay.fetch, () =>
+    rejection(
+      oauthRequest({
+        method: 'POST',
+        url: OAUTH_URL,
+        body: {},
+        signal: AbortSignal.abort(oauthReason),
+        clock: mockClock(),
+      }),
+    ),
+  );
+  assert.equal(oauthErr, oauthReason);
+  assert.equal(isTikTokError(oauthErr), false);
+  assert.equal(oauthPlay.calls.length, 0);
+
+  const chunkReason = new Error('upload aborted before the call');
+  const chunkPlay = playFetch([]);
+  const chunkErr = await withFetch(chunkPlay.fetch, () =>
+    rejection(
+      putChunk(
+        chunkOptions({ signal: AbortSignal.abort(chunkReason), clock: mockClock() }),
+      ),
+    ),
+  );
+  assert.equal(chunkErr, chunkReason);
+  assert.equal(chunkPlay.calls.length, 0);
 });

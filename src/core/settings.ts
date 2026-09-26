@@ -21,8 +21,8 @@
  *   default". Present means "the operator said something", so an empty string is
  *   validated like any other value and is rejected wherever a value is required.
  *   The exception is the optional string-valued variables (`TT_ENV_FILE`,
- *   `TT_MEDIA_ROOT`, `TT_LOCK_PROFILE`, `TT_HTTP_TOKEN`, `TT_LOGIN_SCOPES`,
- *   `TT_REDIRECT_PORT`, `TT_OAUTH_BASE_URL`): for those, "empty" and "unset" are
+ *   `TT_MEDIA_ROOT`, `TT_LOCK_PROFILE`, `TT_HTTP_TOKEN`, `TT_HTTP_ALLOWED_HOSTS`,
+ *   `TT_LOGIN_SCOPES`, `TT_REDIRECT_PORT`, `TT_OAUTH_BASE_URL`): for those, "empty" and "unset" are
  *   the same documented state (no pin / fail-closed / ephemeral port), so an
  *   empty value reads as absent rather than as an error.
  * - **Values are trimmed.** MCP client configuration files are hand-edited JSON;
@@ -43,10 +43,16 @@
  *   registered, so this module does its own suppression.
  */
 
+import { isIPv4, isIPv6 } from 'node:net';
 import { homedir } from 'node:os';
 import { isAbsolute, resolve } from 'node:path';
 
 import { z } from 'zod';
+
+// Every ms setting ends up in a `clock.sleep` or `setTimeout`, which reject a
+// delay above 2^31 - 1 ms; an oversized value is refused here, at the source.
+import { MAX_TIMER_MS } from './clock.js';
+import { DEFAULT_HEARTBEAT_MS, DEFAULT_STALE_MS, DEFAULT_WAIT_MS } from './env-lock.js';
 
 import { TikTokError } from './errors.js';
 import type { LogLevel } from './log.js';
@@ -191,7 +197,6 @@ export interface Settings {
   uploadTimeoutMs: number;
   maxRetries: number;
   chunkRetries: number;
-  maxConcurrent: number;
   publishRpm: number;
   fetchAllCap: number;
   resultCharBudget: number;
@@ -206,6 +211,12 @@ export interface Settings {
   port: number;
   httpToken?: string;
   httpInsecure: boolean;
+  /**
+   * Host names the HTTP transport answers to — bare, lowercased, no port. Unset
+   * means no allowlist: a loopback bind still pins its own authority, and past
+   * loopback `Origin` is only held to `Host` (SECURITY.md § Transport).
+   */
+  httpAllowedHosts?: readonly string[];
 
   // Internal / test-only (CONFIGURATION.md § Internal / test-only)
   oauthBaseUrl?: string;
@@ -215,7 +226,7 @@ export interface Settings {
 // value schemas
 // ---------------------------------------------------------------------------
 
-type StringSchema<T> = z.ZodType<T, z.ZodTypeDef, string>;
+type StringSchema<T> = z.ZodType<T, string>;
 
 function decimalInt(opts: {
   min: number;
@@ -340,7 +351,7 @@ function bearerToken(): StringSchema<string> {
     .regex(/^[!-~]+$/, 'expected printable ASCII with no spaces');
 }
 
-function httpsPrefix(): z.ZodType<string, z.ZodTypeDef, string> {
+function httpsPrefix(): StringSchema<string> {
   return z.string().refine((value) => {
     if (!value.startsWith('https://')) return false;
     try {
@@ -357,6 +368,69 @@ function httpsPrefixList(): StringSchema<readonly string[]> {
     .string()
     .transform(splitList)
     .pipe(z.array(httpsPrefix()).nonempty('expected at least one https:// prefix'));
+}
+
+/** One DNS label: letters, digits and inner hyphens, at most 63 characters. */
+const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+/**
+ * A host name in the form the WHATWG URL parser gives it — lowercased, IPv6
+ * compressed (`0:0:0:0:0:0:0:1` → `::1`, `::ffff:127.0.0.1` → `::ffff:7f00:1`),
+ * numeric IPv4 shorthands expanded (`127.1` → `127.0.0.1`) — and without
+ * brackets. A browser's `Origin` arrives in exactly this form, so an allowlist
+ * or a `Host` compared in any other form would refuse the very clients it names.
+ *
+ * `undefined` for anything that is not a bare host: a port, a path, userinfo, a
+ * zone id (`fe80::1%eth0` — no URL can carry one), or a name the parser rejects.
+ */
+export function canonicalHostName(value: string): string | undefined {
+  const bare = value.startsWith('[') && value.endsWith(']') ? value.slice(1, -1) : value;
+  let literal: string;
+  if (isIPv6(bare) && !bare.includes('%')) literal = `[${bare}]`;
+  else if (/^[a-z0-9.-]+$/i.test(bare)) literal = bare;
+  else return undefined;
+  let hostname: string;
+  try {
+    hostname = new URL(`http://${literal}`).hostname;
+  } catch {
+    return undefined;
+  }
+  return hostname.startsWith('[') ? hostname.slice(1, -1) : hostname;
+}
+
+/**
+ * A bare host name as a `Host` header carries it: a DNS name, an IPv4 literal
+ * or an IPv6 literal (brackets optional), in its canonical form. No port and no
+ * wildcard — the list is compared by equality, and a pattern language here
+ * would be one more thing to get wrong in a security check.
+ */
+function hostName(value: string): string | undefined {
+  const host = canonicalHostName(value);
+  if (host === undefined) return undefined;
+  if (isIPv6(host) || isIPv4(host)) return host;
+  if (host.length > 253) return undefined;
+  return host.split('.').every((label) => DNS_LABEL.test(label)) ? host : undefined;
+}
+
+function hostList(): StringSchema<readonly string[]> {
+  return z
+    .string()
+    .transform(splitList)
+    .pipe(
+      z
+        .array(
+          z.string().transform((entry, ctx) => {
+            const host = hostName(entry);
+            if (host !== undefined) return host;
+            ctx.addIssue({
+              code: 'custom',
+              message: 'expected bare host names (no scheme, port or wildcard)',
+            });
+            return z.NEVER;
+          }),
+        )
+        .nonempty('expected at least one host name'),
+    );
 }
 
 function httpsOrigin(): StringSchema<string> {
@@ -418,7 +492,7 @@ class Collector {
 }
 
 /** Loopback covers only what actually stays on the machine. `0.0.0.0` does not. */
-function isLoopbackHost(host: string): boolean {
+export function isLoopbackHost(host: string): boolean {
   const bare = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
   if (bare.toLowerCase() === 'localhost') return true;
   if (bare === '::1') return true;
@@ -496,7 +570,9 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     loginScopes: c.optional('TT_LOGIN_SCOPES', stringList('scope')),
     tokenRefreshSkewS: c.withDefault(
       'TT_TOKEN_REFRESH_SKEW_S',
-      decimalInt({ min: 0, unit: 'seconds' }),
+      // Half the access token's one-day lifetime: at a full day every call would
+      // refresh.
+      decimalInt({ min: 0, max: 43_200, unit: 'seconds' }),
       1_800,
     ),
 
@@ -535,34 +611,34 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     // Env-file lock
     envLockHeartbeatMs: c.withDefault(
       'TT_ENV_LOCK_HEARTBEAT_MS',
-      decimalInt({ min: 1, unit: 'milliseconds' }),
-      2_000,
+      decimalInt({ min: 1, max: MAX_TIMER_MS, unit: 'milliseconds' }),
+      DEFAULT_HEARTBEAT_MS,
     ),
     envLockStaleMs: c.withDefault(
       'TT_ENV_LOCK_STALE_MS',
-      decimalInt({ min: 1, unit: 'milliseconds' }),
-      15_000,
+      decimalInt({ min: 1, max: MAX_TIMER_MS, unit: 'milliseconds' }),
+      DEFAULT_STALE_MS,
     ),
     envLockWaitMs: c.withDefault(
       'TT_ENV_LOCK_WAIT_MS',
-      decimalInt({ min: 0, unit: 'milliseconds' }),
-      30_000,
+      decimalInt({ min: 0, max: MAX_TIMER_MS, unit: 'milliseconds' }),
+      DEFAULT_WAIT_MS,
     ),
 
     // HTTP / limits / output
     timeoutMs: c.withDefault(
       'TT_TIMEOUT_MS',
-      decimalInt({ min: 1, unit: 'milliseconds' }),
+      decimalInt({ min: 1, max: MAX_TIMER_MS, unit: 'milliseconds' }),
       30_000,
     ),
     uploadTimeoutMs: c.withDefault(
       'TT_UPLOAD_TIMEOUT_MS',
-      decimalInt({ min: 1, unit: 'milliseconds' }),
+      decimalInt({ min: 1, max: MAX_TIMER_MS, unit: 'milliseconds' }),
       120_000,
     ),
-    maxRetries: c.withDefault('TT_MAX_RETRIES', decimalInt({ min: 0 }), 3),
-    chunkRetries: c.withDefault('TT_CHUNK_RETRIES', decimalInt({ min: 0 }), 3),
-    maxConcurrent: c.withDefault('TT_MAX_CONCURRENT', decimalInt({ min: 1 }), 4),
+    // Bounded: with backoff, a cap in the thousands is a call that never returns.
+    maxRetries: c.withDefault('TT_MAX_RETRIES', decimalInt({ min: 0, max: 10 }), 3),
+    chunkRetries: c.withDefault('TT_CHUNK_RETRIES', decimalInt({ min: 0, max: 10 }), 3),
     publishRpm: c.withDefault('TT_PUBLISH_RPM', decimalInt({ min: 1 }), 6),
     fetchAllCap: c.withDefault('TT_FETCH_ALL_CAP', decimalInt({ min: 1 }), 200),
     resultCharBudget: c.withDefault(
@@ -573,12 +649,12 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     prettyJson: c.withDefault('TT_PRETTY_JSON', flag(), false),
     statusPollIntervalMs: c.withDefault(
       'TT_STATUS_POLL_INTERVAL_MS',
-      decimalInt({ min: 1, unit: 'milliseconds' }),
+      decimalInt({ min: 1, max: MAX_TIMER_MS, unit: 'milliseconds' }),
       5_000,
     ),
     statusPollTimeoutMs: c.withDefault(
       'TT_STATUS_POLL_TIMEOUT_MS',
-      decimalInt({ min: 0, unit: 'milliseconds' }),
+      decimalInt({ min: 0, max: MAX_TIMER_MS, unit: 'milliseconds' }),
       60_000,
     ),
     logLevel: c.withDefault('TT_LOG_LEVEL', oneOf(LOG_LEVELS), 'info'),
@@ -593,6 +669,7 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     port: c.withDefault('TT_PORT', decimalInt({ min: 1, max: 65_535 }), 3_000),
     httpToken: c.optional('TT_HTTP_TOKEN', bearerToken()),
     httpInsecure: c.withDefault('TT_HTTP_INSECURE', flag(), false),
+    httpAllowedHosts: c.optional('TT_HTTP_ALLOWED_HOSTS', hostList()),
 
     // Internal / test-only
     oauthBaseUrl: c.optional('TT_OAUTH_BASE_URL', httpsOrigin()),

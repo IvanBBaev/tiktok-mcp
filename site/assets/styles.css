@@ -1691,3 +1691,28 @@ h3:hover .anchor {
     text-decoration: underline;
   }
 }
+
+/* ---- Legal pages (privacy.html, terms.html) ----
+   These two pages reuse the shared shell but have no sidebar, so the two-column
+   .layout grid would drop their prose into the 260px column. This collapses it
+   to one centred measure and softens the heading scale for long-form reading;
+   everything else (sections, callouts, footer) comes from the rules above. */
+.legal-layout {
+  grid-template-columns: minmax(0, 1fr);
+  max-width: calc(var(--content-w) + 56px);
+}
+.legal-layout .content {
+  margin: 0 auto;
+}
+.legal h2 {
+  font-size: 25px;
+}
+.legal .updated {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--dim);
+  margin: 6px 0 18px;
+}
+.legal li {
+  margin: 6px 0;
+}

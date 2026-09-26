@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://ivanbbaev.github.io/tiktok-mcp-ai/sitemap.xml
+Sitemap: https://ivanbbaev.github.io/tiktok-mcp/sitemap.xml

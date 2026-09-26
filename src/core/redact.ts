@@ -12,6 +12,8 @@
  *    recursively, at every depth. Unknown keys are never passed through, so a
  *    newly introduced secret-bearing field is safe on the day it appears; the
  *    key name itself is scrubbed too, so a secret used *as* a key cannot leak.
+ *    `redactRecord` is the same walk for a caller that holds a plain record
+ *    and needs the result typed as one.
  * 2. `registerSecret` / `redactText` — exact-value scrubbing of free text
  *    (error messages, body snippets — CC-B2), which catches secrets embedded
  *    in query strings and form bodies that key-based rules cannot see.
@@ -128,6 +130,7 @@ const ALLOWED_KEYS: ReadonlySet<string> = new Set(
     'retry_at',
     'duration_ms',
     'timeout_ms',
+    'backoff_ms',
     'redirect',
     'content_range',
     'content_type',
@@ -374,4 +377,20 @@ function redactUnknown(value: unknown, depth: number, path: Set<object>): unknow
  */
 export function redactValue(value: unknown): unknown {
   return redactUnknown(value, 0, new Set<object>());
+}
+
+/**
+ * `redactValue` for a plain record, typed record-in, record-out.
+ *
+ * It enters the walk exactly where `redactValue` enters it for a plain object
+ * — `redactEntries` over the own keys, at depth 0, with the record itself
+ * already on the path — so nested default-deny, the depth limit, cycle marking
+ * and the key-name rules are the same: `redactRecord(r)` deep-equals
+ * `redactValue(r)` for every plain object `r`. What the signature adds is the
+ * shape of the result. A record's *values* are what get denied; the record
+ * itself is walked, never collapsed, so a caller that spreads the result into
+ * its own object needs no runtime check for a scalar that cannot come back.
+ */
+export function redactRecord(record: Record<string, unknown>): Record<string, unknown> {
+  return redactEntries(record, Object.keys(record), 0, new Set<object>([record]));
 }

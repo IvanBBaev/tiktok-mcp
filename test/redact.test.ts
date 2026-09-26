@@ -2,7 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fc from 'fast-check';
 
-import { redactText, redactValue, registerSecret } from '../src/core/redact.js';
+import {
+  redactRecord,
+  redactText,
+  redactValue,
+  registerSecret,
+} from '../src/core/redact.js';
 
 const REDACTED = '[REDACTED]';
 const CIRCULAR = '[CIRCULAR]';
@@ -21,6 +26,19 @@ test('redact allowlisted log fields survive redaction', () => {
     http_status: 200,
     retryable: false,
     scopes: ['video.publish', 'video.upload'],
+  };
+  assert.deepStrictEqual(redactValue(fields), fields);
+});
+
+test('redact the chunk-retry fields the upload logs survive redaction', () => {
+  // `uploadFile` logs these on every retried chunk; a redacted backoff would
+  // hide exactly the number an operator needs to read a retry storm.
+  const fields = {
+    msg: 'retrying chunk',
+    chunk_index: 3,
+    attempt: 2,
+    backoff_ms: 1250,
+    total_chunks: 7,
   };
   assert.deepStrictEqual(redactValue(fields), fields);
 });
@@ -273,6 +291,68 @@ test('redact deeply nested structures are denied past the depth limit', () => {
   const json = JSON.stringify(redactValue(deep));
   assert.equal(json.includes('bottom'), false);
   assert.equal(json.includes(REDACTED), true);
+});
+
+test('redactRecord walks a plain record exactly as redactValue does', () => {
+  const secret = 'tb4-record-secret-3e8d1b7f';
+  registerSecret(secret);
+  const record: Record<string, unknown> = {
+    msg: `token ${secret}`,
+    [secret]: 'used as a key',
+    client_secret: secret,
+    error: Object.assign(new Error('boom'), { code: 'x', session_cookie: 'nope' }),
+    created_at: new Date(1_769_000_000_000),
+    hints: [{ type: 'note', session_cookie: 'nope' }],
+    denied_shape: new Map([['k', 'v']]),
+    url: 'https://upload.eu.tiktokapis.com/video/?upload_token=zzz',
+  };
+  record.journal = record;
+  let deep: Record<string, unknown> = { msg: 'bottom' };
+  for (let i = 0; i < 12; i += 1) deep = { error: deep };
+  record.result = deep;
+
+  const out = redactRecord(record);
+  assert.deepStrictEqual(out, redactValue(record));
+
+  const { result, ...rest } = out;
+  assert.deepStrictEqual(rest, {
+    msg: `token ${REDACTED}`,
+    [REDACTED]: REDACTED,
+    client_secret: REDACTED,
+    error: { name: 'Error', message: 'boom', code: 'x', session_cookie: REDACTED },
+    created_at: '2026-01-21T12:53:20.000Z',
+    hints: [{ type: 'note', session_cookie: REDACTED }],
+    denied_shape: REDACTED,
+    url: 'https://upload.eu.tiktokapis.com/video/',
+    journal: CIRCULAR,
+  });
+  // The depth limit counts from the record itself, as it does for redactValue.
+  const json = JSON.stringify(result);
+  assert.equal(json.includes('bottom'), false);
+  assert.equal(json.includes(REDACTED), true);
+});
+
+test('redact property: redactRecord and redactValue agree on every plain record', () => {
+  fc.assert(
+    fc.property(
+      fc.dictionary(
+        fc.string(),
+        fc.anything({
+          withBigInt: true,
+          withDate: true,
+          withMap: true,
+          withSet: true,
+          withTypedArray: true,
+          withNullPrototype: true,
+        }),
+        { noNullPrototype: false },
+      ),
+      (record) => {
+        assert.deepStrictEqual(redactRecord(record), redactValue(record));
+      },
+    ),
+    { seed: SEED, numRuns: 300 },
+  );
 });
 
 test('redact property: redactValue is idempotent for arbitrary values', () => {

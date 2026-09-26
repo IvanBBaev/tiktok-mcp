@@ -22,20 +22,27 @@
  * - **One `write()` of one complete line on an `O_APPEND` fd**, and no env
  *   lock. `O_APPEND` already orders concurrent writers in the kernel, and a
  *   publish must never queue behind a token refresh.
+ * - **Rotation takes a lock of its own** — `journal.ndjson.lock`, the env-lock
+ *   mutex keyed on the journal instead of the env file, held only for a re-stat
+ *   and a rename. Without it two processes that both saw an over-cap file would
+ *   both rename, and the second rename would retire the fresh generation over
+ *   the one the first had just rotated out.
  *
  * Layering: `core ← api ← mcp ← tools`.
  */
 
 import { Buffer } from 'node:buffer';
 import { randomBytes } from 'node:crypto';
-import { mkdir, open, rename, stat } from 'node:fs/promises';
+import { mkdir, open, rename, stat, type FileHandle } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import type { Clock } from '../core/clock.js';
-import { resolveEnvFilePath } from '../core/config.js';
+import { canonicalProfileName, resolveEnvFilePath } from '../core/config.js';
+import { withEnvLock } from '../core/env-lock.js';
 import { TikTokError } from '../core/errors.js';
 import { silentLogger, type Logger } from '../core/log.js';
 import { redactText } from '../core/redact.js';
+import type { Settings } from '../core/settings.js';
 
 /** The public record-shape version. Additive-only once the read tool ships. */
 export const JOURNAL_VERSION = 1;
@@ -45,6 +52,13 @@ const JOURNAL_FILE = 'journal.ndjson';
 
 /** Exactly one rotated generation is kept; readers merge both. */
 const ROTATED_SUFFIX = '.1';
+
+/**
+ * How long an intent append waits for another process's rotation. A rename is
+ * milliseconds; past this the holder is stuck, and the append goes ahead
+ * unrotated rather than holding the publish back.
+ */
+const ROTATE_LOCK_WAIT_MS = 2_000;
 
 const FILE_MODE = 0o600;
 const DIR_MODE = 0o700;
@@ -167,6 +181,20 @@ export interface JournalOptions {
   createdBy?: string;
 }
 
+/**
+ * The wiring every reader and writer of the journal shares — env file, size
+ * cap, the call-bound logger. One function so the tool that appends an
+ * intent, the tool that lists attempts and the completion that offers their
+ * ids resolve the same file the same way.
+ */
+export function journalOptionsFor(settings: Settings, logger: Logger): JournalOptions {
+  return {
+    ...(settings.envFile === undefined ? {} : { envFile: settings.envFile }),
+    maxBytes: settings.journalMaxBytes,
+    logger,
+  };
+}
+
 // paths -----------------------------------------------------------------
 
 /**
@@ -191,17 +219,23 @@ export function resolveJournalPath(opts: JournalOptions = {}): string {
  *
  * The random half maps bytes through `CROCKFORD[b % 32]`: 256 is divisible by
  * 32, so the modulo is exactly uniform — no rejection sampling needed.
+ *
+ * Both lookups go through `charAt` rather than `[]`. Indexing a string under
+ * `noUncheckedIndexedAccess` widens to `string | undefined` and buys a `?? '0'`
+ * fallback that no index can reach — `CROCKFORD` has exactly 32 characters and
+ * every index is `x % 32` — so the guard would be a branch that exists only to
+ * be excused. `charAt` is typed `string`, and the arm never exists at all.
  */
 export function mintAttemptId(clock: Clock): string {
   let time = '';
   let ms = clock.now();
   for (let i = 0; i < 10; i += 1) {
-    time = `${CROCKFORD[ms % 32] ?? '0'}${time}`;
+    time = `${CROCKFORD.charAt(ms % 32)}${time}`;
     ms = Math.floor(ms / 32);
   }
   const bytes = randomBytes(16);
   let random = '';
-  for (const byte of bytes) random += CROCKFORD[byte % 32] ?? '0';
+  for (const byte of bytes) random += CROCKFORD.charAt(byte % 32);
   return `${time}${random}`;
 }
 
@@ -440,10 +474,16 @@ async function readWhole(path: string): Promise<string | undefined> {
     if (isMissing(cause)) return undefined;
     throw unreadable(path, cause);
   }
+  // The outer `try` owns the close, the inner one names the failure. Nested
+  // rather than one `try/catch/finally` so the `finally` is reached only by a
+  // return or an unwinding throw — the `catch` never falls through into it.
+  // The handle is closed on every call.
   try {
-    return await handle.readFile('utf8');
-  } catch (cause) {
-    throw unreadable(path, cause);
+    try {
+      return await handle.readFile('utf8');
+    } catch (cause) {
+      throw unreadable(path, cause);
+    }
   } finally {
     await handle.close();
   }
@@ -453,9 +493,14 @@ async function readWhole(path: string): Promise<string | undefined> {
  * The last `maxBytes` of a generation, with the leading partial line dropped.
  * Cutting mid-line is guaranteed by construction, so the first newline is the
  * first trustworthy boundary; without that trim a half-record would inflate
- * `skippedLines` on every single duplicate check.
+ * `skippedLines` on every single duplicate check. `bytes` counts the raw bytes
+ * read and `whole` compares them with the same descriptor's size — decoded
+ * text cannot be measured back, since invalid UTF-8 grows on decoding.
  */
-async function readTail(path: string, maxBytes: number): Promise<string | undefined> {
+async function readTail(
+  path: string,
+  maxBytes: number,
+): Promise<{ text: string; bytes: number; whole: boolean } | undefined> {
   let handle;
   try {
     handle = await open(path, 'r');
@@ -463,17 +508,21 @@ async function readTail(path: string, maxBytes: number): Promise<string | undefi
     if (isMissing(cause)) return undefined;
     throw unreadable(path, cause);
   }
+  // Same nesting as `readWhole` above: the close is the outer `try`'s job.
   try {
-    const { size } = await handle.stat();
-    const length = Math.min(size, maxBytes);
-    const buffer = Buffer.alloc(length);
-    await handle.read(buffer, 0, length, size - length);
-    const text = buffer.toString('utf8');
-    if (length === size) return text;
-    const boundary = text.indexOf('\n');
-    return boundary === -1 ? '' : text.slice(boundary + 1);
-  } catch (cause) {
-    throw unreadable(path, cause);
+    try {
+      const { size } = await handle.stat();
+      const length = Math.min(size, maxBytes);
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, size - length);
+      const text = buffer.toString('utf8');
+      if (length === size) return { text, bytes: length, whole: true };
+      const boundary = text.indexOf('\n');
+      const kept = boundary === -1 ? '' : text.slice(boundary + 1);
+      return { text: kept, bytes: length, whole: false };
+    } catch (cause) {
+      throw unreadable(path, cause);
+    }
   } finally {
     await handle.close();
   }
@@ -511,6 +560,60 @@ export async function readMerged(
   const { limit } = opts;
   if (limit === undefined || records.length <= limit) return { records, skippedLines };
   return { records: records.slice(records.length - limit), skippedLines };
+}
+
+/**
+ * Who changed a generation, as far as `stat` can tell: size, mtime and inode,
+ * or `-` for an absent file. Both generations take part, so a rotation (the
+ * active file renamed onto `.1`) changes it even when the sizes happen to
+ * match. An append from another process changes the size, so it is seen too.
+ */
+async function generationStamp(path: string): Promise<string> {
+  try {
+    const { size, mtimeMs, ino } = await stat(path);
+    return `${size}:${mtimeMs}:${ino}`;
+  } catch {
+    return '-';
+  }
+}
+
+async function journalSignature(path: string): Promise<string> {
+  const [older, active] = await Promise.all([
+    generationStamp(`${path}${ROTATED_SUFFIX}`),
+    generationStamp(path),
+  ]);
+  return `${older}|${active}`;
+}
+
+/** One journal's folded attempts and the signature they were read under. */
+interface FoldedEntry {
+  readonly signature: string;
+  readonly attempts: readonly JournalAttempt[];
+}
+
+const folded = new Map<string, FoldedEntry>();
+
+/**
+ * {@link foldAttempts} over {@link readMerged}, reused while neither
+ * generation changed. Completion asks on every keystroke, and re-reading and
+ * re-folding up to twice `journalMaxBytes` for each would make the prompt lag
+ * behind the typing. Two `stat` calls replace the read when nothing changed.
+ *
+ * The attempts are shared between callers: read-only, never to be mutated.
+ */
+export async function foldedAttemptsCached(
+  opts: JournalOptions = {},
+): Promise<readonly JournalAttempt[]> {
+  const path = resolveJournalPath(opts);
+  const signature = await journalSignature(path);
+  const cached = folded.get(path);
+  if (cached?.signature === signature) return cached.attempts;
+  const { records } = await readMerged({ ...opts, path });
+  // Frozen, not just typed readonly: one caller's `.reverse()` would reorder
+  // every other caller's view.
+  const attempts = Object.freeze(foldAttempts(records));
+  folded.set(path, { signature, attempts });
+  return attempts;
 }
 
 /**
@@ -566,6 +669,28 @@ async function fileSize(path: string): Promise<number | undefined> {
 }
 
 /**
+ * fsync a directory, so a rename or a file creation in it survives a crash.
+ * Best-effort: some platforms (Windows) cannot open a directory for syncing at
+ * all, and a journal that fails the publish over it is worse than none. The
+ * failure is logged at debug — expected on those platforms, noise anywhere.
+ */
+async function syncDirectory(dir: string, logger: Logger): Promise<void> {
+  try {
+    const handle = await open(dir, 'r');
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch (cause) {
+    logger.debug('could not fsync the journal directory', {
+      path: dir,
+      reason: redactText(String(cause)),
+    });
+  }
+}
+
+/**
  * Rotation is checked here and only here — immediately before an intent append
  * — so an outcome can never be separated from its intent by a rotation this
  * process performed (§ 8.3). One generation is kept; `rename` over an existing
@@ -580,10 +705,28 @@ async function rotateIfNeeded(
   logger: Logger,
 ): Promise<void> {
   try {
-    const size = await fileSize(path);
-    if (size === undefined || size < maxBytes) return;
-    await rename(path, `${path}${ROTATED_SUFFIX}`);
-    logger.info('rotated the publish journal', { path, bytes: size, rotated: true });
+    // The unlocked check keeps the common case — no rotation due — lock-free.
+    const seen = await fileSize(path);
+    if (seen === undefined || seen < maxBytes) return;
+    await withEnvLock(
+      path,
+      async () => {
+        // Re-checked under the lock: a process that rotated while this one
+        // waited left a fresh, small generation that must not be rotated again.
+        const size = await fileSize(path);
+        if (size === undefined || size < maxBytes) return;
+        await rename(path, `${path}${ROTATED_SUFFIX}`);
+        // Without it a crash can resurrect the pre-rotation name on some file
+        // systems, and the next intent would land in the generation just retired.
+        await syncDirectory(dirname(path), logger);
+        logger.info('rotated the publish journal', { path, bytes: size, rotated: true });
+      },
+      {
+        waitMs: ROTATE_LOCK_WAIT_MS,
+        logger,
+        label: { lock: 'journal rotation', guards: 'the publish journal' },
+      },
+    );
   } catch (cause) {
     logger.warn('could not rotate the publish journal; it keeps growing', {
       path,
@@ -600,22 +743,51 @@ async function rotateIfNeeded(
  * A fresh generation gets its header prepended to the *same* buffer, so the
  * header and the first record are one atomic append: a crash can never leave a
  * header-only file that a reader would mistake for a complete generation.
+ *
+ * An fsync'd append that *created* the file also syncs the directory: the
+ * file's data being durable is worth little if its directory entry is not.
  */
 async function appendLine(
   path: string,
   line: string,
   fsync: boolean,
   createdBy: string,
+  logger: Logger,
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: DIR_MODE });
-  const handle = await open(path, 'a', FILE_MODE);
+  const handle = await open(path, 'a+', FILE_MODE);
+  let created: boolean;
   try {
     const { size } = await handle.stat();
-    await handle.write(size === 0 ? `${headerLine(createdBy)}${line}` : line);
+    created = size === 0;
+    const text = created
+      ? `${headerLine(createdBy)}${line}`
+      : `${await tornTail(handle, size)}${line}`;
+    const { bytesWritten } = await handle.write(text);
+    // A short write (a disk filling up) must not pass for a recorded line:
+    // an intent the duplicate guard cannot read is no intent at all.
+    const expected = Buffer.byteLength(text);
+    if (bytesWritten !== expected) {
+      throw new Error(
+        `short journal write: ${String(bytesWritten)} of ${String(expected)} bytes`,
+      );
+    }
     if (fsync) await handle.sync();
   } finally {
     await handle.close();
   }
+  if (fsync && created) await syncDirectory(dirname(path), logger);
+}
+
+/**
+ * A newline when the file ends mid-line — a crash or a short write left a torn
+ * record — so the fragment stays a line of its own (skipped and counted by the
+ * reader) instead of swallowing the record appended after it.
+ */
+async function tornTail(handle: FileHandle, size: number): Promise<string> {
+  const last = Buffer.alloc(1);
+  await handle.read(last, 0, 1, size - 1);
+  return last[0] === 0x0a ? '' : '\n';
 }
 
 async function tryAppend(
@@ -626,7 +798,7 @@ async function tryAppend(
   logger: Logger,
 ): Promise<{ ok: boolean }> {
   try {
-    await appendLine(path, line, fsync, opts.createdBy ?? UNKNOWN_CREATED_BY);
+    await appendLine(path, line, fsync, opts.createdBy ?? UNKNOWN_CREATED_BY, logger);
     return { ok: true };
   } catch (cause) {
     // Never rethrown: the caller is mid-publish and an audit line is not worth
@@ -700,18 +872,53 @@ export interface DuplicateCheck {
 }
 
 /**
+ * The bytes the duplicate guard scans: the tail of the active generation, and
+ * — when that tail is the *whole* active file — the newest part of `.1` in
+ * front of it, inside the same byte budget. Without the second half, a
+ * rotation right after an intent (by this process on the next publish, or by
+ * another process at any time) hides that intent, and the attempt it records
+ * could be re-sent inside its own window. Generations are concatenated oldest
+ * first, so an outcome still always follows its intent in the scanned text.
+ */
+async function duplicateWindowText(path: string): Promise<string> {
+  const active = (await readTail(path, DUPLICATE_TAIL_BYTES)) ?? {
+    text: '',
+    bytes: 0,
+    whole: true,
+  };
+  // A cut tail already spends the whole budget on the newest records.
+  if (!active.whole) return active.text;
+  // `whole` means `bytes <= DUPLICATE_TAIL_BYTES`, so the budget is never negative.
+  const older = await readTail(
+    `${path}${ROTATED_SUFFIX}`,
+    DUPLICATE_TAIL_BYTES - active.bytes,
+  );
+  // The newline keeps a torn last line of `.1` from swallowing the first line
+  // of the active generation; `parseLines` skips the blank line it may add.
+  return `${older?.text ?? ''}\n${active.text}`;
+}
+
+/**
  * SYNTHESIS § 2.7 / ARCHITECTURE § 8.4 — has this exact payload already been
  * attempted, successfully or ambiguously, in the last ten minutes?
  *
- * Reads a bounded tail of the **active generation only**: an outcome always
- * follows its own intent in the file, so a tail can orphan an outcome (dropped
- * by `foldAttempts`, harmless) but can never hide an outcome from an intent the
- * tail contains — the guard never invents an `"unknown"`.
+ * Reads a bounded tail — of the active generation, extended into `.1` when
+ * the active file is shorter than the budget (see `duplicateWindowText`). An
+ * outcome always follows its own intent, so a tail can orphan an outcome
+ * (dropped by `foldAttempts`, harmless) but can never hide an outcome from an
+ * intent the tail contains — the guard never invents an `"unknown"`.
  *
  * The window test is `now - ts <= WINDOW`, so a timestamp in the *future* also
  * trips it. That is the conservative direction for a write guard (CC-H1): a
  * clock that jumped backwards should make the server more careful about
  * duplicates, not less, and `force: true` is the documented escape hatch.
+ *
+ * The guard is per profile. One journal serves every configured account, and
+ * the same video posted to two accounts is two posts, not one post twice: an
+ * attempt on `BRAND` must not block — or, under `force: true`, be waved
+ * through for — an identical payload on `DEFAULT`. Both sides are compared in
+ * canonical spelling (CC-F4), so a hand-edited or older line that recorded
+ * the profile in another case still counts against its own account.
  *
  * An unreadable journal is not a duplicate. Failing closed would let one bad
  * file mode brick every publish on the machine, and the plan digest check has
@@ -719,13 +926,14 @@ export interface DuplicateCheck {
  */
 export async function checkDuplicate(
   payloadDigest: string,
+  profile: string,
   clock: Clock,
   opts: JournalOptions = {},
 ): Promise<DuplicateCheck> {
   const path = resolveJournalPath(opts);
-  let text: string | undefined;
+  let text: string;
   try {
-    text = await readTail(path, DUPLICATE_TAIL_BYTES);
+    text = await duplicateWindowText(path);
   } catch (cause) {
     (opts.logger ?? silentLogger).warn(
       'could not read the publish journal for the duplicate check; allowing the publish',
@@ -733,12 +941,13 @@ export async function checkDuplicate(
     );
     return { duplicate: false };
   }
-  if (text === undefined) return { duplicate: false };
 
   const now = clock.now();
+  const account = canonicalProfileName(profile);
   const attempts = foldAttempts(parseLines(text).records);
   for (const attempt of attempts.reverse()) {
     if (attempt.payload_digest !== payloadDigest) continue;
+    if (canonicalProfileName(attempt.profile) !== account) continue;
     if (!TRIPPING_OUTCOMES.has(attempt.outcome)) continue;
     const at = Date.parse(attempt.ts);
     if (Number.isNaN(at) || now - at > DUPLICATE_WINDOW_MS) continue;

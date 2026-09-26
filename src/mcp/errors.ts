@@ -6,9 +6,11 @@
  *
  * The texts are normative: the test suite asserts them by substring, so they
  * are composed here once instead of being re-typed per tool. Placeholders are
- * server-filled; nothing upstream is ever interpolated into a message
- * (trust boundary, TOOLS.md § 5) — upstream detail lives in structured fields
- * (`log_id`, `details.api_code`).
+ * server-filled. Upstream text reaches a message only as the redacted,
+ * length-capped body snippet `core/http` builds into a `TikTokError` message,
+ * which `fromTikTokError` passes through (trust boundary, TOOLS.md § 5);
+ * everything else upstream lives in structured fields (`log_id`,
+ * `details.api_code`).
  *
  * Layering: `core ← api ← mcp ← tools`.
  */
@@ -20,14 +22,25 @@ import { redactText } from '../core/redact.js';
 import type { ToolError } from './result.js';
 
 /** Human-readable path of a zod issue, e.g. `post_info.title` or `ids[2]`. */
-function issuePath(path: readonly (string | number)[]): string {
+function issuePath(path: readonly PropertyKey[]): string {
   let out = '';
   for (const segment of path) {
     if (typeof segment === 'number') out += `[${String(segment)}]`;
-    else out += out === '' ? segment : `.${segment}`;
+    else out += out === '' ? String(segment) : `.${String(segment)}`;
   }
   return out;
 }
+
+/**
+ * Per-parse zod error map for tool arguments. zod 4's default text for an
+ * absent argument is `Invalid input: expected string, received undefined`,
+ * which reads as a type mistake; a caller that left a field out needs to be
+ * told it is missing. Every other issue keeps zod's own wording.
+ */
+export const argumentErrorMap: z.core.$ZodErrorMap = (issue) =>
+  issue.code === 'invalid_type' && issue.input === undefined
+    ? 'required argument is missing'
+    : undefined;
 
 /**
  * `<field>: <local validation reason>` for the first issue zod reported.
@@ -87,7 +100,33 @@ export function missingScopeError(profile: string, scope: string): ToolError {
   };
 }
 
-function fromTikTokError(error: TikTokError): ToolError {
+/**
+ * `missing_scope` for a profile with no stored credentials at all — the
+ * default profile before the first login, typically. "Authorized without
+ * scope X" would be false there, and a `--scopes X` login would grant X alone;
+ * a plain login requests every scope the enabled packages need.
+ */
+export function unconfiguredProfileScopeError(profile: string, scope: string): ToolError {
+  return {
+    code: 'missing_scope',
+    message:
+      `Account '${profile}' has no stored credentials, so it grants no scopes; this tool ` +
+      `requires ${scope}. Ask the user to run: npx tiktok-mcp-ai login --profile ${profile} — ` +
+      'then verify with tiktok_get_auth_status.',
+    retryable: false,
+    details: { profile, missing_scope: scope, configured: false },
+  };
+}
+
+/**
+ * `details` is optional on {@link ToolError} but never absent here — every
+ * mapped error carries at least `kind` — so the return type says so. That is
+ * what lets {@link publishToolError} carry `details` across a remap without a
+ * presence check no input could ever fail.
+ */
+type MappedToolError = ToolError & { details: Record<string, unknown> };
+
+function fromTikTokError(error: TikTokError): MappedToolError {
   const message =
     error.remediation !== undefined && !error.message.includes(error.remediation)
       ? `${error.message} ${error.remediation}`
@@ -96,7 +135,7 @@ function fromTikTokError(error: TikTokError): ToolError {
   const details: Record<string, unknown> = { kind: error.kind };
   if (error.apiCode !== undefined) details['api_code'] = error.apiCode;
 
-  const out: ToolError = {
+  const out: MappedToolError = {
     code: error.code,
     message,
     retryable: error.retryable,
@@ -190,7 +229,7 @@ export function publishToolError(error: unknown): ToolError {
     // `details` keeps the upstream spelling (`api_code`) and `log_id` survives,
     // so nothing is lost by presenting the mapped code.
     ...(base.log_id === undefined ? {} : { log_id: base.log_id }),
-    ...(base.details === undefined ? {} : { details: base.details }),
+    details: base.details,
   };
 }
 

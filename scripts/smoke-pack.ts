@@ -43,7 +43,7 @@
  *   failure alike.
  *
  * It is deliberately **not** part of `npm run check`: the install reaches the
- * registry for the three runtime dependencies, and the check chain has to stay
+ * registry for the runtime dependencies, and the check chain has to stay
  * offline-safe and fast. CI runs it as its own 3-OS job.
  *
  * Usage: `node build/scripts/smoke-pack.js`
@@ -157,6 +157,7 @@ async function runNpm(
     throw new Error(
       `\`npm ${args.join(' ')}\` failed in ${cwd}: ${message(err)}\n` +
         `  stderr: ${stderrTail(asString(detail['stderr']) ?? '')}`,
+      { cause: err },
     );
   }
 }
@@ -468,7 +469,7 @@ function openStdioSession(
     stderr: () => stderrText,
     async close() {
       closing = true;
-      // EOF first: the stdio transport closes on stdin end, which is how a real
+      // EOF first: the server shuts down on stdin end, which is how a real
       // client disconnects. The signals below exist only for a server that
       // ignored it, so a hang here still terminates the run.
       child.stdin.end();
@@ -655,6 +656,7 @@ async function smoke(
   name: string,
   version: string,
   binName: string,
+  binTarget: string,
 ): Promise<boolean> {
   const checks: Check[] = [];
   const packDir = join(root, 'pack');
@@ -672,7 +674,10 @@ async function smoke(
 
   await installTarball(tarball, prefix);
   const installedRoot = join(prefix, 'node_modules', name);
-  const entry = join(installedRoot, 'bin', `${binName}.cjs`);
+  // The target package.json declares, not a path guessed from the bin key: a
+  // renamed or mistyped target must fail here even while the old launcher
+  // file is still in the tarball.
+  const entry = join(installedRoot, binTarget);
   const shim = join(
     prefix,
     'node_modules',
@@ -758,8 +763,15 @@ export async function runSmokePack(): Promise<boolean> {
   const pkg = (await readRepoJson(PACKAGE_JSON)) ?? {};
   const name = asString(pkg['name']);
   const version = asString(pkg['version']);
-  const binName = Object.keys(asRecord(pkg['bin']) ?? {})[0];
-  if (name === undefined || version === undefined || binName === undefined) {
+  const bins = asRecord(pkg['bin']) ?? {};
+  const binName = Object.keys(bins)[0];
+  const binTarget = binName === undefined ? undefined : asString(bins[binName]);
+  if (
+    name === undefined ||
+    version === undefined ||
+    binName === undefined ||
+    binTarget === undefined
+  ) {
     process.stderr.write(
       'smoke-pack: package.json declares no name, version or bin — there is nothing to smoke.\n',
     );
@@ -768,7 +780,7 @@ export async function runSmokePack(): Promise<boolean> {
 
   const root = await mkdtemp(join(tmpdir(), 'tiktok-mcp-smoke-'));
   try {
-    return await smoke(root, name, version, binName);
+    return await smoke(root, name, version, binName, binTarget);
   } catch (err) {
     process.stderr.write(`smoke-pack: ${message(err)}\n`);
     return false;

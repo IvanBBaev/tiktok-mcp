@@ -95,7 +95,7 @@ export async function getUserInfo(
         'TikTok requires the fields query parameter. No request was sent to TikTok.',
     });
   }
-  const unknownField = fields.find((field) => !(field in USER_FIELD_SCOPES));
+  const unknownField = fields.find((field) => !Object.hasOwn(USER_FIELD_SCOPES, field));
   if (unknownField !== undefined) {
     throw new TikTokError({
       kind: 'validation',
@@ -106,13 +106,14 @@ export async function getUserInfo(
     });
   }
 
-  const payload = await apiRequest<{ user?: UserInfo }>(ctx, {
+  const payload = await apiRequest<{ user?: UserInfo | null }>(ctx, {
     method: 'GET',
     path: '/v2/user/info/',
     fields,
     ...(opts.signal === undefined ? {} : { signal: opts.signal }),
   });
-  if (payload.user === undefined) {
+  // `null` too: JSON can say "no user" either way, and neither is a user.
+  if (payload.user === undefined || payload.user === null) {
     throw malformedPayload('/v2/user/info/', 'user object');
   }
   return payload.user;

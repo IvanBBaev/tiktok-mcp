@@ -640,6 +640,72 @@ test('an upload url without a token, or an unparseable one, is still returned', 
   ]);
 });
 
+test('an unparseable upload url still has its upload_token registered as a secret', async () => {
+  const token = 'unparseable-upload-token-9f8e7d';
+  const uploadUrl = `not a url ?upload_id=1&upload_token=${token}#frag`;
+  const stub = scriptFetch([ttEnvelope({ publish_id: 'p-raw', upload_url: uploadUrl })]);
+  assert.equal(redactText(`leak ${token} here`), `leak ${token} here`);
+  const result = await withFetch(stub, async () =>
+    initDraftUpload(apiCtx(), {
+      source: { source: 'PULL_FROM_URL', videoUrl: 'https://example.com/v.mp4' },
+    }),
+  );
+  assert.deepEqual(result, { publishId: 'p-raw', uploadUrl });
+  // Only the token itself — the regex stops at `#`, so the fragment is not in it.
+  assert.equal(redactText(`leak ${token} here`), 'leak [REDACTED] here');
+  assert.equal(redactText('frag'), 'frag');
+});
+
+test('an unparseable upload url without an upload_token registers nothing', async () => {
+  const uploadUrl = 'not a url ?upload_id=unregistered-marker-42';
+  const stub = scriptFetch([ttEnvelope({ publish_id: 'p-none', upload_url: uploadUrl })]);
+  const result = await withFetch(stub, async () =>
+    initDraftUpload(apiCtx(), {
+      source: { source: 'PULL_FROM_URL', videoUrl: 'https://example.com/v.mp4' },
+    }),
+  );
+  assert.deepEqual(result, { publishId: 'p-none', uploadUrl });
+  assert.equal(redactText(uploadUrl), uploadUrl);
+});
+
+for (const [label, payload, named] of [
+  ['a minted publish_id', { publish_id: 'v_pub_file~minted.1' }, true],
+  ['no publish_id', {}, false],
+  ['an empty publish_id', { publish_id: '' }, false],
+] as const) {
+  test(`a FILE_UPLOAD init with ${label} and no upload_url is an upstream error`, async () => {
+    const stub = scriptFetch([ttEnvelope(payload)]);
+    await withFetch(stub, async () => {
+      await assert.rejects(
+        initVideoPost(apiCtx(), {
+          postInfo: POST_INFO,
+          source: {
+            source: 'FILE_UPLOAD',
+            videoSize: 1_000,
+            chunkSize: 1_000,
+            totalChunkCount: 1,
+          },
+        }),
+        (error: unknown) => {
+          assert.ok(isTikTokError(error));
+          assert.equal(error.kind, 'api');
+          assert.equal(error.code, 'upstream_error');
+          assert.ok(error.message.includes('upload_url string for a FILE_UPLOAD init'));
+          assert.equal(
+            error.message.includes(
+              'publish_id v_pub_file~minted.1 was minted and will never receive bytes',
+            ),
+            named,
+          );
+          assert.equal(error.message.includes('was minted'), named);
+          return true;
+        },
+      );
+    });
+    assert.equal(stub.calls.length, 1);
+  });
+}
+
 test('a publish init is attempted exactly once — never retried', async () => {
   // On the `read` class this envelope would be retried; on `init` it is terminal.
   const stub = scriptFetch([
@@ -663,23 +729,41 @@ test('a publish init is attempted exactly once — never retried', async () => {
   assert.equal(stub.calls.length, 1);
 });
 
-test('an init response without a publish_id is an upstream shape change', async () => {
-  const stub = scriptFetch([ttEnvelope({ upload_url: 'https://example.com/put' })]);
-  await withFetch(stub, async () => {
-    await assert.rejects(
-      initVideoPost(apiCtx(), {
-        postInfo: POST_INFO,
-        source: { source: 'PULL_FROM_URL', videoUrl: 'https://example.com/v.mp4' },
+for (const [label, publishId] of [
+  ['no', undefined],
+  ['an empty', ''],
+  ['a non-string', 42],
+] as const) {
+  test(`a 2xx init with ${label} publish_id is an ambiguous send, never retried`, async () => {
+    const stub = scriptFetch([
+      ttEnvelope({
+        upload_url: 'https://example.com/put',
+        ...(publishId === undefined ? {} : { publish_id: publishId }),
       }),
-      (error: unknown) => {
-        assert.ok(isTikTokError(error));
-        assert.equal(error.code, 'upstream_error');
-        assert.ok(error.message.includes('publish_id string'));
-        return true;
-      },
-    );
+    ]);
+    await withFetch(stub, async () => {
+      await assert.rejects(
+        initVideoPost(apiCtx(), {
+          postInfo: POST_INFO,
+          source: { source: 'PULL_FROM_URL', videoUrl: 'https://example.com/v.mp4' },
+        }),
+        (error: unknown) => {
+          assert.ok(isTikTokError(error));
+          // TikTok answered 2xx: the init may have been accepted, so the
+          // outcome is unknown rather than a clean upstream refusal.
+          assert.equal(error.kind, 'network');
+          assert.equal(error.code, 'network_ambiguous');
+          assert.ok(error.message.includes('publish_id string'));
+          assert.ok(error.message.includes('NOT retried'));
+          assert.ok(isTikTokError(error.cause));
+          assert.equal(error.cause.code, 'upstream_error');
+          return true;
+        },
+      );
+    });
+    assert.equal(stub.calls.length, 1);
   });
-});
+}
 
 test('initDraftUpload sends no post_info at all', async () => {
   const stub = scriptFetch([ttEnvelope({ publish_id: 'v_inbox~v2.789' })]);
@@ -751,6 +835,51 @@ test('cc-e9: initPhotoPost re-checks the bounds before spending a publish attemp
   assert.equal(stub.calls.length, 0);
 });
 
+/**
+ * CC-G4 for the two inits that carry a caller signal but had no case of their
+ * own. The assertion that matters is the second one: an init is the moment a
+ * publish attempt is spent, so a cancelled call must not reach the network at
+ * all rather than be cancelled somewhere in flight.
+ */
+test('cc-g4: an already-aborted signal stops a draft init before it is spent', async () => {
+  const stub = scriptFetch([ttEnvelope({ publish_id: 'never_sent' })]);
+  const controller = new AbortController();
+  controller.abort(new Error('caller went away'));
+
+  await withFetch(stub, async () => {
+    await assert.rejects(
+      initDraftUpload(apiCtx(), {
+        source: { source: 'PULL_FROM_URL', videoUrl: 'https://example.com/v.mp4' },
+        signal: controller.signal,
+      }),
+      /caller went away|abort/i,
+    );
+  });
+
+  assert.equal(stub.calls.length, 0);
+});
+
+test('cc-g4: an already-aborted signal stops a photo init before it is spent', async () => {
+  const stub = scriptFetch([ttEnvelope({ publish_id: 'never_sent' })]);
+  const controller = new AbortController();
+  controller.abort(new Error('caller went away'));
+
+  await withFetch(stub, async () => {
+    await assert.rejects(
+      initPhotoPost(apiCtx(), {
+        postInfo: POST_INFO,
+        postMode: 'DIRECT_POST',
+        photoUrls: ['https://example.com/a.jpg'],
+        photoCoverIndex: 0,
+        signal: controller.signal,
+      }),
+      /caller went away|abort/i,
+    );
+  });
+
+  assert.equal(stub.calls.length, 0);
+});
+
 // ---------------------------------------------------------------------------
 // Status
 // ---------------------------------------------------------------------------
@@ -776,6 +905,29 @@ test('getPublishStatus maps the documented members, misspelling included', async
     status: 'PUBLISH_COMPLETE',
     publicPostIds: ['7350000000000000000'],
     uploadedBytes: 50_000_123,
+  });
+});
+
+test('getPublishStatus keeps a post id beyond 2^53 digit-exact, and only that', async () => {
+  // Written as raw text: a JS number literal would already have lost the digits.
+  const body =
+    '{"data":{"status":"PUBLISH_COMPLETE",' +
+    '"publicaly_available_post_id":[7412345678901234567,-9007199254740993,12],' +
+    '"uploaded_bytes":1e30,"downloaded_bytes":1.5},' +
+    '"error":{"code":"ok","message":"","log_id":"log-1"}}';
+  const stub = scriptFetch([
+    new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
+  ]);
+  const status = await withFetch(stub, async () =>
+    getPublishStatus(apiCtx(), 'v_pub~big'),
+  );
+
+  assert.deepEqual(status, {
+    status: 'PUBLISH_COMPLETE',
+    publicPostIds: ['7412345678901234567', '-9007199254740993', '12'],
+    // Unsafe, but not integer digits: exponent and fraction forms stay numbers.
+    uploadedBytes: 1e30,
+    downloadedBytes: 1.5,
   });
 });
 

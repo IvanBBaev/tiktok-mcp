@@ -103,7 +103,19 @@ there.
   alone as success.
 - **CC-B2 — non-JSON body.** 5xx (or even 200) with an HTML/empty/truncated
   body from a gateway: wrap as `TikTokError` with the HTTP status and a body
-  snippet (redacted, length-capped); never crash on `JSON.parse`.
+  snippet (redacted, length-capped); never crash on `JSON.parse`. On a
+  publish init such an answer (on a `2xx` or `5xx`, or a `5xx` envelope
+  without `error.code`) is a gateway's, not TikTok's, so it is classified like
+  CC-B5: `network_ambiguous`, journaled `send_ambiguous`. The same family
+  covers a well-formed envelope with an unreadable payload: a `2xx` with
+  `error.code === "ok"` whose `data` is present but `null`, a scalar or an
+  array is not handed to the reader (every endpoint documents an object there,
+  and the first property read would crash). On a publish init it is
+  `network_ambiguous` — TikTok said `ok`, so the init may have been accepted:
+  not retried, journaled `send_ambiguous`, the duplicate guard keeps holding
+  the payload (CC-G4). On every other class it is `upstream_error` (a
+  response-shape change), not retried. An envelope with no `data` key at all
+  is unaffected.
 - **CC-B3 — `Retry-After` variants.** Honor both seconds and HTTP-date forms;
   cap at `min(30s, remaining budget)`; absent header → exponential backoff with
   jitter.
@@ -128,7 +140,9 @@ there.
   per user token, but the local token bucket is per-process. A second process
   can consume TikTok's budget; the resulting API spam/rate error on init is
   surfaced as non-retryable with a wait hint — the local bucket is a courtesy,
-  not the enforcement point.
+  not the enforcement point. The status alone decides: a 429 whose body is
+  empty, HTML, or JSON that is not an object is `rate_limited` with the same
+  wait hint (`Retry-After` when present), not a CC-B2 `upstream_error`.
 - **CC-B9 — missing `log_id`.** Tolerated everywhere it is normally expected;
   error formatting must not assume its presence.
 

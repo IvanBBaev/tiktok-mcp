@@ -66,8 +66,8 @@ tolerated: CC-B9).
 | `ok` | 200 | Success |
 | `invalid_params` (**plural**) | 400 | Non-retryable validation error; prevented by client-side validation |
 | `access_token_invalid` | 401 | One token refresh + one replay; still failing → terminal auth error, re-login |
-| `scope_not_authorized` | 401 | Non-retryable; user did not grant the scope → re-consent flow |
-| `scope_permission_missed` | 400 | Non-retryable; scope missing on the request → re-consent flow |
+| `scope_not_authorized` | 401 | Non-retryable; user did not grant the scope. Surfaces as a generic `upstream_error` with TikTok's code and message (no dedicated mapping); the fix is re-running `login` with the needed scopes |
+| `scope_permission_missed` | 400 | Non-retryable; scope missing on the request. Same generic `upstream_error`; re-run `login` with the needed scopes |
 | `invalid_file_upload` | 400 | Non-retryable; report the file problem |
 | `rate_limit_exceeded` | 429 | Retryable with backoff (reads only — § 5) |
 | `internal_error` | 500 | Retryable with exponential backoff + jitter, bounded attempts |
@@ -88,9 +88,9 @@ tolerated: CC-B9).
 | `invalid_publish_id` | 400 | status/fetch | Non-retryable; if the journal knows the ID → "status no longer available — see journal" (§ 4.5) |
 | `token_not_authorized_for_specified_publish_id` | 400 | status/fetch | Non-retryable: publish_id belongs to a different user token — check journal/account mapping |
 | `access_token_invalid` | 401 | all | One refresh + one replay of the *request* — never assume side effects on inits (whether a 401 init can leave a created task behind is **probe P-5**) |
-| `scope_not_authorized` | 401 | all | Re-consent with `video.publish` / `video.upload` as needed |
+| `scope_not_authorized` | 401 | all | Generic non-retried `upstream_error` (no dedicated mapping); the fix is re-running `login` with `video.publish` / `video.upload` as needed |
 | `rate_limit_exceeded` | 429 | all | Reads: backoff + retry. **Publish inits: terminal** (§ 5) |
-| `internal_error` | 5xx | all | Retryable with backoff — reads only; inits are never retried (§ 4.8) |
+| `internal_error` | 5xx | all | Retryable with backoff — reads only; inits are never retried (§ 4.8). An init `5xx` without `error.code`, or with a non-JSON body, is `network_ambiguous` (§ 4.2) |
 
 **Spelling rule (binding):** `invalid_params` (Display) and `invalid_param`
 (Content Posting) both exist, on different API surfaces. The error mapper must
@@ -197,6 +197,9 @@ user at consent time. A granted-scope mismatch surfaces as
 - `fields` in the **query string**; JSON body `{ "cursor": <int64 ms>, "max_count": 1–20 }`.
 - Returns `videos[]`, `cursor` (for the next page), `has_more`. Sorted by
   `create_time` descending. Only **public** videos of the authorized user.
+  A `videos[]` entry that is not an object with a string `id` makes the whole
+  answer a malformed payload (`upstream_error`), on this endpoint and on
+  `video/query`.
 - Video fields, and the exact vocabulary this server accepts (`VIDEO_FIELDS` in
   `src/api/video.ts`): `id`, `create_time`, `title`, `video_description`,
   `duration`, `height`, `width`, `cover_image_url`, `share_url`, `embed_html`,
@@ -268,6 +271,23 @@ Body has two objects:
 
 Response: `{ "publish_id": "v_pub_file~v2.…", "upload_url": "…" }`.
 
+**Unreadable init answers.** A `2xx` answer from any of the three inits (§ 4.2,
+§ 4.3, § 4.4) without a non-empty string `publish_id` is classified
+`network_ambiguous` (journal `send_ambiguous`), not `upstream_error`: the init
+may have been accepted upstream and only its answer is unreadable, so the
+duplicate guard must keep holding the payload (CC-G4). A `FILE_UPLOAD` init
+answered without an `upload_url` stays a malformed payload (`upstream_error`).
+The same classification covers an init answered by a gateway rather than by
+TikTok: a `2xx` or `5xx` whose body is not JSON or not a JSON object, and a
+`5xx` envelope without an `error.code`, are `network_ambiguous` (journal
+`send_ambiguous`) — they say nothing about whether the backend created the
+task (CC-B2, CC-B5). A `4xx`, and any answer that carries an explicit
+`error.code`, keep their normal mapping. One `ok` answer is read the same way:
+a `2xx` envelope with `error.code: "ok"` whose `data` is `null`, a scalar or an
+array is `network_ambiguous` on an init (the init may have been accepted; not
+retried, journaled `send_ambiguous`) and `upstream_error` (not retried) on any
+other call (CC-B2).
+
 **Branded content × private visibility (binding, client-side rule):**
 `brand_content_toggle: true` with `privacy_level: SELF_ONLY` is rejected at
 validation time with TikTok's own tooltip wording — "Branded content
@@ -326,7 +346,10 @@ Body `{ "publish_id": "…" }`. Returns:
 - `publicaly_available_post_id[]` (list of int64) — returned only if the post
   is published for public viewership. **Spelling warning (binding):** the
   field is spelled exactly `publicaly_available_post_id` — TikTok's own
-  misspelling. Copy it exactly or the field reads as absent.
+  misspelling. Copy it exactly or the field reads as absent. The ids arrive as
+  bare JSON numbers; one beyond 2^53 does not survive a plain `JSON.parse`
+  (it rounds to a different id), so `core/http` keeps any integer that is not a
+  safe integer as its exact decimal source string.
 - `uploaded_bytes` (FILE_UPLOAD) and `downloaded_bytes` (PULL_FROM_URL)
   progress counters. `uploaded_bytes` is the out-of-band resync source for
   chunk-PUT 416 recovery (§ 4.8).
@@ -498,6 +521,11 @@ Binding retry rules (rationale: SYNTHESIS § 2.13):
   expired — never auto-re-init. 416 means the server is ahead — resync from
   `uploaded_bytes` and advance (CC-D6).
 - Chunks are uploaded **sequentially** — no parallel PUTs.
+- **The file is pinned for the whole transfer:** opened once, every chunk and
+  retry read from that descriptor by positional reads in 1 MiB slices (a
+  re-PUT is byte-identical even if the path is renamed or replaced). Identity mismatch against the verified file ⇒
+  `plan_mismatch` before the first PUT; a size/mtime change between chunks ⇒
+  `upload_interrupted` ("the media file was modified during the upload").
 - **Resume algorithm after an ambiguous outcome** (timeout / connection reset
   mid-PUT):
   1. Query status/fetch → read `uploaded_bytes`.
@@ -506,7 +534,20 @@ Binding retry rules (rationale: SYNTHESIS § 2.13):
   3. If not → re-PUT the same chunk (officially sanctioned for 5xx-class
      failures).
   4. If the re-PUT returns 416 → the range was already recorded; re-read
-     progress and advance.
+     progress and advance. On the **final** chunk, a 416 whose reported
+     progress is `total` or more means the 201 was lost to the retry: the
+     transfer is complete, not `upload_interrupted`. A final-chunk 416 whose
+     progress equals the last byte index (`total − 1`) is `network_ambiguous`:
+     until probe P-11 pins whether `UPLOADED_BYTES` is a count or a last-byte
+     index, it is either every byte or all but one, and neither "complete" nor
+     "failed" is safe to report (CC-G4). A backward resync moves the reported
+     chunk position back; MCP progress notifications never decrease.
+  5. On the **final** chunk, once an attempt lost its answer (`network_error`
+     / `timeout`) and was replayed, any later failure of that chunk — `5xx`
+     retries exhausted, or a terminal `403` / `404` / `400` answering the
+     replay — is `network_ambiguous` rather than `upload_interrupted`: the
+     lost attempt may have completed the upload, and reporting a clean
+     failure would invite a second post (CC-G4).
 - What a re-PUT of a *fully accepted* range returns (416 vs idempotent 206 vs
   other) is **probe P-2** — it must run before the Phase-2 retry-matrix
   freeze; **probe P-11** records the raw response fixtures (206/201 bodies,
@@ -514,7 +555,12 @@ Binding retry rules (rationale: SYNTHESIS § 2.13):
 - **Publish inits are NEVER retried** — not on 5xx, not on timeout, not on
   connection reset. A transport failure after the request may have been sent
   is a terminal ambiguous outcome (journal + status/fetch are the recovery
-  path, CC-B4/B5). **Upstream 429 on an init is terminal** (§ 5). Upstream
+  path, CC-B4/B5). The same holds for an init answered without TikTok's
+  envelope — a `2xx` or `5xx` with a non-JSON or non-object body, or a `5xx`
+  envelope without `error.code`: it is `network_ambiguous`, journaled
+  `send_ambiguous`, exactly like an init timeout (CC-B2/B5); a `4xx` and an
+  explicit `error.code` map as usual. So does an `ok` envelope whose `data` is
+  not an object (CC-B2). **Upstream 429 on an init is terminal** (§ 5). Upstream
   init idempotency is unverified (**probe P-12**); whether a 401 init can
   leave a created task behind is **probe P-5**.
 
@@ -569,7 +615,10 @@ Endpoint rate limits (upstream-documented):
 
 Request-rate calculation is a one-minute sliding window; exceeding it returns
 HTTP 429 + `rate_limit_exceeded`; higher limits are by request via the support
-page.
+page. The client reads the **status** as the signal: a 429 whose body is
+empty, HTML, or JSON that is not an object (an edge or proxy answering for
+TikTok) is still `rate_limited` with the wait hint (CC-B8), not the CC-B2
+`upstream_error` a non-JSON body gets on any other status.
 
 Business-level caps that behave like rate limits but surface as 403 error
 codes, not 429s:

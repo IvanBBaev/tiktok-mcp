@@ -155,6 +155,15 @@ function readVideos(page: VideoPage, endpoint: string): Video[] {
   const { videos } = page;
   if (videos === undefined) return [];
   if (!Array.isArray(videos)) throw malformedPayload(endpoint, 'videos array');
+  for (const video of videos as unknown[]) {
+    if (
+      typeof video !== 'object' ||
+      video === null ||
+      typeof (video as Video).id !== 'string'
+    ) {
+      throw malformedPayload(endpoint, 'videos[].id');
+    }
+  }
   return videos as Video[];
 }
 

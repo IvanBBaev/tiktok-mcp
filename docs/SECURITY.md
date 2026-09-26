@@ -92,11 +92,28 @@ from every sink):
   serialization; `mcp/`-level redaction is a thin re-export, never a second
   implementation. Rationale: SYNTHESIS SYN-12.
 - Redaction is **allowlist-based and default-deny**: unknown keys are
-  redacted unless allowlisted, rather than known-bad keys being scrubbed.
+  redacted unless allowlisted, rather than known-bad keys being scrubbed. The
+  cost is that a diagnostic field nobody allowlisted is lost from the log: the
+  chunk upload's chunk count is logged as `total_chunks` (it was
+  `upload_chunks`, which the allowlist always scrubbed) and the retry delay
+  `backoff_ms` is allowlisted, so both now reach stderr.
 - **Exact-value secret registration**: tokens, `client_secret`, and
   `upload_token` are registered as exact values (`registerSecret`) and
   scrubbed out of free text (`redactText`) — this catches secrets embedded in
-  query strings and form bodies that key-based rules miss.
+  query strings and form bodies that key-based rules miss. Registration
+  happens where each value first enters the process: the `client_secret` when
+  a profile's credentials are read (`readProfile`, the one path every caller
+  takes to the app keys) and again at the start of the code exchange
+  (`exchangeCode`, which receives it as an argument); the access and refresh
+  tokens when a credential record is adopted, when a token response arrives,
+  whenever one is sent as a bearer, and — for `login --revoke` — each access
+  token before its revoke request is sent (including one a concurrent refresh
+  rotated in); the PKCE verifier, the CSRF
+  `state` and the authorization code when they are created or received; the
+  `upload_token` when an init returns its `upload_url` (read from the query
+  string, or — when the `upload_url` is not a parseable URL, which `core/http`
+  later refuses and quotes — matched from its `upload_token=` text by hand)
+  and again before each chunk PUT.
 - **One sink redacts *after* serialization**: `cliIo` wraps stdout/stderr, so
   `doctor --json` is scrubbed as a whole document. `redactText` therefore
   matches each registered secret in its JSON-escaped rendering as well as its
@@ -178,10 +195,48 @@ they control; TLS validation then blocks them unless they also hold a valid
 certificate for that name (CA compromise). This combined attacker is accepted
 for v1.
 
+**Pre-flight resolution check** (defense in depth, not a pin): when a
+`lookup` is injected, the allowlisted hostname is resolved first and the
+request is refused (`egress_blocked`) if **any** answer is non-routable. IPv6
+answers are normalized to their eight groups before classification, so
+non-canonical spellings (`0:0:0:0:0:0:0:1`, `::ffff:7f00:1`) are caught. Refused:
+
+- IPv4: `0/8`, `10/8`, `127/8`, `169.254/16` (incl. IMDS), `172.16/12`,
+  `192.168/16`, `192.0.0/24`, `192.0.2/24`, `198.51.100/24`, `203.0.113/24`,
+  `100.64/10` (CGNAT), `198.18/15`, and everything from `224/4` up
+  (multicast, reserved, broadcast), and the deprecated 6to4 relay anycast
+  `192.88.99.0/24`.
+- IPv6 classified by the IPv4 they embed: `::/96` (incl. `::` and `::1`),
+  `::ffff:0:0/96` (IPv4-mapped), SIIT `::ffff:0:0:0/96` (IPv4-translated),
+  NAT64 `64:ff9b::/96`, 6to4 `2002::/16`.
+- IPv6 refused outright: **everything outside global unicast `2000::/3`** —
+  one rule rather than an enumeration, so it covers the rest of the
+  IETF-reserved `0000::/8`, NAT64 local-use `64:ff9b:1::/48`, discard
+  `100::/64`, SRv6 SIDs `5f00::/16`, unique-local `fc00::/7`, link-local
+  `fe80::/10`, site-local `fec0::/10`, multicast `ff00::/8` and the unassigned
+  space in between. Inside `2000::/3`, also refused: IETF protocol assignments
+  `2001::/23` (incl. Teredo `2001::/32`, benchmarking `2001:2::/48` and
+  ORCHID) and documentation `2001:db8::/32` and `3fff::/20`; 6to4
+  `2002::/16` is judged by the IPv4 it embeds (above).
+- Any answer that is not an IP literal.
+
+A TOCTOU gap remains between this resolution and the HTTP client's own, which
+is why the deferral above still stands.
+
 **Obligations that survive the deferral:** `core/http` exposes an
 **injectable `lookup` seam** from day one (`TtRequestOptions.lookup`), so a
-future flip to resolve-and-pin is a contained change; probe **P-15** is the
-v1.x engineering spike evaluating an undici-dispatcher implementation.
+future flip to resolve-and-pin is a contained change. Probe **P-15**, the v1.x
+engineering spike, has been run (2026-08-31, offline): it reproduced the gap —
+a pre-flight that vets one address while the connection reaches another — and
+showed that a `lookup`-shaped pin closes it without weakening TLS identity (the
+certificate is still validated against the hostname, and a trusted certificate
+for the wrong name is still rejected) and at no measurable per-request cost,
+since the pre-flight already pays the resolution. What keeps it out of v1 is
+reach, not cost: `fetch` accepts a pin only through an undici dispatcher that
+stock Node exposes nowhere but an undocumented global symbol, created lazily
+and resolving to a different class under proxy environment variables. The
+deferral above therefore rests on measurement rather than assumption; the run
+is recorded in `docs/probes/PROBE-LOG.md` § P-15.
 
 ### Local file confinement (`TT_MEDIA_ROOT`)
 
@@ -197,6 +252,22 @@ v1.x engineering spike evaluating an undici-dispatcher implementation.
   file's `(size, mtime, dev, ino)` captured at plan time must match —
   otherwise the bytes changed since the human saw the preview ⇒ reject,
   re-plan (CC-D3).
+- **Upload pinning:** the transfer opens the file **once** and every chunk
+  and retry reads from that descriptor (positional reads in 1 MiB slices,
+  never a read stream that could close the shared handle), so a rename or
+  replace of the path
+  mid-upload cannot splice another file's bytes into the post. The
+  descriptor's size must equal the plan total and its `(size, mtime, dev,
+  ino)` must equal what the re-validation confirmed, else `plan_mismatch`
+  before any byte is sent. Before each chunk the descriptor is re-stat'ed; a
+  size or mtime change (in-place rewrite) fails the upload with
+  `upload_interrupted` ("the media file was modified during the upload"); a
+  file truncated mid-chunk fails that chunk's body; the re-stat after the failure
+  reports the same, without spending the retries. **Known limit:** the check compares size and mtime, so a
+  same-size rewrite within one mtime tick on a coarse filesystem (FAT/exFAT
+  2 s, HFS+ 1 s) is not detected. `ctime` is not used because rename and
+  unlink change it too, and a rename during an upload is deliberately
+  supported.
 - The plan preview always shows the **resolved absolute path and byte size**
   — the human sees exactly which file would leave the machine.
 - `TT_MEDIA_ROOT` should be a dedicated media directory, never `$HOME` or a
@@ -241,12 +312,22 @@ other than the one previewed.
   intent-without-outcome. It stores a title *excerpt* only, never tokens.
 - **Duplicate guard:** a same-digest publish with an ok/unknown outcome
   within 10 minutes is refused as `possible_duplicate` unless `force: true`.
+  An in-process in-flight guard also refuses an unforced apply of a payload
+  (same profile and digest) that another call in this process is dispatching
+  right now (`details.in_flight: true`), so two applies of different plans
+  for one payload cannot both pass the journal check before either has
+  journaled its intent.
 - Posting rate is capped client-side (`TT_PUBLISH_RPM`, default 6/min per
   profile, matching TikTok): an empty bucket rejects locally with an
   absolute `retry_at` — zero network spent. The local bucket is a courtesy,
   not the enforcement point (CC-B8).
-- Optional `TT_LOCK_PROFILE` pins the session to one profile (the `account`
-  selector is removed from tool schemas); in the default multi-profile mode
+- Optional `TT_LOCK_PROFILE` pins the session to one profile. The `account`
+  argument stays in every tool schema, but any name other than the locked one
+  answers `unknown_account` locally, and the publish journal
+  (`tiktok_list_publish_journal`, `tiktok://publish/journal`, the `publish_id`
+  completion) is filtered to the locked profile — another `account` filter
+  narrows it to nothing, never to a different profile's rows. In the default
+  multi-profile mode
   the account is bound into the plan digest, so plan and execute cannot
   straddle accounts.
 
@@ -279,11 +360,71 @@ other than the one previewed.
   **required whenever `TT_TRANSPORT=http` — including a loopback bind** (SYN-31);
   the server refuses to start without it. A non-loopback bind additionally
   requires TLS termination or an explicit `TT_HTTP_INSECURE=1` acknowledgement
-  (CC-G6). The same Origin/Host and
-  `state` discipline applies to the one-shot OAuth callback listener.
+  (CC-G6). The optional `TT_HTTP_ALLOWED_HOSTS` allowlist (bare host names)
+  additionally pins `Host`, and a browser's `Origin` hostname, to the names
+  clients use to reach the server — on any bind, loopback included. Allowlist
+  entries and the `Host`/`Origin` hostnames are compared in one canonical form,
+  the one the WHATWG URL parser gives (lowercased, IPv6 compressed, numeric IPv4
+  shorthands such as `127.1` expanded to `127.0.0.1`), so no spelling of a
+  listed name slips past or is refused by accident; an IPv6 zone id
+  (`fe80::1%eth0`) is rejected in the allowlist, since no URL can carry one. The
+  same
+  Origin/Host and `state` discipline applies to the one-shot OAuth callback
+  listener. A `Host` whose port is not a decimal 1–65535 cannot be parsed into
+  an authority, so the gate refuses it `403` like any other bad `Host`, not
+  with a bare SDK `400`. A port with leading zeros is the same port — `:080`
+  is re-spelled `:80` before it is compared with the bound port — so a valid
+  spelling is not refused by accident.
 - Bearer comparison is constant-time over fixed-length SHA-256 digests of
   provided vs expected token (no `RangeError`, no length oracle); sessions
   use `randomUUID`.
+- **Resource bounds** (fixed constants, not settings): request bodies are
+  capped at 4 MiB (`413 Payload Too Large`, `connection: close`; a declared
+  `content-length` over the cap is refused before a byte is read), an
+  unparsable body is `400` / `-32700`, at most 128 sessions are live (one more
+  `initialize` is `503` `too many open sessions`; a session still opening
+  holds its slot, so concurrent `initialize` requests cannot overshoot), and a session idle for
+  30 minutes — no request in flight, no open stream, no JSON-RPC call still
+  unanswered — is closed when the next session opens (a client that
+  disconnected mid tool call keeps its session until the handler answers). An authenticated client can therefore not exhaust memory with
+  one body or with abandoned sessions.
+- **Shutdown drains.** Once `close()` starts, a new request gets `503`
+  `Service Unavailable: the server is shutting down`; in-flight `POST` /
+  `DELETE` requests, and every JSON-RPC request whose handler has not answered
+  yet, get up to 10 s to finish (a request accepted before the shutdown may
+  complete during the drain). The second half matters: a client that
+  disconnected mid tool call leaves no open response, yet its handler — a
+  publish, say — is still running, and shutdown no longer aborts it. A request
+  the client cancels (`notifications/cancelled`), or one whose transport closes,
+  stops being waited for; a `notifications/cancelled` for an existing session
+  is still delivered during the drain (every other new request gets `503`), so
+  a cancel can end the drain early. A `POST` whose body finishes arriving after
+  the drain began gets the same `503` `shutting down`, not a `404`
+  `Session not found`. `GET` SSE streams are not waited for, since they have
+  no end. Past the budget a warning is logged and
+  whatever is still in flight is aborted; then the sessions and the listener
+  are closed. A publish mid-upload therefore normally lands its journal
+  outcome instead of being left `unknown`.
+- **Off-loopback DNS rebinding.** Without an allowlist, the `Origin` check off
+  loopback can only require the `Origin` hostname to equal `Host` (the port
+  belongs to the TLS terminator), and after DNS rebinding a hostile page's
+  `Origin` and `Host` agree — so the Host/Origin rule does **not** stop
+  rebinding, and the bearer token is the remaining layer (a browser page does
+  not hold it). Setting `TT_HTTP_ALLOWED_HOSTS` closes it: a rebound name is
+  not on the list, so its `Host` is refused. It is recommended whenever
+  `TT_HTTP_INSECURE=1`; the server warns at startup, and `doctor`'s
+  `transport` row warns, when insecure mode runs without it. On loopback the
+  full authority is pinned and the rule holds either way — which is why both
+  `TT_HTTP_INSECURE=1` warnings (off-box without TLS, allowlist unset) fire only
+  on a non-loopback bind: on loopback the flag is redundant and neither warning
+  would be true.
+- **Known limits.** A request still in flight when the 10 s drain budget runs
+  out is aborted, so a very slow upload can still end with an `unknown`
+  journal outcome.
+- **No local paths through the MCP surface.** An env file that cannot be read
+  or parsed lists as no profiles (every scoped tool `[UNAVAILABLE: …]`), and a
+  failing completion answers an empty list; neither returns a JSON-RPC error
+  carrying the absolute path. The path goes to stderr only.
 - **Stdout purity** (CC-G3): nothing but JSON-RPC protocol frames on stdout,
   ever — logs go to stderr only; enforced by a `console.log` lint ban and a
   boot test asserting stdout emptiness around a tool call.
@@ -301,7 +442,7 @@ publishing requires an explicit re-login opting into `video.publish` /
 Every claim below is a statement about a file in this repository, and each one
 names the file so it can be checked rather than believed.
 
-- **Minimal runtime dependency set** (three direct runtime dependencies), root
+- **Minimal runtime dependency set** (two direct runtime dependencies), root
   `package-lock.json` committed. `npm audit --omit=dev --audit-level=high` runs
   in CI (`.github/workflows/ci.yml`, the ubuntu/Node 22 leg) and fails the
   build on a high or critical advisory in a *runtime* dependency. It is
@@ -328,7 +469,14 @@ names the file so it can be checked rather than believed.
   source-only analysis, no `autobuild`, no competition with `tsc`.
 - Publishing happens **only from CI on a version tag**, never from a laptop:
   `.github/workflows/publish.yml` runs `npm run release:guard` and the full
-  `npm run check` before `npm publish`. The publish allowlist ships only
+  `npm run check` before `npm publish`. The VS Code Marketplace
+  (`publish-vscode.yml`) and MCP Registry (`publish-mcp.yml`) publishes follow
+  the npm publish via `workflow_run` rather than racing it on the same tag, so
+  a tag whose npm publish fails ships nowhere. A prerelease version
+  (`vX.Y.Z-rc.N`, anything with a `-`) ships to npm under the `next` dist-tag
+  only: the Marketplace rejects semver prereleases, so `publish-vscode.yml`
+  skips its publish step for one rather than failing after npm already has
+  the version. The publish allowlist ships only
   `build/src` + `bin/` (no maps, no tests, no source, no env files); no install
   scripts.
 - npm **trusted publishing** (OIDC): the workflow holds no npm token at all —
@@ -336,12 +484,40 @@ names the file so it can be checked rather than believed.
   credential, and `--provenance` is attested from that same identity. The MCP
   Registry publish (`publish-mcp.yml`) is likewise GitHub OIDC with no stored
   secret.
+- **Workflow tokens stay out of reach of install scripts.** `npm ci` runs
+  every devDependency's lifecycle scripts, so `ci.yml` declares a top-level
+  `permissions: contents: read` (nothing in it writes to the repository), and
+  `publish.yml` checks out with `persist-credentials: false`, so its write
+  token never sits in `.git/config` while those scripts run (`gh release`
+  reads `GH_TOKEN` instead). The npm that runs next to the OIDC-capable
+  publish job is pinned (`npm install -g npm@12.1.0`; trusted publishing needs
+  ≥ 11.5.1, Node 22 ships 10.x) rather than a floating `npm@latest`.
+- **The `workflow_run` followers check what they follow.** A `workflow_run`
+  trigger matches the upstream workflow by *name*, and both followers hold a
+  credential (`VSCE_PAT`; the repository's OIDC identity for the MCP Registry).
+  So neither trusts a bare `conclusion == 'success'`: each also requires the
+  run's `path` to be `.github/workflows/publish.yml`, its `event` to be `push`
+  (which excludes pull-request runs, including Dependabot's, that report this
+  repository as their head) and its `head_repository` to be this repository,
+  and checks out the run's `head_sha` — the tagged commit, not `main`'s HEAD.
+  Defense in depth, not a response to a known exploit. `workflow_dispatch`
+  remains the manual override, but it is not a bypass: a dispatch must run on
+  a `v*` tag ref and runs `npm run release:guard` (tag, every version field
+  and the changelog agreeing) before it publishes, since no *Publish* run
+  checked them for it.
+- **`mcp-publisher` is pinned and verified.** `publish-mcp.yml` downloads a
+  fixed release of the MCP Registry's `mcp-publisher` (not `releases/latest`)
+  and checks its sha256 against the value taken from that release's published
+  checksums file before running it — the job holds an OIDC token that can
+  register under the repository's identity, and every action in the
+  workflows is already pinned to a commit SHA.
 - **The one long-lived secret is `VSCE_PAT`** (`publish-vscode.yml`), the Azure
   DevOps token for the Visual Studio Marketplace, which offers no OIDC
   equivalent. It is scoped to *Marketplace → Manage*, lives only as a repository
-  secret, and is used in exactly one step. Naming it here rather than claiming
-  "no long-lived tokens" is the point: the npm path has none, the Marketplace
-  path has one, and that is the residual.
+  secret, and is used in exactly one step, which the job reaches only after a
+  successful npm publish of the same tag (or on a manual dispatch). Naming it
+  here rather than claiming "no long-lived tokens" is the point: the npm path
+  has none, the Marketplace path has one, and that is the residual.
 
 ## Platform-compliance posture (TikTok ToS)
 
@@ -360,17 +536,54 @@ names the file so it can be checked rather than believed.
 
 ## Compatibility and deprecation policy
 
-The published surface is the **tool set, their inputs, the `TT_*` environment
-variables and the CLI** — not the module layout, not the shape of an internal
+The published surface is everything a caller can observe: the **tool set**,
+their **input schemas**, the **`ToolResult` envelope** and the fields tools
+return inside it, the **error-code catalog** (`docs/TOOLS.md` § 3.0), the
+**closed `hints` vocabularies** — the hint types and the `user_action` list,
+both enumerable at runtime from `src/mcp/result.ts` — the **`TT_*` environment
+variables** and the **CLI**. Not the module layout, not the shape of an internal
 type. Everything on that surface follows SemVer, and every change to it lands
 in [CHANGELOG.md](../CHANGELOG.md) under `Added`, `Changed`, `Deprecated`,
 `Removed`, `Fixed` or `Security` (G-10).
 
-**Breaking** — major only: removing a tool, removing or renaming a tool input,
-narrowing what an input accepts, removing a `TT_*` variable, or changing a
-default in a way that changes *what gets posted* (for example the AIGC label
-default). Adding a tool, adding an optional input, or widening an accepted set
-is a minor.
+The catalog and the vocabularies are on that list for the same reason the tool
+names are: a model *branches* on `error.code` and on `hint.type`. Renaming
+`rate_limited`, or dropping a member of the `user_action` list, breaks a caller
+exactly as removing a tool does — and breaks it more quietly, because the call
+still returns and only the branch stops matching. A closed vocabulary is a
+promise about what can come back; changing it silently spends that promise.
+
+**Breaking** — major only:
+
+- removing a tool, or removing or renaming a tool input;
+- narrowing what an input accepts;
+- removing or renaming a field a tool returns, or a field of the `ToolResult`
+  envelope;
+- removing or renaming an error code, or broadening what an existing code
+  covers so a caller's branch now catches a failure it did not before;
+- removing a member of a closed `hints` vocabulary;
+- removing a `TT_*` variable;
+- changing a default in a way that changes *what gets posted* (for example the
+  AIGC label default).
+
+**Minor** — adding a tool, an optional input, a returned field, an error code
+or a hint type, and widening what an input accepts. Growth is safe in the
+direction that matters: a caller that has never heard of a new member treats it
+the way it already treats an unrecognized one, whereas a caller that loses a
+member it was matching on gets silence.
+
+**Worked example — the one removal that was not breaking.** `wait_for_audit`
+was dropped from the `user_action` vocabulary on 2026-08-31, which has exactly
+the shape the list above calls breaking, and it was correctly not treated as
+one. Nothing observable changed: the name existed only as a member of the type,
+no code path ever emitted it, so no result ever carried it and no caller can
+have branched on it — the vocabulary shrank, the wire did not. The breaking
+case is removing a member callers actually received, and that is the case this
+policy is about; a member no result ever contained is a comment, and deleting a
+comment is not a contract change. (The release was pre-1.0 besides, where the
+clause below applies anyway.) It is written down because a policy that
+retroactively condemns a change the project made deliberately, without saying
+why that change was fine, is a policy the next maintainer routes around.
 
 **Grace period.** Nothing on that surface is removed without first being
 deprecated in a release, and a deprecated thing keeps working for **at least
@@ -382,11 +595,40 @@ grace period:
   that actually reaches the caller;
 - a deprecated tool's result carries the same notice as a `hint`, because a
   client that never re-reads `tools/list` still sees the result;
-- a deprecated environment variable keeps being honored and logs a warning
-  **once at startup** (stderr — never stdout, see *Transport*), and
-  `tiktok-mcp-ai doctor` lists it under its configuration report;
+- a deprecated environment variable keeps being **honored**, and says so once
+  at startup on stderr (never stdout, see *Transport*) and again in
+  `tiktok-mcp-ai doctor` — no variable is deprecated yet and that trigger does
+  not exist, so see *What the first variable deprecation has to build* below
+  for what it costs;
 - the replacement ships in the *same* release as the deprecation, so there is
   never a window where the old way is discouraged and the new way is absent.
+
+**What the first variable deprecation has to build.** No `TT_*` variable is
+deprecated today, so the clause above is unexercised rather than unmet — and
+it is spelled out here so it stays that way. The release that first deprecates
+or renames a variable owes this work in the same commit. Both channels the
+clause promises already exist; only the trigger is missing:
+
+- **The carrier is live.** Anything pushed into `EnvFileSnapshot.warnings` is
+  already printed once at startup on stderr by the bootstrap in `src/index.ts`
+  and listed by `doctor`'s `env-file` check (`src/cli/doctor.ts`). Nothing new
+  is needed to reach either audience.
+- **The registry is missing.** There is no map of old name → new name. It has
+  to be consulted where a key is classified — `isKnownKey` in
+  `src/core/config.ts` — and it has to make the deprecated name *read and
+  honored*, not merely noticed. Today an unrecognized `TT_*` key is reported as
+  **"ignored"**, which is the opposite of what this policy promises, so a rename
+  that stopped there would be a silent breakage wearing a warning.
+- **The `process.env` path needs it too.** `parseSnapshot` scans only the env
+  file. A `TT_*` passed in an MCP client's `env` block never reaches it, and
+  `loadSettings` reads the names it knows and ignores the rest without a
+  word — so an operator who configures through their client, which is the
+  common case, would see nothing. The registry has to be consulted on both
+  paths, or the promise holds only for installations that use an env file.
+
+None of this is built, and it should not be built before there is a variable to
+put in it. Standing machinery for a hypothetical deprecation is how a repository
+ends up documenting a feature nobody wrote.
 
 **Exception — security.** A control that has to change to close a
 vulnerability changes immediately, in a patch if need be, and the changelog

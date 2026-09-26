@@ -5,6 +5,11 @@ on:
     branches: [main, master]
   pull_request:
 
+# Read-only token: nothing here writes to the repository, and a push-to-main
+# run executes every devDependency's lifecycle scripts.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
@@ -23,7 +28,9 @@ jobs:
             node: 24
           # Advisory early-warning leg on the next major. It may fail because
           # the release does not exist yet, or on a genuine forward-compat
-          # break — either way it is informational, and it runs no coverage.
+          # break — either way it is informational. It runs the full
+          # `npm run check` (coverage:run + coverage:gate included); only the
+          # separate coverage step and the Codecov upload are ubuntu/22-only.
           - os: ubuntu-latest
             node: 26
             advisory: true
@@ -45,7 +52,7 @@ jobs:
       # a Codecov outage must not fail CI. Runs once, on the same ubuntu/Node 22 leg.
       - if: matrix.node == 22 && matrix.os == 'ubuntu-latest'
         continue-on-error: true
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage/lcov.info
           fail_ci_if_error: false

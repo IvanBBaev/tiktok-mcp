@@ -53,6 +53,21 @@ One app can serve several TikTok accounts. You do **not** need one app per
 account — multiple accounts are handled by profiles on this side
 ([docs/AUTH.md](AUTH.md) § Profiles).
 
+**About the terms and privacy URLs.** The portal is asking about *your* app: who
+operates it, what it does with the data it pulls from TikTok, and how a user
+withdraws consent. Whatever you enter has to be a page you publish and control,
+because it is the answer TikTok and your users hold *you* to.
+
+This project publishes its own
+[Privacy Policy](https://ivanbbaev.github.io/tiktok-mcp/privacy.html) and
+[Terms of Service](https://ivanbbaev.github.io/tiktok-mcp/terms.html), and those
+are **not** the URLs to enter. They cover the distribution of this software and
+the data behavior of the code you are about to run — where tokens are stored,
+which hosts they are ever sent to, what leaves your machine. That is the factual
+half of what your own policy has to state, since your app's data flows *are* this
+server's data flows. Read them as source material and as a description of the
+software; then write your policy under your own name.
+
 ## 2. Add the products
 
 Products are added on the app page. Add only what you need; every product you
@@ -196,6 +211,12 @@ privacy levels `creator_info` returned, and its errors explain the restriction.
 The rules are TikTok's
 ([Content sharing guidelines](https://developers.tiktok.com/doc/content-sharing-guidelines));
 plan for them if you intend to publish publicly.
+
+The submission asks again for the terms and privacy URLs of
+[§ 1](#1-create-the-app), and here they are mandatory rather than optional: a
+placeholder or a dead link is an easy rejection. They must be pages you publish
+— see the note in § 1 for why this project's Privacy Policy and Terms of Service
+are reference material and not something to submit as your own.
 
 ## 8. Verify a domain for URL posting
 

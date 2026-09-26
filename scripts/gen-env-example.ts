@@ -240,6 +240,14 @@ export const SECTIONS: readonly Section[] = [
         comment: ['1 acknowledges a non-loopback bind without TLS termination in front.'],
         render: 'default',
       },
+      {
+        name: 'TT_HTTP_ALLOWED_HOSTS',
+        comment: [
+          'Comma-separated host names the http transport answers to (Host and Origin);',
+          'recommended past loopback, where it is what stops DNS rebinding.',
+        ],
+        render: 'optional',
+      },
     ],
   },
   {
@@ -265,11 +273,6 @@ export const SECTIONS: readonly Section[] = [
       {
         name: 'TT_CHUNK_RETRIES',
         comment: ['Per-chunk upload retry cap (identical Content-Range on replay).'],
-        render: 'default',
-      },
-      {
-        name: 'TT_MAX_CONCURRENT',
-        comment: ['Per-host concurrency semaphore.'],
         render: 'default',
       },
       {

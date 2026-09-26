@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   Open Graph / social share banner for tiktok-mcp-ai (1200x630).
-  This SVG is the source of truth for the social card. Most crawlers
-  (Slack, Discord, iMessage, Twitter/X) prefer a raster image, so a
-  1200x630 raster og-image.png SHOULD be exported from this file and
-  added alongside it; point og:image at the PNG once it exists.
+  This SVG is the source of truth for the social card. Facebook,
+  LinkedIn, Slack and Twitter/X do not render an SVG og:image at all,
+  so the sibling raster og-image.png — exported from this file at
+  1200x630 — is what the og:image / twitter:image tags point at.
+  Re-export it whenever this file changes.
 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="tiktok-mcp-ai — Unofficial TikTok MCP Server">
   <defs>
@@ -60,5 +61,5 @@
   </g>
 
   <!-- Footer URL -->
-  <text x="96" y="566" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="22" fill="#5ff6f0">github.com/IvanBBaev/tiktok-mcp-ai</text>
+  <text x="96" y="566" font-family="'JetBrains Mono', ui-monospace, monospace" font-size="22" fill="#5ff6f0">github.com/IvanBBaev/tiktok-mcp</text>
 </svg>

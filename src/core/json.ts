@@ -169,28 +169,30 @@ function encodePlainObject(
     throw unsupported(path, 'an object with symbol-keyed properties');
   }
 
-  // Read every property exactly once (a getter must not be invoked twice), then
-  // drop the undefined-valued ones — absent ≡ undefined ≡ omitted.
-  const entries: Array<[string, unknown]> = [];
+  // Read every property exactly once, in the object's own key order (a getter
+  // must not be invoked twice, and must not be invoked in an order that depends
+  // on the other keys), then drop the undefined-valued ones — absent ≡
+  // undefined ≡ omitted.
+  const items = new Map<string, unknown>();
   for (const key of Object.keys(value)) {
     const item = value[key];
     if (item === undefined) continue;
-    entries.push([key, item]);
+    items.set(key, item);
   }
-  entries.sort(([a], [b]) => compareKeys(a, b));
 
-  const parts = entries.map(
-    ([key, item]) =>
-      `${JSON.stringify(key)}:${encode(item, childPath(path, key), ancestors)}`,
-  );
+  // Ascending UTF-16 code-unit order — no locale, no `Intl`. That is exactly
+  // what the default comparator does to an array of strings (ECMA-262
+  // SortCompare compares the elements' string values with `<`), so the order is
+  // specified and environment-independent without a hand-written comparator.
+  // A hand-written one would have to carry an equal case for totality that
+  // `Object.keys`' distinct keys can never reach and no test could ever pin.
+  const parts = [...items.keys()]
+    .sort()
+    .map(
+      (key) =>
+        `${JSON.stringify(key)}:${encode(items.get(key), childPath(path, key), ancestors)}`,
+    );
   return `{${parts.join(',')}}`;
-}
-
-/** Ascending UTF-16 code-unit order — no locale, no `Intl`. */
-function compareKeys(a: string, b: string): number {
-  if (a < b) return -1;
-  if (a > b) return 1;
-  return 0;
 }
 
 function isPlainObject(value: object): boolean {

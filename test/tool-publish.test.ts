@@ -315,6 +315,57 @@ test('account is a filter here, not a profile selection (§ 2.2 exception)', asy
   );
 });
 
+test('the account filter is compared canonically, as a profile selection is (CC-F4)', async () => {
+  for (const account of ['brand', ' Brand ', 'BRAND']) {
+    const result = await withJournal(
+      [
+        { attemptId: 'A1', ts: AT(0), profile: 'DEFAULT', outcome: 'ok' },
+        { attemptId: 'A2', ts: AT(1), profile: 'BRAND', outcome: 'ok' },
+      ],
+      async (ctx) => listPublishJournalTool.handler({ account }, ctx),
+    );
+
+    const data = dataOf(result);
+    assert.equal(data.meta.total_matching, 1, `${JSON.stringify(account)} names BRAND`);
+    assert.deepEqual(
+      data.entries.map((entry) => entry.account),
+      ['BRAND'],
+    );
+  }
+});
+
+test('under TT_LOCK_PROFILE the journal lists only the locked profile, and account cannot widen it', async () => {
+  const entries: readonly Journalled[] = [
+    { attemptId: 'A1', ts: AT(0), profile: 'DEFAULT', outcome: 'ok' },
+    { attemptId: 'A2', ts: AT(1), profile: 'BRAND', outcome: 'ok' },
+    { attemptId: 'A3', ts: AT(2), profile: 'BRAND', outcome: 'ok' },
+  ];
+  const locked = (ctx: ToolCtx): ToolCtx => ({
+    ...ctx,
+    api: { ...ctx.api, settings: { ...ctx.api.settings, lockProfile: 'BRAND' } },
+  });
+  const listed = async (args: { account?: string }): Promise<ListJournalData> =>
+    dataOf(
+      await withJournal(entries, async (ctx) =>
+        listPublishJournalTool.handler(args, locked(ctx)),
+      ),
+    );
+
+  // No account: the lock alone filters — DEFAULT's attempt is not visible.
+  const all = await listed({});
+  assert.equal(all.meta.total_matching, 2);
+  assert.deepEqual(
+    all.entries.map((entry) => entry.account),
+    ['BRAND', 'BRAND'],
+  );
+  // The locked name in any spelling is the same answer.
+  assert.equal((await listed({ account: ' brand ' })).meta.total_matching, 2);
+  // Another name narrows to nothing; it never reaches past the lock.
+  const other = await listed({ account: 'default' });
+  assert.equal(other.meta.total_matching, 0);
+  assert.deepEqual(other.entries, []);
+});
+
 test('omitting account lists every profile — an audit read defaults to everything', async () => {
   const result = await withJournal(
     [
@@ -324,6 +375,28 @@ test('omitting account lists every profile — an audit read defaults to everyth
     async (ctx) => listPublishJournalTool.handler({}, ctx),
   );
   assert.equal(dataOf(result).meta.total_matching, 2);
+});
+
+test('a blank account names nobody, so it filters nothing — it does not match nothing', async () => {
+  for (const account of ['', ' ', '\t  ']) {
+    const result = await withJournal(
+      [
+        { attemptId: 'A1', ts: AT(0), profile: 'DEFAULT', outcome: 'ok' },
+        { attemptId: 'A2', ts: AT(1), profile: 'BRAND', outcome: 'ok' },
+      ],
+      async (ctx) => listPublishJournalTool.handler({ account }, ctx),
+    );
+    const data = dataOf(result);
+    assert.equal(
+      data.meta.total_matching,
+      2,
+      `${JSON.stringify(account)} lists every profile`,
+    );
+    assert.deepEqual(
+      data.entries.map((entry) => entry.account),
+      ['BRAND', 'DEFAULT'],
+    );
+  }
 });
 
 test('since is inclusive of its own instant', async () => {
@@ -353,6 +426,48 @@ test('an unparsable since is an argument error, not an empty answer', async () =
   assert.match(String(result.error?.message), /ISO-8601/u);
   // No silent zero-result answer: a model would read that as "never published".
   assert.equal(result.data, undefined);
+});
+
+test('since is strict on its form: what Date.parse merely tolerates is refused', async () => {
+  // "1" and "Jan 1 2026" parse; a zone-less date-time parses in the host's
+  // local time. A well-formed but impossible date passes the form and fails
+  // the parse. All four are argument errors.
+  for (const since of ['1', 'Jan 1 2026', '2026-01-01T12:05:00', '2026-13-45']) {
+    const result = await withJournal(
+      [{ attemptId: 'A1', ts: AT(0), outcome: 'ok' }],
+      async (ctx) => listPublishJournalTool.handler({ since }, ctx),
+    );
+    assert.equal(result.ok, false, `${since} must be refused`);
+    assert.equal(result.error?.code, 'invalid_params', since);
+    assert.equal(result.data, undefined, since);
+  }
+});
+
+test('since takes a bare date as UTC midnight, and a Z or an explicit offset', async () => {
+  const cases: readonly [string, readonly string[]][] = [
+    ['2026-01-01', [AT(10), AT(5), AT(0)]],
+    ['2026-01-02', []],
+    ['2026-01-01T12:05Z', [AT(10), AT(5)]],
+    ['2026-01-01T12:05:00.000Z', [AT(10), AT(5)]],
+    ['2026-01-01T14:05:00+02:00', [AT(10), AT(5)]],
+    ['2026-01-01T07:10:00-05:00', [AT(10)]],
+  ];
+  for (const [since, expected] of cases) {
+    const result = await withJournal(
+      [
+        { attemptId: 'A1', ts: AT(0), outcome: 'ok' },
+        { attemptId: 'A2', ts: AT(5), outcome: 'ok' },
+        { attemptId: 'A3', ts: AT(10), outcome: 'ok' },
+      ],
+      async (ctx) => listPublishJournalTool.handler({ since }, ctx),
+    );
+    assert.equal(result.ok, true, since);
+    assert.deepEqual(
+      dataOf(result).entries.map((entry) => entry.ts),
+      expected,
+      since,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -26,6 +26,7 @@ import test from 'node:test';
 
 import fc from 'fast-check';
 
+import type { Clock } from '../src/core/clock.js';
 import { readEnvFile, readProfile } from '../src/core/config.js';
 import { isTikTokError } from '../src/core/errors.js';
 import type { LookupFn } from '../src/core/http.js';
@@ -50,6 +51,7 @@ import {
   type FetchStub,
   type MockClock,
   type RecordedCall,
+  type RecordingFetchStub,
   scriptFetch,
   withFetch,
 } from './helpers.js';
@@ -538,7 +540,7 @@ test('the authorization code is registered as a secret before it is sent', async
 // ensureFreshAccessToken — the happy paths
 // ---------------------------------------------------------------------------
 
-test('a token outside the skew window is used as is, with no request at all', async () => {
+test('cc-a4: a token outside the skew window is used as is, with no request at all', async () => {
   const fx = await fixture();
   try {
     // An empty script: any request would throw ScriptFetchExhaustedError.
@@ -558,7 +560,7 @@ test('a token outside the skew window is used as is, with no request at all', as
   }
 });
 
-test('a token inside the skew window is refreshed proactively', async () => {
+test('cc-a4: a token inside the skew window is refreshed proactively', async () => {
   const fx = await fixture();
   try {
     await fx.write(storedTokens({ TT_TOKEN_EXPIRES_AT: INSIDE_SKEW_EXPIRES_AT }));
@@ -576,6 +578,34 @@ test('a token inside the skew window is refreshed proactively', async () => {
     const body = form(only(stub.calls));
     assert.equal(body.get('grant_type'), 'refresh_token');
     assert.equal(body.get('refresh_token'), 'rft.stored');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('cc-h2: an unparseable expiry on disk is rejected before any freshness decision', async () => {
+  // The freshness comparison in `isFresh` has no NaN guard: nothing that
+  // reaches it can carry an expiry `Date.parse` rejects. This pins the half of
+  // that invariant that lives at this module's boundary — a stored expiry that
+  // does not parse is refused by `readProfile` while the credentials are being
+  // read, before a token set exists, before the freshness decision, and before
+  // a single request goes out.
+  const fx = await fixture();
+  try {
+    await fx.write(storedTokens({ TT_TOKEN_EXPIRES_AT: 'tomorrow' }));
+    const stub = scriptFetch([]);
+    await assert.rejects(
+      withFetch(stub, () =>
+        ensureFreshAccessToken('DEFAULT', {
+          env: fx.env,
+          settings: fx.settings,
+          clock: fx.clock,
+          logger: fx.logger,
+        }),
+      ),
+      (err: unknown) => isTikTokError(err) && err.code === 'invalid_timestamp',
+    );
+    assert.equal(stub.calls.length, 0);
   } finally {
     await fx.cleanup();
   }
@@ -630,7 +660,11 @@ test('the refreshed token is cached: a second call issues no request', async () 
   }
 });
 
-test('force refreshes a token that is still perfectly fresh', async () => {
+test('cc-a14: force refreshes a token that is still perfectly fresh', async () => {
+  // The CC-A14 branch with no sibling in play: the re-read under the lock finds
+  // this process's own credentials, so a naive "adopt what is on disk" would
+  // hand the 401 replay back the very token TikTok just rejected. `act.new`
+  // plus exactly one request is what says the token on disk was not adopted.
   const fx = await fixture();
   try {
     const stub = scriptFetch([tokenResponse()]);
@@ -722,6 +756,83 @@ test('cc-a2: two concurrent callers produce exactly one refresh request', async 
     });
 
     assert.equal(calls.length, 1);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a refresh that settles after resetTokenCache does not evict the newer in-flight refresh', async () => {
+  const fx = await fixture();
+  try {
+    await fx.write(storedTokens({ TT_TOKEN_EXPIRES_AT: INSIDE_SKEW_EXPIRES_AT }));
+
+    // Every token handed out expires inside the refresh skew, so no caller can
+    // short-circuit on the adopted set: a third caller either joins the
+    // in-flight refresh or starts a refresh of its own, and the fetch count
+    // tells the two apart.
+    const firstGate = deferred<Response>();
+    const later = [
+      tokenResponse({ access_token: 'act.r2', refresh_token: 'rft.r2', expires_in: 60 }),
+      tokenResponse({ access_token: 'act.r3', refresh_token: 'rft.r3', expires_in: 60 }),
+    ];
+    const calls: string[] = [];
+    const stub: FetchStub = (input) => {
+      calls.push(String(input));
+      if (calls.length === 1) return firstGate.promise;
+      const next = later.shift();
+      assert.ok(next !== undefined, 'more refresh requests than the test scripted');
+      return Promise.resolve(next);
+    };
+    const deps = {
+      env: fx.env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+    };
+
+    await withFetch(stub, async () => {
+      // R1 takes the env lock and holds its request open.
+      const first = ensureFreshAccessToken('DEFAULT', deps);
+      await waitUntil(() => calls.length === 1, 'the first refresh request');
+
+      // The cache is dropped mid-flight and R2 takes the single-flight slot;
+      // it waits on the lock R1 still holds.
+      resetTokenCache();
+      let secondDone = false;
+      const second = ensureFreshAccessToken('DEFAULT', deps).finally(() => {
+        secondDone = true;
+      });
+      await flush(20);
+
+      // R1 settles. Its cleanup must leave R2's slot alone.
+      firstGate.resolve(
+        tokenResponse({
+          access_token: 'act.r1',
+          refresh_token: 'rft.r1',
+          expires_in: 60,
+        }),
+      );
+      assert.equal(await first, 'act.r1');
+
+      let thirdDone = false;
+      const third = ensureFreshAccessToken('DEFAULT', deps).finally(() => {
+        thirdDone = true;
+      });
+
+      // Let the lock waits come round until every caller has settled — a
+      // third caller that wrongly refreshed on its own waits on the lock too.
+      const giveUpAt = Date.now() + 10_000;
+      while (!secondDone || !thirdDone) {
+        if (Date.now() > giveUpAt) assert.fail('timed out waiting for the refreshes');
+        await fx.clock.advance(150);
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 1);
+        });
+      }
+
+      assert.equal(calls.length, 2, 'the third caller started a refresh of its own');
+      assert.deepEqual(await Promise.all([second, third]), ['act.r2', 'act.r2']);
+    });
   } finally {
     await fx.cleanup();
   }
@@ -938,6 +1049,85 @@ test('a refresh token pinned in the process environment is not spent twice', asy
   }
 });
 
+test('a pinned refresh token stays spent however many rotations follow it', async () => {
+  // Remembering only the *last* spent token is not enough: after two rotations
+  // the pinned value is no longer the most recent spend, yet it is just as
+  // dead. The third refresh must spend the second rotation, not replay the pin.
+  const fx = await fixture();
+  try {
+    const env = { ...fx.env, TT_REFRESH_TOKEN: 'rft.pinned-in-client-config' };
+    const stub = scriptFetch([
+      tokenResponse({ access_token: 'act.first', refresh_token: 'rft.rotated-1' }),
+      tokenResponse({ access_token: 'act.second', refresh_token: 'rft.rotated-2' }),
+      tokenResponse({ access_token: 'act.third', refresh_token: 'rft.rotated-3' }),
+      tokenResponse({ access_token: 'act.fourth', refresh_token: 'rft.rotated-4' }),
+    ]);
+    const deps = {
+      env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+      force: true,
+    };
+
+    await withFetch(stub, async () => {
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.first');
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.second');
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.third');
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.fourth');
+    });
+
+    assert.deepEqual(
+      stub.calls.map((call) => form(call).get('refresh_token')),
+      ['rft.pinned-in-client-config', 'rft.rotated-1', 'rft.rotated-2', 'rft.rotated-3'],
+    );
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('cc-a6: the invalid_grant re-read refuses any token spent earlier, not only the rejected one', async () => {
+  // The pin is spent by the first refresh. The second spends the rotation it
+  // received and is told `invalid_grant`; the re-read then hands back the pin
+  // (the process env wins, CC-F2). That token differs from the one just
+  // rejected but was spent before, so a retry with it is a guaranteed second
+  // `invalid_grant` — the refresh has to end terminally without sending it.
+  const fx = await fixture();
+  try {
+    const env = { ...fx.env, TT_REFRESH_TOKEN: 'rft.pinned-in-client-config' };
+    const stub = scriptFetch([
+      tokenResponse({ access_token: 'act.first', refresh_token: 'rft.rotated-1' }),
+      oauthErrorResponse('invalid_grant'),
+    ]);
+    const deps = {
+      env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+      force: true,
+    };
+
+    await withFetch(stub, async () => {
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.first');
+      await assert.rejects(ensureFreshAccessToken('DEFAULT', deps), (err: unknown) => {
+        assert.ok(isTikTokError(err));
+        assert.equal(err.code, 'auth_expired');
+        assert.equal(err.retryable, false);
+        return true;
+      });
+    });
+
+    // Two requests, never a third carrying the pin again.
+    assert.deepEqual(
+      stub.calls.map((call) => form(call).get('refresh_token')),
+      ['rft.pinned-in-client-config', 'rft.rotated-1'],
+    );
+    assert.doesNotMatch(warnings(fx.records), /retrying once/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // ensureFreshAccessToken — degradation (CC-H3) and the env lock
 // ---------------------------------------------------------------------------
@@ -969,6 +1159,49 @@ test('cc-h3: a failed write keeps the new token in memory instead of discarding 
     assert.equal(stub.calls.length, 1);
     assert.match(warnings(fx.records), /could not be written to the env file/);
     // The old file is intact — a half-written credential set is worse than none.
+    assert.equal((await fx.read())['TT_REFRESH_TOKEN'], 'rft.stored');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('cc-h3: a write that fails with a non-Error still degrades to a warning', async () => {
+  const fx = await fixture();
+  try {
+    await fx.write(storedTokens({ TT_TOKEN_EXPIRES_AT: INSIDE_SKEW_EXPIRES_AT }));
+    // EPERM *is* retryable, so `core/config` waits on the clock between rename
+    // attempts (core/config.ts:714) — and `Clock.sleep` rejects with
+    // `signal.reason` verbatim, which `AbortSignal.abort(reason)` lets be any
+    // value at all. That is how the write path answers with something that is
+    // not an Error, and the degradation has to survive it.
+    const cancelled = AbortSignal.abort('the retry wait was cancelled');
+    const clock: Clock = {
+      now: () => fx.clock.now(),
+      // Only the rename retry sleeps without a signal of its own; the env-lock
+      // heartbeat brings its own and is left to run normally.
+      sleep: async (ms, signal) => {
+        await fx.clock.sleep(ms, signal ?? cancelled);
+      },
+    };
+    const stub = scriptFetch([tokenResponse()]);
+
+    const token = await withFetch(stub, () =>
+      ensureFreshAccessToken('DEFAULT', {
+        env: fx.env,
+        settings: fx.settings,
+        clock,
+        logger: fx.logger,
+        rename: (): Promise<void> =>
+          Promise.reject(Object.assign(new Error('file is locked'), { code: 'EPERM' })),
+      }),
+    );
+
+    assert.equal(token, 'act.new');
+    const warned = fx.records.find(
+      (r) => r.level === 'warn' && r.msg.includes('could not be written to the env file'),
+    );
+    assert.equal(warned?.fields?.['reason'], 'unknown');
+    // Same guarantee as above: the old file survives the failed write.
     assert.equal((await fx.read())['TT_REFRESH_TOKEN'], 'rft.stored');
   } finally {
     await fx.cleanup();
@@ -1028,7 +1261,7 @@ test('a lock held by another process surfaces env_file_busy as retryable', async
   }
 });
 
-test('a busy lock over a file a sibling has already refreshed is adopted, not surfaced', async () => {
+test('cc-a14: a busy lock over a file a sibling has already refreshed is adopted, not surfaced', async () => {
   const fx = await fixture({ envLockWaitMs: 0 });
   try {
     const deps = {
@@ -1062,7 +1295,7 @@ test('a busy lock over a file a sibling has already refreshed is adopted, not su
   }
 });
 
-test('a forced refresh blocked by the lock surfaces env_file_busy rather than replaying', async () => {
+test('cc-a14: a forced refresh blocked by the lock surfaces env_file_busy rather than replaying', async () => {
   // The file holds exactly the token TikTok just rejected, and the lock that
   // would allow a refresh is held elsewhere. Handing the same token back would
   // turn a retryable situation into a second 401.
@@ -1129,6 +1362,54 @@ test('a token another process wrote while we waited is adopted without a request
   }
 });
 
+test('the ordinary half of single flight adopts a sibling’s token without a request', async () => {
+  const fx = await fixture();
+  try {
+    const deps = {
+      env: fx.env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+    };
+    const stub = scriptFetch([]);
+
+    await withFetch(stub, async () => {
+      // A cold start adopts the stored set as it stands: it is still fresh.
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.stored');
+
+      // Time moves into the skew window of that set, so the next call is due
+      // for a proactive refresh — and a sibling rotates the file first.
+      fx.clock.setNow(Date.parse('2026-01-01T23:59:00.000Z'));
+      await fx.write(
+        storedTokens({
+          TT_ACCESS_TOKEN: 'act.from-sibling',
+          TT_TOKEN_EXPIRES_AT: '2026-01-03T00:00:00.000Z',
+          TT_REFRESH_TOKEN: 'rft.sibling',
+        }),
+      );
+
+      // No `force` here: this is the proactive half, where freshness on disk
+      // alone settles it (ARCHITECTURE § 7.3 step 1). The forced half is the
+      // 401 replay, which additionally demands a *different* token.
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.from-sibling');
+    });
+
+    assert.equal(stub.calls.length, 0, 'a fresh token on disk must cost no request');
+    // Nor a refresh-token use — the sibling's rotation is intact on the file.
+    assert.equal((await fx.read())['TT_REFRESH_TOKEN'], 'rft.sibling');
+    assert.ok(
+      fx.records.some(
+        (r) =>
+          r.level === 'debug' &&
+          r.msg === 'adopted a token another process had already refreshed',
+      ),
+      'the adoption must be visible in the log',
+    );
+  } finally {
+    await fx.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // the TT_OAUTH_BASE_URL escape hatch (test-only, loopback-only)
 // ---------------------------------------------------------------------------
@@ -1182,7 +1463,7 @@ test('revoke posts the access token and clears the local sextet', async () => {
   try {
     await fx.write({ ...storedTokens(), UNRELATED_KEY: 'left-alone' });
     const stub = scriptFetch([new Response('{}', { status: 200 })]);
-    await withFetch(stub, () =>
+    const outcome = await withFetch(stub, () =>
       revokeToken('DEFAULT', {
         env: fx.env,
         settings: fx.settings,
@@ -1190,6 +1471,12 @@ test('revoke posts the access token and clears the local sextet', async () => {
         logger: fx.logger,
       }),
     );
+    assert.deepEqual(outcome, {
+      profile: 'DEFAULT',
+      envFilePath: fx.envFile,
+      upstream: 'revoked',
+      cleared: true,
+    });
 
     const call = only(stub.calls);
     assert.equal(call.url, REVOKE_URL);
@@ -1216,11 +1503,40 @@ test('revoke posts the access token and clears the local sextet', async () => {
   }
 });
 
-test('revoke clears the local credentials even when tiktok rejects the call', async () => {
+/**
+ * A fetch stub that rewrites the env file while the first revoke is in flight —
+ * a refresh in another process rotating the token between `revokeToken`'s first
+ * read and its env lock.
+ */
+function rotatingFetch(
+  fx: Fixture,
+  responses: Response[],
+  rotated: Record<string, string>,
+): RecordingFetchStub {
+  const inner = scriptFetch(responses);
+  let rotatedOnce = false;
+  const stub = async (input: string | URL, init?: RequestInit): Promise<Response> => {
+    if (!rotatedOnce) {
+      rotatedOnce = true;
+      await fx.write(rotated);
+    }
+    return await inner(input, init);
+  };
+  return Object.defineProperty(stub, 'calls', {
+    get: () => inner.calls,
+    enumerable: true,
+  }) as RecordingFetchStub;
+}
+
+test('revoke also revokes a token a refresh rotated in before the lock', async () => {
   const fx = await fixture();
   try {
-    const stub = scriptFetch([oauthErrorResponse('invalid_request', 400)]);
-    await withFetch(stub, () =>
+    const stub = rotatingFetch(
+      fx,
+      [new Response('{}', { status: 200 }), new Response('{}', { status: 200 })],
+      storedTokens({ TT_ACCESS_TOKEN: 'act.rotated', TT_REFRESH_TOKEN: 'rft.rotated' }),
+    );
+    const outcome = await withFetch(stub, () =>
       revokeToken('DEFAULT', {
         env: fx.env,
         settings: fx.settings,
@@ -1229,8 +1545,103 @@ test('revoke clears the local credentials even when tiktok rejects the call', as
       }),
     );
 
+    assert.deepEqual(outcome, {
+      profile: 'DEFAULT',
+      envFilePath: fx.envFile,
+      upstream: 'revoked',
+      cleared: true,
+    });
+    assert.equal(stub.calls.length, 2);
+    assert.deepEqual(
+      stub.calls.map((call) => [call.url, form(call).get('token')]),
+      [
+        [REVOKE_URL, 'act.stored'],
+        [REVOKE_URL, 'act.rotated'],
+      ],
+    );
+    const stored = await fx.read();
+    assert.equal(stored['TT_ACCESS_TOKEN'], '');
+    assert.equal(stored['TT_REFRESH_TOKEN'], '');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('with a rotated token the reported upstream result is the second revoke', async () => {
+  const fx = await fixture();
+  try {
+    const stub = rotatingFetch(
+      fx,
+      [new Response('{}', { status: 200 }), oauthErrorResponse('invalid_request', 400)],
+      storedTokens({ TT_ACCESS_TOKEN: 'act.rotated' }),
+    );
+    const outcome = await withFetch(stub, () =>
+      revokeToken('DEFAULT', {
+        env: fx.env,
+        settings: fx.settings,
+        clock: fx.clock,
+        logger: fx.logger,
+      }),
+    );
+
+    assert.equal(stub.calls.length, 2);
+    // The token still alive upstream is the rotated one, so its refusal is
+    // what the logout reports — not the first call's success.
+    assert.equal(outcome.upstream, 'unconfirmed');
+    assert.equal(outcome.cleared, true);
+    assert.match(warnings(fx.records), /did not confirm the revocation/);
+    assert.equal((await fx.read())['TT_ACCESS_TOKEN'], '');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('revoke clears the local credentials even when tiktok rejects the call', async () => {
+  const fx = await fixture();
+  try {
+    const stub = scriptFetch([oauthErrorResponse('invalid_request', 400)]);
+    const outcome = await withFetch(stub, () =>
+      revokeToken('DEFAULT', {
+        env: fx.env,
+        settings: fx.settings,
+        clock: fx.clock,
+        logger: fx.logger,
+      }),
+    );
+
+    assert.equal(outcome.upstream, 'unconfirmed');
+    assert.equal(outcome.cleared, true);
     assert.equal(stub.calls.length, 1);
     assert.match(warnings(fx.records), /did not confirm the revocation/);
+    assert.equal((await fx.read())['TT_ACCESS_TOKEN'], '');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a revoke the caller cancels still clears, whatever the abort reason is', async () => {
+  const fx = await fixture();
+  try {
+    // `AbortSignal.abort(reason)` accepts any value and `core/http` rethrows it
+    // verbatim, so the reason reaching the warning is not necessarily an Error.
+    const stub = scriptFetch([new Response('{}', { status: 200 })]);
+    await withFetch(stub, () =>
+      revokeToken('DEFAULT', {
+        env: fx.env,
+        settings: fx.settings,
+        clock: fx.clock,
+        logger: fx.logger,
+        signal: AbortSignal.abort('the logout was cancelled'),
+      }),
+    );
+
+    assert.equal(stub.calls.length, 0, 'an aborted call never reaches the network');
+    const warned = fx.records.find(
+      (r) => r.level === 'warn' && r.msg.includes('did not confirm the revocation'),
+    );
+    assert.equal(warned?.fields?.['reason'], 'unknown');
+    // The local clear happens regardless: a token this machine can no longer
+    // use is worse kept than dropped (AUTH.md § 4).
     assert.equal((await fx.read())['TT_ACCESS_TOKEN'], '');
   } finally {
     await fx.cleanup();
@@ -1242,7 +1653,7 @@ test('revoke with nothing stored sends no request and still clears', async () =>
   try {
     await fx.write({ TT_OPEN_ID: 'open-id-orphan' });
     const stub = scriptFetch([]);
-    await withFetch(stub, () =>
+    const outcome = await withFetch(stub, () =>
       revokeToken('DEFAULT', {
         env: fx.env,
         settings: fx.settings,
@@ -1251,6 +1662,8 @@ test('revoke with nothing stored sends no request and still clears', async () =>
       }),
     );
     assert.equal(stub.calls.length, 0);
+    assert.equal(outcome.upstream, 'none');
+    assert.equal(outcome.cleared, true);
     assert.equal((await fx.read())['TT_OPEN_ID'], '');
   } finally {
     await fx.cleanup();
@@ -1285,6 +1698,153 @@ test('a revoked profile is re-read from the file rather than served from memory'
   } finally {
     await fx.cleanup();
   }
+});
+
+/** The file as another process's `login --revoke` leaves it: every token key empty. */
+const REVOKED_ELSEWHERE: Record<string, string> = {
+  TT_ACCESS_TOKEN: '',
+  TT_TOKEN_EXPIRES_AT: '',
+  TT_REFRESH_TOKEN: '',
+  TT_REFRESH_EXPIRES_AT: '',
+  TT_OPEN_ID: '',
+  TT_SCOPES: '',
+};
+
+test('a forced refresh after another process revoked the login fails instead of resurrecting it', async () => {
+  // This server holds an adopted, rotated set; a separate `login --revoke`
+  // cleared the file. The in-memory refresh token is not a fallback here —
+  // spending it would write the tokens back over the logout.
+  const fx = await fixture();
+  try {
+    await fx.write(storedTokens({ TT_TOKEN_EXPIRES_AT: INSIDE_SKEW_EXPIRES_AT }));
+    const deps = {
+      env: fx.env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+    };
+    await withFetch(scriptFetch([tokenResponse()]), async () => {
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.new');
+    });
+
+    await fx.write(REVOKED_ELSEWHERE);
+    const stub = scriptFetch([tokenResponse({ access_token: 'act.resurrected' })]);
+    await assert.rejects(
+      withFetch(stub, () => ensureFreshAccessToken('DEFAULT', { ...deps, force: true })),
+      (err: unknown) => {
+        assert.ok(isTikTokError(err));
+        assert.equal(err.code, 'auth_expired');
+        assert.match(err.message, /has no refresh token/);
+        return true;
+      },
+    );
+    assert.equal(stub.calls.length, 0, 'the adopted refresh token must not be spent');
+    assert.deepEqual(await fx.read(), REVOKED_ELSEWHERE, 'nothing is written back');
+
+    // The cached access token went with the login: the fast path no longer
+    // serves it, even though it is still inside its lifetime.
+    const after = scriptFetch([]);
+    await assert.rejects(
+      withFetch(after, () => ensureFreshAccessToken('DEFAULT', deps)),
+      (err: unknown) => isTikTokError(err) && err.code === 'auth_expired',
+    );
+    assert.equal(after.calls.length, 0);
+    assert.deepEqual(await fx.read(), REVOKED_ELSEWHERE);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('an adopted token that expires after another process revoked the login is not refreshed', async () => {
+  // The same revocation, found by the ordinary expiry path rather than a 401
+  // replay: the adopted set is due for a refresh, and the file has none left.
+  const fx = await fixture();
+  try {
+    await fx.write(storedTokens({ TT_TOKEN_EXPIRES_AT: INSIDE_SKEW_EXPIRES_AT }));
+    const deps = {
+      env: fx.env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+    };
+    // A lifetime inside the skew window: the adopted set is due at once.
+    await withFetch(scriptFetch([tokenResponse({ expires_in: 60 })]), async () => {
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.new');
+    });
+
+    await fx.write(REVOKED_ELSEWHERE);
+    const stub = scriptFetch([tokenResponse({ access_token: 'act.resurrected' })]);
+    await assert.rejects(
+      withFetch(stub, () => ensureFreshAccessToken('DEFAULT', deps)),
+      (err: unknown) => isTikTokError(err) && err.code === 'auth_expired',
+    );
+    assert.equal(stub.calls.length, 0);
+    assert.deepEqual(await fx.read(), REVOKED_ELSEWHERE);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('revoke registers the stored access token as a secret before sending it', async () => {
+  const fx = await fixture();
+  try {
+    const token = 'act.revoke-from-file-0001';
+    await fx.write(storedTokens({ TT_ACCESS_TOKEN: token }));
+    // Read straight from the file by the revoke, never adopted: nothing has
+    // registered it yet, so the mask below is the revoke's own doing.
+    assert.equal(redactText(`sending ${token}`), `sending ${token}`);
+    let maskedAtSend: string | undefined;
+    const stub: FetchStub = () => {
+      maskedAtSend = redactText(`sending ${token}`);
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    };
+    await withFetch(stub, () =>
+      revokeToken('DEFAULT', {
+        env: fx.env,
+        settings: fx.settings,
+        clock: fx.clock,
+        logger: fx.logger,
+      }),
+    );
+    assert.equal(maskedAtSend, 'sending [REDACTED]');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('revoke registers an in-memory access token the file no longer names', async () => {
+  // The adoption already registers the token on its way into memory, so this
+  // pins the outcome for the in-memory branch rather than isolating the
+  // revoke's own registration — the file-backed test above does that.
+  const fx = await fixture();
+  try {
+    const token = 'act.revoke-from-memory-0002';
+    await fx.write(storedTokens({ TT_ACCESS_TOKEN: token }));
+    const deps = {
+      env: fx.env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+    };
+    await withFetch(scriptFetch([]), () => ensureFreshAccessToken('DEFAULT', deps));
+    await fx.write({ TT_REFRESH_TOKEN: 'rft.stored' });
+
+    const stub = scriptFetch([new Response('{}', { status: 200 })]);
+    await withFetch(stub, () => revokeToken('DEFAULT', deps));
+    assert.equal(form(only(stub.calls)).get('token'), token);
+    assert.equal(redactText(`held ${token}`), 'held [REDACTED]');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('the app secret passed to the exchange is registered as a secret', async () => {
+  const clock = mockClock();
+  const clientSecret = 'exchange-client-secret-0003';
+  await withFetch(scriptFetch([tokenResponse()]), () =>
+    exchangeCode({ ...EXCHANGE_OPTS, clientSecret, clock }),
+  );
+  assert.equal(redactText(`app ${clientSecret} here`), 'app [REDACTED] here');
 });
 
 // ---------------------------------------------------------------------------
@@ -1450,11 +2010,11 @@ test('revoke posts the in-memory token when the file no longer names one', async
   }
 });
 
-test('a revoke whose local clear fails says which key to remove by hand', async () => {
+test('a revoke whose local clear fails reports it and says which key to remove by hand', async () => {
   const fx = await fixture();
   try {
     const stub = scriptFetch([new Response('{}', { status: 200 })]);
-    await withFetch(stub, () =>
+    const outcome = await withFetch(stub, () =>
       revokeToken('DEFAULT', {
         env: fx.env,
         settings: fx.settings,
@@ -1465,8 +2025,15 @@ test('a revoke whose local clear fails says which key to remove by hand', async 
       }),
     );
 
-    // Upstream revocation happened; only the local clear failed, and the user is
-    // told exactly which key is still on disk.
+    // Upstream revocation happened; only the local clear failed. The outcome
+    // says so — a warning alone would let the CLI print "cleared" over a file
+    // that still holds the token — and the log names the key still on disk.
+    assert.deepEqual(outcome, {
+      profile: 'DEFAULT',
+      envFilePath: fx.envFile,
+      upstream: 'revoked',
+      cleared: false,
+    });
     assert.equal(stub.calls.length, 1);
     assert.match(warnings(fx.records), /remove them by hand/);
     const warned = fx.records.find((r) => r.msg.includes('remove them by hand'));

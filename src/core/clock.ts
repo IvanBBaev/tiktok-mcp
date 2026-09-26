@@ -25,7 +25,7 @@
  * request that big is a bug in the caller (roughly 24.8 days), so it is
  * rejected instead of silently becoming a zero-delay sleep.
  */
-const MAX_TIMER_MS = 2_147_483_647;
+export const MAX_TIMER_MS = 2_147_483_647;
 
 export interface Clock {
   /**

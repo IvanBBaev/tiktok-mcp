@@ -40,8 +40,10 @@ import {
   utimes,
   writeFile,
 } from 'node:fs/promises';
+import fsp from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
-import test from 'node:test';
+import test, { mock } from 'node:test';
 
 import fc from 'fast-check';
 
@@ -485,6 +487,15 @@ const POSIX_ONLY =
   process.platform === 'win32' ? 'symlink creation needs elevation on Windows' : false;
 
 /**
+ * A backslash is a path separator on win32, so a file *named* `..\evil.mp4`
+ * cannot be created there — and it need not be: on win32 `path.relative`
+ * spells a genuine escape with backslashes, so the traversal case above is
+ * already the same check.
+ */
+const BACKSLASH_NAME_ONLY =
+  process.platform === 'win32' ? 'a backslash cannot be part of a win32 name' : false;
+
+/**
  * The >4 GiB fixture is a sparse file: `truncate` sets the length without
  * allocating blocks, so it costs nothing on APFS/ext4. NTFS reserves the space
  * instead, and asking a CI runner for 4 GiB of real disk to exercise one
@@ -701,6 +712,34 @@ test('cc-d8 a sibling directory that merely prefixes the root name is rejected',
 });
 
 test(
+  'cc-d8 the win32 spelling of a traversal is rejected on a posix host too',
+  { skip: BACKSLASH_NAME_ONLY },
+  async () => {
+    const box = await mediaBox();
+    try {
+      // On POSIX a backslash is an ordinary filename character, so `..\evil.mp4`
+      // is one real directory entry *inside* the root and `path.relative` hands
+      // it back verbatim — `..` and `../` never match it. Without the win32
+      // check the source would answer this with a chunk plan, and a Windows
+      // traversal would be proved safe by a test that never ran on Windows.
+      const weird = path.join(box.root, '..\\evil.mp4');
+      await writeMedia(weird, 'not really an mp4');
+      assert.equal(path.relative(box.root, weird), '..\\evil.mp4');
+
+      await assert.rejects(resolveMediaFile(weird, box.root), (error: unknown) => {
+        assert.ok(isTikTokError(error));
+        assert.equal(error.kind, 'validation');
+        assert.equal(error.code, 'file_outside_media_root');
+        assert.ok(error.message.includes(weird));
+        return true;
+      });
+    } finally {
+      await box.cleanup();
+    }
+  },
+);
+
+test(
   'cc-d8 a symlink inside the root pointing outside it is rejected, not followed',
   { skip: POSIX_ONLY },
   async () => {
@@ -761,6 +800,32 @@ test('cc-d1 a file_path that does not exist under the root is file_not_found', a
       return true;
     });
   } finally {
+    await box.cleanup();
+  }
+});
+
+test('cc-d1 a file that vanishes between realpath and stat is file_not_found, not an errno', async () => {
+  const box = await mediaBox();
+  const file = path.join(box.root, 'clip.mp4');
+  await writeMedia(file, 'x'.repeat(16));
+  // Only `stat` fails: `realpath` has already resolved the path, which is the
+  // window a concurrent delete lands in.
+  const vanished = mock.method(fsp, 'stat', () =>
+    Promise.reject(Object.assign(new Error('simulated ENOENT'), { code: 'ENOENT' })),
+  );
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(resolveMediaFile('clip.mp4', box.root), (error: unknown) => {
+      assert.ok(isTikTokError(error));
+      assert.equal(error.kind, 'validation');
+      assert.equal(error.code, 'file_not_found');
+      assert.ok(!error.message.includes('ENOENT'), 'no raw errno reaches the caller');
+      return true;
+    });
+    assert.equal(vanished.mock.callCount(), 1);
+  } finally {
+    vanished.mock.restore();
+    syncBuiltinESMExports();
     await box.cleanup();
   }
 });

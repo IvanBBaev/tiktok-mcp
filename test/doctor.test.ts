@@ -15,7 +15,17 @@
  */
 
 import assert from 'node:assert/strict';
-import { chmod, mkdir, stat, utimes, writeFile } from 'node:fs/promises';
+import {
+  appendFile,
+  chmod,
+  mkdir,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -26,6 +36,7 @@ import {
   renderFinding,
   renderJsonReport,
   renderSummary,
+  resolveModulePath,
   runDoctor,
   type Check,
   type DoctorContext,
@@ -39,9 +50,13 @@ import {
   EXIT_USAGE,
   type CliDeps,
 } from '../src/cli/index.js';
+import { DEFAULT_STALE_MS, envLockDir } from '../src/core/env-lock.js';
 import { createLogger } from '../src/core/log.js';
 import { resetTokenCache } from '../src/core/oauth.js';
 import { registerSecret } from '../src/core/redact.js';
+import { loadSettings } from '../src/core/settings.js';
+import { appendIntent, appendOutcome, type OutcomeResult } from '../src/mcp/journal.js';
+import type { ToolPackageSpec } from '../src/tools/index.js';
 import {
   BASELINE_NOW_MS,
   BASELINE_REFRESH_EXPIRES_AT,
@@ -213,6 +228,32 @@ test('parseDoctorArgs accepts both spellings and rejects the malformed ones', ()
     ok: true,
     flags: { offline: false, json: false, help: false, profile: 'WORK' },
   });
+  // The profile name is normalized where it is parsed, like every other entry
+  // point spells it.
+  assert.deepEqual(parseDoctorArgs(['--profile', ' work ']), {
+    ok: true,
+    flags: { offline: false, json: false, help: false, profile: 'WORK' },
+  });
+  // `--profile --json` is a forgotten value, not a profile named "--json": the
+  // run is refused rather than silently spending `--json` as the name.
+  assert.deepEqual(parseDoctorArgs(['--profile', '--json']), {
+    ok: false,
+    message: '--profile needs a value.',
+  });
+  assert.deepEqual(parseDoctorArgs(['--profile', '-h']), {
+    ok: false,
+    message: '--profile needs a value.',
+  });
+  // Only the separate-slot spelling is guarded: an inline `=` is explicit, and
+  // the name it gives is judged by the profile rule instead.
+  assert.deepEqual(parseDoctorArgs(['--profile=-x']), {
+    ok: false,
+    message: 'invalid profile name "-x": expected [A-Z0-9_]+',
+  });
+  assert.deepEqual(parseDoctorArgs(['--profile', 'no spaces']), {
+    ok: false,
+    message: 'invalid profile name "no spaces": expected [A-Z0-9_]+',
+  });
   assert.deepEqual(parseDoctorArgs(['--offline', '-h']), {
     ok: true,
     flags: { offline: true, json: false, help: true },
@@ -291,7 +332,7 @@ test('a fully configured profile passes every local check', async () => {
     );
     assert.match(r.out, /\[info\] api probe: skipped \(--offline\)\n/);
     assert.match(r.out, /\[info\] media root: TT_MEDIA_ROOT is not set/);
-    assert.match(r.out, /\[ ok \] publish journal: no publish has been recorded yet\n/);
+    assert.match(r.out, /\[info\] publish journal: no publish has been recorded yet\n/);
     assert.match(r.out, /\[ ok \] transport: stdio\n/);
     // The ok/info split moves by one on Windows (the permissions row is an info
     // line there); what must hold everywhere is that nothing warned or failed.
@@ -438,6 +479,36 @@ test(
   },
 );
 
+test(
+  'cc-f3: a fix that cannot be applied is reported rather than swallowed',
+  { skip: POSIX_ONLY },
+  async () => {
+    const f = await fixture();
+    try {
+      await writeEnvFile(f, authorizedLines());
+      await chmod(f.envFile, 0o644);
+
+      // The snapshot was read before the question was asked, so a file that goes
+      // away while the user is answering leaves `chmod` with nothing to change —
+      // the same shape as a file this account is not allowed to touch.
+      const r = await run(f, ['--offline'], {
+        isTTY: true,
+        prompt: async () => {
+          await rm(f.envFile);
+          return 'y';
+        },
+      });
+
+      assert.equal(r.code, EXIT_OK, 'a warning is not a failure');
+      assert.match(r.out, /\[warn\] permissions: mode 0644 — .*; the fix failed: ENOENT/);
+      // The chmod is still offered: the run could not apply it, but the user can.
+      assert.ok(r.out.includes(`→ chmod 600 ${JSON.stringify(f.envFile)}\n`), r.out);
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
+
 test('cc-f3: on Windows the icacls line is remediation text, never a command that runs', async () => {
   const f = await fixture();
   try {
@@ -494,6 +565,26 @@ test('a newer schema warns that writes are refused, and names the backups', asyn
       /\[info\] config schema: leftover pre-migration backup\(s\): \.env\.pre-schema1\n/,
     );
     assert.equal(r.code, EXIT_OK);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('an env file whose directory does not exist still gets a schema row', async () => {
+  const f = await fixture();
+  try {
+    // cc-f1: no file is legal, and here not even the directory is there — the
+    // backup scan has nothing to list and says nothing rather than failing the
+    // check the env-file row already reported on.
+    const r = await run(
+      f,
+      ['--offline'],
+      {},
+      { TT_ENV_FILE: join(f.dir, 'no-such-dir', '.env') },
+    );
+
+    assert.equal(row(r.out, 'config schema'), '[ ok ] config schema: version 1');
+    assert.ok(!r.out.includes('leftover pre-migration backup'), r.out);
   } finally {
     await f.cleanup();
   }
@@ -601,12 +692,27 @@ test('an invalid --profile name is refused before any check runs', async () => {
   const f = await fixture();
   try {
     const r = await run(f, ['--profile', 'no spaces please']);
-    assert.equal(r.code, EXIT_FAILURE);
+    // A bad name is a usage error, like any other malformed argument.
+    assert.equal(r.code, EXIT_USAGE);
     assert.match(
       r.err,
       /invalid profile name "no spaces please": expected \[A-Z0-9_\]\+/,
     );
+    assert.match(r.err, /Usage: tiktok-mcp-ai doctor/);
     assert.equal(r.out, '', 'a run that produced no report prints no report');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('doctor --profile --json is a usage error, not a report for a profile named "--json"', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    const r = await run(f, ['--profile', '--json']);
+    assert.equal(r.code, EXIT_USAGE);
+    assert.match(r.err, /--profile needs a value\./);
+    assert.equal(r.out, '', 'no report, and in particular no JSON report');
   } finally {
     await f.cleanup();
   }
@@ -731,6 +837,142 @@ test('cc-h2: a refresh expiry that is not a timestamp fails rather than comparin
   ]);
 });
 
+test('a profile the env file damages fails the run, with the error code and its remediation', async () => {
+  const f = await fixture();
+  try {
+    // `readProfile` throws `invalid_timestamp` here — neither of the two codes
+    // the credentials and profiles rows report — so before this row owned it
+    // the report came out clean and the exit code was 0.
+    await writeEnvFile(f, authorizedLines({ TT_TOKEN_EXPIRES_AT: 'soon-ish' }));
+
+    const r = await run(f);
+    assert.equal(r.code, EXIT_FAILURE);
+    assert.match(
+      r.out,
+      /\[FAIL\] tokens: profile DEFAULT could not be read \(invalid_timestamp\): TT_TOKEN_EXPIRES_AT: expected an ISO-8601 UTC timestamp, got "soon-ish"\n/,
+    );
+    assert.match(r.out, /Remove that key and re-run login/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a profile read that throws something other than a TikTokError is a fail, not an ok', async () => {
+  const findings = await checkById('tokens').run(
+    doctorContext({ credentialsError: new Error('EIO: the disk went away') }),
+  );
+  assert.deepEqual(findings, [
+    {
+      severity: 'fail',
+      text: 'profile DEFAULT could not be read: EIO: the disk went away',
+      remediation:
+        'Check "/nowhere/.env" for a damaged value, then re-run npx tiktok-mcp-ai login --profile DEFAULT.',
+    } satisfies Finding,
+  ]);
+});
+
+test('a thrown non-Error in the profile read is still a fail', async () => {
+  const findings = await checkById('tokens').run(
+    doctorContext({ credentialsError: 'a bare string' }),
+  );
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0]?.severity, 'fail');
+  assert.equal(findings[0]?.text, 'profile DEFAULT could not be read: a bare string');
+});
+
+test('the tokens row leaves missing credentials and an unknown profile to their own rows', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, ['TT_ACCESS_TOKEN=act.only']);
+    const missing = await run(f);
+    assert.equal(missing.code, EXIT_FAILURE);
+    assert.equal(row(missing.out, 'tokens'), undefined);
+
+    await writeEnvFile(f, authorizedLines());
+    const unknown = await run(f, ['--offline', '--profile', 'nobody']);
+    assert.equal(unknown.code, EXIT_FAILURE);
+    assert.equal(row(unknown.out, 'tokens'), undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// publish journal — the rotation lock
+// ---------------------------------------------------------------------------
+
+/** The journal check against a real directory, with the lock dir aged `ageMs` (or absent). */
+async function journalLockRun(ageMs: number | undefined): Promise<readonly Finding[]> {
+  const f = await fixture();
+  try {
+    const journal = join(f.dir, 'journal.ndjson');
+    if (ageMs !== undefined) {
+      const lockDir = envLockDir(journal);
+      await mkdir(lockDir);
+      const mtime = new Date(f.clock.now() - ageMs);
+      await utimes(lockDir, mtime, mtime);
+    }
+    return await checkById('publish-journal').run(
+      doctorContext({ envFilePath: f.envFile, clock: f.clock }),
+    );
+  } finally {
+    await f.cleanup();
+  }
+}
+
+test('no rotation lock adds no row to the journal check', async () => {
+  const findings = await journalLockRun(undefined);
+  assert.deepEqual(findings, [
+    { severity: 'info', text: 'no publish has been recorded yet' } satisfies Finding,
+  ]);
+});
+
+test('a rotation lock younger than the stale threshold is reported as held right now', async () => {
+  const findings = await journalLockRun(5_000);
+  assert.deepEqual(findings.at(-1), {
+    severity: 'info',
+    text: 'rotation lock held right now (5 seconds old)',
+  } satisfies Finding);
+});
+
+test('a rotation lock past the stale threshold is a warning with an rm -rf remediation', async () => {
+  const f = await fixture();
+  try {
+    const journal = join(f.dir, 'journal.ndjson');
+    const lockDir = envLockDir(journal);
+    await mkdir(lockDir);
+    const mtime = new Date(f.clock.now() - 10 * 60 * 1000);
+    await utimes(lockDir, mtime, mtime);
+
+    const findings = await checkById('publish-journal').run(
+      doctorContext({ envFilePath: f.envFile, clock: f.clock }),
+    );
+    assert.deepEqual(findings.at(-1), {
+      severity: 'warn',
+      text:
+        `a stale rotation lock has been held for 10 minutes at ${lockDir}; ` +
+        'the journal is not rotated until the next rotation breaks it',
+      remediation: `If no server is running you may remove it: rm -rf ${JSON.stringify(lockDir)}`,
+    } satisfies Finding);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("doctor's stale threshold is the env-lock default rotation and TT_ENV_LOCK_STALE_MS share", async () => {
+  // Rotation passes no `staleMs`, so env-lock's own default is what breaks a
+  // rotation lock; the doctor row must call "stale" exactly what that would
+  // break, and the setting's default must be the same number, or the two rows
+  // would disagree about one lock age.
+  assert.equal(loadSettings({}).envLockStaleMs, DEFAULT_STALE_MS);
+  // Whole seconds either side of the boundary, so the mtime's resolution
+  // cannot move a case across it.
+  const under = await journalLockRun(DEFAULT_STALE_MS - 1_000);
+  assert.equal(under.at(-1)?.severity, 'info');
+  const over = await journalLockRun(DEFAULT_STALE_MS + 1_000);
+  assert.equal(over.at(-1)?.severity, 'warn');
+});
+
 // ---------------------------------------------------------------------------
 // scopes — read from the live manifest, never from a third copy of the table
 // ---------------------------------------------------------------------------
@@ -837,6 +1079,43 @@ test('cc-f5: a lock older than TT_ENV_LOCK_STALE_MS is reported as stale', async
   }
 });
 
+test(
+  'cc-f5: a symlinked env file is checked for the lock its writers actually take',
+  {
+    skip:
+      process.platform === 'win32'
+        ? 'symlinks: win32 needs SeCreateSymbolicLinkPrivilege'
+        : false,
+  },
+  async () => {
+    // Writers key the lock on the canonical path, so a lock beside the link would
+    // exclude nobody; the one that matters sits beside the link's target.
+    const f = await fixture();
+    try {
+      const realDir = join(f.dir, 'real');
+      await mkdir(realDir);
+      const target = join(realDir, '.env');
+      await writeFile(target, `${authorizedLines().join('\n')}\n`, 'utf8');
+      await chmod(target, 0o600);
+      await symlink(target, f.envFile);
+
+      const lockDir = envLockDir(await realpath(target));
+      await mkdir(lockDir);
+      const longAgo = new Date(BASELINE_NOW_MS - 5 * 60 * 1000);
+      await utimes(lockDir, longAgo, longAgo);
+
+      const r = await run(f);
+      assert.equal(
+        row(r.out, 'env lock'),
+        `[warn] env lock: a stale lock has been held for 5 minutes at ${lockDir}; its ` +
+          'writer is gone and the next writer will break it',
+      );
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
+
 test('cc-f5: a fresh lock means a login is running right now', async () => {
   const f = await fixture();
   try {
@@ -850,6 +1129,35 @@ test('cc-f5: a fresh lock means a login is running right now', async () => {
     assert.match(
       r.out,
       /\[info\] env lock: held right now \(2 seconds old\) — a login or token refresh is running\n/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cc-f5: a lock is judged by the built-in horizon when the settings did not load', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    const lockDir = `${f.envFile}.lock`;
+    await mkdir(lockDir);
+    const longAgo = new Date(BASELINE_NOW_MS - 5 * 60 * 1000);
+    await utimes(lockDir, longAgo, longAgo);
+
+    // TT_ENV_LOCK_STALE_MS would have called this lock fresh, but the rest of the
+    // environment is rejected, so there are no settings to read it from and the
+    // built-in 15 s horizon decides instead.
+    const r = await run(
+      f,
+      ['--offline'],
+      {},
+      { TT_ENV_LOCK_STALE_MS: '600000', TT_TIMEOUT_MS: 'soon' },
+    );
+
+    assert.match(r.out, /\[FAIL\] settings: /);
+    assert.match(
+      r.out,
+      /\[warn\] env lock: a stale lock has been held for 5 minutes at /,
     );
   } finally {
     await f.cleanup();
@@ -887,17 +1195,189 @@ test('TT_MEDIA_ROOT is reported when it is a directory and failed when it is not
   }
 });
 
-test('an existing journal is reported by size until TD-3 can reconcile it', async () => {
+/** Where `resolveJournalPath` puts the journal for a fixture's env file. */
+function journalPath(f: Fixture): string {
+  return join(f.dir, 'journal.ndjson');
+}
+
+/**
+ * One attempt in the journal, written through the module that owns the format.
+ * A hand-rolled NDJSON fixture would be a second writer of that format, and the
+ * row asserted below is only as true as the file doctor actually reads.
+ *
+ * Omitting `result` leaves the intent alone — the crash-between-init-and-status
+ * state, which is the whole subject of this section.
+ */
+async function recordAttempt(
+  f: Fixture,
+  attemptId: string,
+  result?: OutcomeResult,
+): Promise<void> {
+  const path = journalPath(f);
+  const ts = new Date(f.clock.now()).toISOString();
+  await appendIntent(
+    {
+      v: 1,
+      type: 'intent',
+      attempt_id: attemptId,
+      ts,
+      tool: 'tiktok_post_video',
+      profile: 'DEFAULT',
+      open_id: 'open-id-doctor-1234',
+      plan_id: 'plan-doctor-1',
+      payload_digest: 'digest-doctor-1',
+      title_excerpt: 'a caption nobody should have to redact by hand',
+      source: 'FILE_UPLOAD',
+      mode: 'direct',
+    },
+    { path },
+  );
+  if (result !== undefined) {
+    await appendOutcome(
+      {
+        v: 1,
+        type: 'outcome',
+        attempt_id: attemptId,
+        ts,
+        result,
+        publish_id: 'v_pub_doctor_1',
+      },
+      { path },
+    );
+  }
+}
+
+/** Every row the journal check produced, in order — it may emit more than one. */
+function journalRows(out: string): string[] {
+  return out.split('\n').filter((line) => line.includes('] publish journal: '));
+}
+
+test('a journal whose attempts all reached an outcome reconciles clean', async () => {
   const f = await fixture();
   try {
     await writeEnvFile(f, authorizedLines());
-    await writeFile(join(f.dir, 'journal.ndjson'), '{}\n', 'utf8');
+    await recordAttempt(f, 'ATTEMPT00000000000000000A', 'ok');
+    // A failed publish is still resolved: its fate is known.
+    await recordAttempt(f, 'ATTEMPT00000000000000000B', 'error');
 
     const r = await run(f);
-    assert.match(r.out, /\[info\] publish journal: .*journal\.ndjson — 3 bytes; /);
+    assert.equal(r.code, EXIT_OK);
+    assert.deepEqual(journalRows(r.out), [
+      `[ ok ] publish journal: ${journalPath(f)} — 2 attempts recorded, every one with an outcome`,
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cc-e10: an intent with no outcome is reported unresolved, not as done', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    await recordAttempt(f, 'ATTEMPT00000000000000000A', 'ok');
+    await recordAttempt(f, 'ATTEMPT00000000000000000B');
+
+    const r = await run(f);
+    // A post that may exist is not a broken installation: doctor says so and
+    // still exits 0, because a readiness gate that trips here is a gate nobody
+    // keeps.
+    assert.equal(r.code, EXIT_OK);
+    assert.deepEqual(journalRows(r.out), [
+      `[warn] publish journal: ${journalPath(f)} — 2 attempts recorded, 1 without an ` +
+        'outcome: the request may have been sent and no answer was recorded, so the post ' +
+        'may exist',
+    ]);
     assert.match(
       r.out,
-      /intent\/outcome reconciliation arrives with the publish tools\n/,
+      /→ Reconcile them with tiktok_list_publish_journal, then confirm each one with tiktok_get_publish_status or tiktok_list_videos\.\n/,
+    );
+    // The report stays pasteable (CONTRIBUTING § Reporting a bug): the counts
+    // come out of the records, nothing else does.
+    assert.ok(!r.out.includes('v_pub_doctor_1'));
+    assert.ok(!r.out.includes('a caption nobody should have to redact by hand'));
+    assert.ok(!r.out.includes('ATTEMPT00000000000000000B'));
+    assert.ok(!r.out.includes('open-id-doctor-1234'));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a machine that has never published is told so, and told nothing else', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+
+    const r = await run(f);
+    assert.equal(r.code, EXIT_OK);
+    assert.deepEqual(journalRows(r.out), [
+      '[info] publish journal: no publish has been recorded yet',
+    ]);
+    // Not an `ok`: nothing was verified. And no path — naming a file that does
+    // not exist invites the reader to go looking for it.
+    assert.ok(!r.out.includes('journal.ndjson'));
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a journal that exists but records no attempt is not a fresh install', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    // The other half of the zero-attempt case: the file is there, so this is not
+    // a machine that has never published — every line in it is simply damaged.
+    // Two torn writes rather than one, so the row cannot be mistaken for the
+    // torn-tail case below, which still has an intact attempt to count.
+    await writeFile(journalPath(f), '{"v":1,"type":"inte\n{"v":1,"type":"outc\n', 'utf8');
+
+    const r = await run(f);
+    // Still exit 0: an unreadable audit trail is not a broken installation.
+    assert.equal(r.code, EXIT_OK);
+    assert.deepEqual(journalRows(r.out), [
+      `[info] publish journal: ${journalPath(f)} — no attempt is recorded in it yet`,
+      '[info] publish journal: 2 unreadable lines skipped — usually a truncated last write after a crash',
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a torn last record is counted as damage, not as a reason to stop', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    await recordAttempt(f, 'ATTEMPT00000000000000000A', 'ok');
+    // What a crash mid-append leaves behind: half a record and no newline.
+    await appendFile(journalPath(f), '{"v":1,"type":"inte', 'utf8');
+
+    const r = await run(f);
+    assert.equal(r.code, EXIT_OK);
+    assert.deepEqual(journalRows(r.out), [
+      `[ ok ] publish journal: ${journalPath(f)} — 1 attempt recorded, every one with an outcome`,
+      '[info] publish journal: 1 unreadable line skipped — usually a truncated last write after a crash',
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a journal that cannot be read warns rather than failing the run', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    // A directory in the journal's place: present, statable, unreadable as a
+    // file — the same shape a bad mode produces, and reproducible as any user.
+    await mkdir(journalPath(f));
+
+    const r = await run(f);
+    assert.equal(r.code, EXIT_OK);
+    assert.deepEqual(journalRows(r.out), [
+      `[warn] publish journal: ${journalPath(f)} exists but cannot be read, so no attempt ` +
+        'in it could be reconciled',
+    ]);
+    assert.match(
+      r.out,
+      /→ Check its owner and mode — the journal is written 0600 by the account that publishes\.\n/,
     );
   } finally {
     await f.cleanup();
@@ -965,8 +1445,78 @@ test('cc-g6: a bind past loopback warns that the bearer travels in plaintext', a
       r.out,
       /→ Terminate TLS in front of the server, or bind TT_HTTP_HOST to 127\.0\.0\.1\.\n/,
     );
+    // Past loopback with no allowlist, the Host/Origin check cannot close DNS
+    // rebinding, and doctor says so.
+    assert.match(
+      r.out,
+      /\[warn\] transport: TT_HTTP_ALLOWED_HOSTS is unset: past loopback the Host\/Origin check cannot stop DNS rebinding, so TT_HTTP_TOKEN is the only layer left\n/,
+    );
+    assert.match(
+      r.out,
+      /→ Set TT_HTTP_ALLOWED_HOSTS to the host names clients use to reach this server\.\n/,
+    );
   } finally {
     await f.cleanup();
+  }
+});
+
+test('cc-g6: a bind past loopback with TT_HTTP_ALLOWED_HOSTS set has no rebinding warning', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    const r = await run(
+      f,
+      ['--offline'],
+      {},
+      {
+        TT_TRANSPORT: 'http',
+        TT_HTTP_HOST: '0.0.0.0',
+        TT_HTTP_INSECURE: '1',
+        TT_HTTP_ALLOWED_HOSTS: 'mcp.example.com',
+        TT_HTTP_TOKEN: 'doctor-test-http-token-0123456789',
+      },
+    );
+
+    assert.equal(r.code, EXIT_OK);
+    // The plaintext warning still stands: the allowlist does not add TLS.
+    assert.match(r.out, /\[warn\] transport: TT_HTTP_INSECURE=1: /);
+    assert.doesNotMatch(r.out, /TT_HTTP_ALLOWED_HOSTS/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('cc-g6: TT_HTTP_INSECURE on a loopback bind warns about nothing', async () => {
+  for (const host of ['127.0.0.1', 'localhost', '[::1]']) {
+    const f = await fixture();
+    try {
+      await writeEnvFile(f, authorizedLines());
+      const r = await run(
+        f,
+        ['--offline'],
+        {},
+        {
+          TT_TRANSPORT: 'http',
+          TT_HTTP_HOST: host,
+          TT_HTTP_INSECURE: '1',
+          TT_HTTP_TOKEN: 'doctor-test-http-token-0123456789',
+        },
+      );
+
+      assert.equal(r.code, EXIT_OK, host);
+      assert.match(
+        r.out,
+        /\[ ok \] transport: http on .+:3000\/mcp, TT_HTTP_TOKEN required on every request\n/,
+        host,
+      );
+      // The flag is redundant here: the bind is not reachable off-box and the
+      // pinned Host check stops rebinding, so neither warning would be true.
+      assert.doesNotMatch(r.out, /TT_HTTP_INSECURE=1/, host);
+      assert.doesNotMatch(r.out, /TT_HTTP_ALLOWED_HOSTS is unset/, host);
+      assert.doesNotMatch(r.out, /\[warn\] transport:/, host);
+    } finally {
+      await f.cleanup();
+    }
   }
 });
 
@@ -1128,6 +1678,32 @@ test('a temporary upstream error is a warning, and an unexpected one is a failur
   }
 });
 
+test('an egress violation fails the probe and has no next step to offer', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+
+    // What `redirect: "error"` looks like from `fetch`: a TypeError whose cause
+    // names the redirect. It is neither weather nor an auth refusal, so the probe
+    // reports the error as it stands.
+    const r = await withFetch(
+      () =>
+        Promise.reject(
+          new TypeError('fetch failed', { cause: new Error('unexpected redirect') }),
+        ),
+      async () => run(f, ['--json']),
+    );
+
+    assert.equal(r.code, EXIT_FAILURE);
+    const probe = parseReport(r.out).checks.find((check) => check.id === 'api-probe');
+    assert.equal(probe?.findings[0]?.severity, 'fail');
+    assert.match(probe?.findings[0]?.text ?? '', /with a redirect\./);
+    assert.equal(probe?.findings[0]?.remediation, undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('the probe is skipped when the profile cannot read anything', async () => {
   const f = await fixture();
   try {
@@ -1136,6 +1712,30 @@ test('the probe is skipped when the profile cannot read anything', async () => {
     assert.match(
       r.out,
       /\[info\] api probe: skipped — profile DEFAULT has not granted user\.info\.basic, so there is no read to probe with\n/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a profile with no scopes on record skips the probe before any request', async () => {
+  const f = await fixture();
+  try {
+    // A login that never recorded its grant: there is no scope list to check
+    // `user.info.basic` against, which is not the same as holding it.
+    await writeEnvFile(f, authorizedLines({ TT_SCOPES: '' }));
+    const r = await withFetch(
+      () => Promise.reject(new Error('the probe must not send a request')),
+      async () => run(f, []),
+    );
+
+    assert.match(
+      r.out,
+      /\[info\] api probe: skipped — profile DEFAULT has not granted user\.info\.basic/,
+    );
+    assert.match(
+      r.out,
+      /\[warn\] scopes: profile DEFAULT has no granted scopes on record\n/,
     );
   } finally {
     await f.cleanup();
@@ -1171,6 +1771,38 @@ test('a check that throws becomes one row and the rest still run', async () => {
     await f.cleanup();
   }
 });
+
+test(
+  'cc-f3: a prompt that fails costs one row, whatever it rejected with',
+  { skip: POSIX_ONLY },
+  async () => {
+    const f = await fixture();
+    try {
+      await writeEnvFile(f, authorizedLines());
+      await chmod(f.envFile, 0o644);
+
+      const closed = await run(f, ['--offline'], {
+        isTTY: true,
+        prompt: () => Promise.reject(new Error('stdin closed')),
+      });
+      assert.equal(closed.code, EXIT_FAILURE);
+      assert.equal(row(closed.out, 'permissions'), '[FAIL] permissions: stdin closed');
+      assert.match(closed.out, /\[ ok \] transport: stdio\n/);
+      assert.equal((await stat(f.envFile)).mode & 0o777, 0o644);
+
+      // Nothing in the type system says a rejection is an `Error`, and the row
+      // has to be readable either way.
+      const raw = await run(f, ['--offline'], {
+        isTTY: true,
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the value under test
+        prompt: () => Promise.reject('EOF'),
+      });
+      assert.equal(row(raw.out, 'permissions'), '[FAIL] permissions: EOF');
+    } finally {
+      await f.cleanup();
+    }
+  },
+);
 
 test('renderFinding lines the four labels up and indents the remediation', () => {
   const check: Check = { id: 'x', title: 'thing', run: () => Promise.resolve([]) };
@@ -1389,6 +2021,27 @@ test('--json never prompts, even on a terminal', { skip: POSIX_ONLY }, async () 
   }
 });
 
+test('a package that ships no tools is reported as a roadmap hole, not as ok', async () => {
+  // Today's manifest gives all five packages at least one tool, so the row has
+  // no subject in this build; `DoctorContext.packages` is the seam that lets a
+  // future manifest — a package declared before it is written — be handed in.
+  const findings = await checkById('scopes').run(
+    doctorContext({
+      settings: loadSettings({ TT_TOOL_PACKAGES: 'video' }),
+      credentials: { clientKey: 'k', clientSecret: 's', scopes: ['video.list'] },
+      packages: [{ name: 'video', tools: [] }] satisfies ToolPackageSpec[],
+    }),
+  );
+
+  assert.deepEqual(findings, [
+    { severity: 'ok', text: 'granted: video.list' },
+    {
+      severity: 'info',
+      text: 'enabled but not implemented in this build: video',
+    },
+  ] satisfies Finding[]);
+});
+
 // ---------------------------------------------------------------------------
 // the install check
 // ---------------------------------------------------------------------------
@@ -1443,4 +2096,73 @@ test('the install check matches a path segment, not a substring', async () => {
   );
 
   assert.equal(findings[0]?.severity, 'ok');
+});
+
+// ---------------------------------------------------------------------------
+// the seams that default to the real process
+// ---------------------------------------------------------------------------
+
+test('with nothing but the output seams injected the run still reports', async () => {
+  const f = await fixture();
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  // `test/helpers.ts` clears every TT_* key from `process.env` on import, so this
+  // one key is the whole configuration the run can find.
+  process.env.TT_ENV_FILE = f.envFile;
+  try {
+    // No argv, no env, no clock, no logger: the defaults are what `runCli` leaves
+    // the command with in production. There is no env file, so the probe skips
+    // itself before it builds an API context — nothing here reaches the network.
+    const code = await runDoctor({
+      stdout: (chunk) => stdout.push(chunk),
+      stderr: (chunk) => stderr.push(chunk),
+      isTTY: false,
+    });
+    const out = stdout.join('');
+
+    assert.equal(code, EXIT_FAILURE);
+    assert.match(out, /\[info\] env file: no file at /);
+    assert.match(out, /\[FAIL\] app credentials: missing TikTok app credentials: /);
+    assert.match(
+      out,
+      /\[info\] api probe: skipped — the local configuration has to be fixed first\n/,
+    );
+    assert.match(out, /\[ ok \] transport: stdio\n/);
+    assert.equal(stderr.join(''), '');
+
+    // The default logger takes its level from the settings, so the run that has
+    // no settings at all is the one that has to fall back to a built-in level —
+    // and it still owes the operator the report that says why.
+    process.env.TT_TIMEOUT_MS = 'soon';
+    stdout.length = 0;
+    const broken = await runDoctor({
+      stdout: (chunk) => stdout.push(chunk),
+      stderr: (chunk) => stderr.push(chunk),
+      isTTY: false,
+    });
+
+    assert.equal(broken, EXIT_FAILURE);
+    assert.match(stdout.join(''), /\[FAIL\] settings: /);
+    // The report ran to its end: a run with no settings is still a whole report.
+    assert.match(stdout.join(''), /\n\d+ checks passed, .*\d+ failures\n$/);
+  } finally {
+    delete process.env.TT_ENV_FILE;
+    delete process.env.TT_TIMEOUT_MS;
+    await f.cleanup();
+  }
+});
+
+test('resolveModulePath answers a file: URL and degrades on anything else', () => {
+  // The default is `import.meta.url`, which is what production wants and what a
+  // test cannot move — so the URL is a parameter and both arms are reachable.
+  assert.ok(
+    resolveModulePath('file:///opt/app/build/src/cli/doctor.js').endsWith(
+      join('opt', 'app', 'build', 'src', 'cli', 'doctor.js'),
+    ),
+  );
+  // Not a `file:` URL: there is no path to hand back, and a doctor run must not
+  // die over where it was loaded from. The install check reads '' as "unknown".
+  assert.equal(resolveModulePath('https://example.invalid/doctor.js'), '');
+  // No argument at all is the production call.
+  assert.ok(resolveModulePath().endsWith('doctor.js'), resolveModulePath());
 });

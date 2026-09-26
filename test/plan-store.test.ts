@@ -147,6 +147,39 @@ test('a digest of a different length is refused, not compared', () => {
   });
 });
 
+test('cc-d3: a file whose identity changed since the preview does not apply', () => {
+  const identity = '4096:1700000000000:16777232:42';
+  const { id, clock } = seeded({ fileIdentity: identity });
+  const touched = expectation({ fileIdentity: '4096:1700000000001:16777232:42' });
+  assert.deepEqual(verifyPlan(id, touched, clock), { ok: false, reason: 'file_changed' });
+  assert.deepEqual(consumePlan(id, touched, clock), {
+    ok: false,
+    reason: 'file_changed',
+  });
+  // A file the plan saw is not "absent" either — a URL payload cannot spend it.
+  assert.deepEqual(consumePlan(id, expectation(), clock), {
+    ok: false,
+    reason: 'file_changed',
+  });
+  // The refusals spent nothing: the unchanged file still applies, once.
+  assert.deepEqual(consumePlan(id, expectation({ fileIdentity: identity }), clock), {
+    ok: true,
+  });
+});
+
+test('a payload with no file binds no identity and applies without one', () => {
+  const { id, clock } = seeded();
+  assert.deepEqual(consumePlan(id, expectation(), clock), { ok: true });
+});
+
+test('a changed digest is reported as payload_mismatch before any file identity', () => {
+  const { id, clock } = seeded({ fileIdentity: 'a' });
+  assert.deepEqual(
+    verifyPlan(id, expectation({ digest: OTHER_DIGEST, fileIdentity: 'b' }), clock),
+    { ok: false, reason: 'payload_mismatch' },
+  );
+});
+
 test('a plan previewed for one account does not apply to another', () => {
   const { id, clock } = seeded();
   assert.deepEqual(consumePlan(id, expectation({ openId: 'open-id-2' }), clock), {
@@ -420,6 +453,59 @@ test('the cap evicts the oldest plan, so minting forever cannot grow the process
     reason: 'unknown',
   });
   assert.deepEqual(consumePlan(newest, expectation(), clock, { limits }), { ok: true });
+});
+
+test('the cap evicts a used plan before an older live one', () => {
+  const limits: PlanLimits = { planTtlS: 3600, planMaxOutstanding: 3 };
+  resetPlanStore();
+  const [oldest, middle, youngest] = [0, 1, 2].map((offset) => {
+    const id = mintPlanId();
+    storePlan(id, record({ createdAt: BASELINE_NOW_MS + offset }), { limits });
+    return id;
+  });
+  assert.ok(oldest !== undefined && middle !== undefined && youngest !== undefined);
+  const clock = mockClock();
+  // Spend the two younger plans: a used plan can only answer plan_not_found.
+  assert.deepEqual(consumePlan(youngest, expectation(), clock, { limits }), { ok: true });
+  assert.deepEqual(consumePlan(middle, expectation(), clock, { limits }), { ok: true });
+
+  const newest = mintPlanId();
+  storePlan(newest, record({ createdAt: BASELINE_NOW_MS + 3 }), { limits });
+
+  assert.equal(outstandingPlans(), 3);
+  // The oldest *used* plan went, not the oldest plan overall.
+  assert.deepEqual(verifyPlan(middle, expectation(), clock, { limits }), {
+    ok: false,
+    reason: 'unknown',
+  });
+  assert.deepEqual(verifyPlan(youngest, expectation(), clock, { limits }), {
+    ok: false,
+    reason: 'already_used',
+  });
+  // The older live plan still has a publish waiting on it, and still applies.
+  assert.deepEqual(consumePlan(oldest, expectation(), clock, { limits }), { ok: true });
+  assert.deepEqual(consumePlan(newest, expectation(), clock, { limits }), { ok: true });
+});
+
+test('with no used plan the cap still evicts the oldest live one', () => {
+  const limits: PlanLimits = { planTtlS: 3600, planMaxOutstanding: 2 };
+  resetPlanStore();
+  const first = mintPlanId();
+  const second = mintPlanId();
+  // Stored out of creation order, so eviction follows createdAt, not insertion.
+  storePlan(second, record({ createdAt: BASELINE_NOW_MS + 1 }), { limits });
+  storePlan(first, record({ createdAt: BASELINE_NOW_MS }), { limits });
+  const third = mintPlanId();
+  storePlan(third, record({ createdAt: BASELINE_NOW_MS + 2 }), { limits });
+
+  assert.equal(outstandingPlans(), 2);
+  const clock = mockClock();
+  assert.deepEqual(verifyPlan(first, expectation(), clock, { limits }), {
+    ok: false,
+    reason: 'unknown',
+  });
+  assert.deepEqual(consumePlan(second, expectation(), clock, { limits }), { ok: true });
+  assert.deepEqual(consumePlan(third, expectation(), clock, { limits }), { ok: true });
 });
 
 test('a cap below one is clamped rather than looped on', () => {

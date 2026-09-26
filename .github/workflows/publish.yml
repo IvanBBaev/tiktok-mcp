@@ -13,7 +13,9 @@ name: Publish
 # OIDC, which is also what provenance is attested from — a token would be both
 # unnecessary and a thing that can leak.
 #
-# Do not rename this workflow: publish-mcp.yml triggers on `workflows: [Publish]`.
+# Do not rename or move this workflow: publish-mcp.yml and publish-vscode.yml
+# trigger on `workflows: [Publish]` and accept only a run whose path is
+# .github/workflows/publish.yml.
 on:
   push:
     tags: ['v*']
@@ -27,6 +29,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The write token must not sit in .git/config while `npm ci` runs every
+          # devDependency's lifecycle scripts; `gh release` reads GH_TOKEN instead.
+          persist-credentials: false
       # v7+ is required: older setup-node exported a placeholder NODE_AUTH_TOKEN,
       # and npm treats any token it finds as "already authenticated" and never
       # reaches for OIDC. `registry-url` is deliberately omitted for the same
@@ -36,8 +42,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      # Node 22 ships npm 10.x; trusted publishing needs >= 11.5.1.
-      - run: npm install -g npm@latest
+      # Node 22 ships npm 10.x; trusted publishing needs >= 11.5.1. Pinned: the
+      # npm that runs next to an OIDC-capable job is not a floating dependency.
+      - run: npm install -g npm@12.1.0
       - run: npm ci
       # The guard runs from build/, like every other script in scripts/.
       - run: npm run build
@@ -53,8 +60,16 @@ jobs:
       - run: npm run smoke:pack
       # A prerelease tag must not land on `latest`, or every `npx tiktok-mcp-ai`
       # in the world silently upgrades to a release candidate.
+      # Captured first: inside `echo "…$(…)" >> "$GITHUB_ENV"` a failing guard
+      # would lose its exit status and publish under an empty tag.
       - name: Resolve the npm dist-tag
-        run: echo "DIST_TAG=$(node build/scripts/release-guard.js --dist-tag)" >> "$GITHUB_ENV"
+        run: |
+          dist_tag=$(node build/scripts/release-guard.js --dist-tag)
+          if [ -z "$dist_tag" ]; then
+            echo "release-guard printed no dist-tag" >&2
+            exit 1
+          fi
+          echo "DIST_TAG=$dist_tag" >> "$GITHUB_ENV"
       - run: npm publish --provenance --access public --tag "$DIST_TAG"
       # After npm, never before: a GitHub release pointing at a version the
       # registry does not have is worse than no release at all.

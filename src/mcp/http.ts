@@ -49,12 +49,20 @@ import {
 } from 'node:http';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import {
+  isJSONRPCErrorResponse,
+  isJSONRPCNotification,
+  isJSONRPCRequest,
+  isJSONRPCResultResponse,
+  type RequestId,
+} from '@modelcontextprotocol/sdk/types.js';
 
 import { systemClock, type Clock } from '../core/clock.js';
 import { TikTokError } from '../core/errors.js';
 import type { Logger } from '../core/log.js';
+import { boundPortOf } from '../core/net.js';
 import { registerSecret } from '../core/redact.js';
-import type { Settings } from '../core/settings.js';
+import { canonicalHostName, type Settings } from '../core/settings.js';
 import type { McpServerHandle } from './server.js';
 
 /** The single path served. Anything else is a 404 — with a valid token or not. */
@@ -67,6 +75,32 @@ const ALLOWED_METHODS: ReadonlySet<string> = new Set(['GET', 'POST', 'DELETE']);
 const TRANSPORT_ERROR = -32000;
 /** "Session not found", again matching the SDK so clients need no special case. */
 const SESSION_ERROR = -32001;
+/** JSON-RPC "Parse error", as the SDK answers an unparsable body. */
+const PARSE_ERROR = -32700;
+
+/**
+ * The largest request body read — the SDK's own historical cap. The body is
+ * read here, not by the SDK, because its web-standard path buffers a body of
+ * any size before parsing it on the event loop.
+ */
+const MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+/** Live sessions at most; one more `initialize` is refused, not queued. */
+const DEFAULT_MAX_SESSIONS = 128;
+
+/**
+ * A session with no request in flight and no open stream for this long is
+ * closed the next time a session is opened. Clients that exit without a
+ * DELETE are the common case, and each leaves a whole `Server` behind.
+ */
+const DEFAULT_SESSION_IDLE_MS = 30 * 60 * 1000;
+
+/**
+ * How long `close()` waits for requests already in flight before it tears the
+ * sessions down anyway. A publish mid-upload is the case this is for: aborting
+ * it leaves an `unknown` journal outcome the operator then has to chase.
+ */
+const DEFAULT_DRAIN_MS = 10_000;
 
 /** The `http` scheme's default port: an authority without one means this. */
 const DEFAULT_HTTP_PORT = '80';
@@ -85,6 +119,12 @@ export interface OriginPolicy {
   loopbackOnly: boolean;
   /** The port actually bound, not the configured one — a test may bind 0. */
   port: number;
+  /**
+   * `TT_HTTP_ALLOWED_HOSTS`: when present, `Host` — and a browser's `Origin` —
+   * must name one of these. It is what closes DNS rebinding past loopback,
+   * where the bind alone cannot say which names are ours.
+   */
+  allowedHosts?: ReadonlySet<string>;
 }
 
 /** Loopback covers only what stays on the machine. `0.0.0.0` does not. */
@@ -106,6 +146,15 @@ interface Authority {
 }
 
 /**
+ * The hostname as `Origin` and the allowlist both carry it (see
+ * `canonicalHostName`). A name the URL parser refuses is kept lowercased: it can
+ * match no allowlist entry and no loopback name, so the checks refuse it anyway.
+ */
+function canonicalHost(hostname: string): string {
+  return canonicalHostName(hostname) ?? hostname.toLowerCase();
+}
+
+/**
  * Split an authority into hostname and port. IPv6 literals are bracketed by the
  * HTTP grammar, which is what makes the last-colon split safe for everything
  * else.
@@ -116,18 +165,51 @@ function parseAuthority(value: string): Authority | undefined {
   if (trimmed.startsWith('[')) {
     const end = trimmed.indexOf(']');
     if (end < 0) return undefined;
-    const hostname = trimmed.slice(1, end).toLowerCase();
+    const hostname = canonicalHost(trimmed.slice(1, end));
     const rest = trimmed.slice(end + 1);
     if (rest === '') return { hostname };
     if (!rest.startsWith(':')) return undefined;
-    return { hostname, port: rest.slice(1) };
+    return withPort(hostname, rest.slice(1));
   }
   const colon = trimmed.lastIndexOf(':');
-  if (colon < 0) return { hostname: trimmed.toLowerCase() };
-  return {
-    hostname: trimmed.slice(0, colon).toLowerCase(),
-    port: trimmed.slice(colon + 1),
-  };
+  if (colon < 0) return { hostname: canonicalHost(trimmed) };
+  return withPort(canonicalHost(trimmed.slice(0, colon)), trimmed.slice(colon + 1));
+}
+
+/** A lone `notifications/cancelled` — the one message a draining server still takes. */
+function isCancel(body: unknown): boolean {
+  return isJSONRPCNotification(body) && body.method === 'notifications/cancelled';
+}
+
+/**
+ * Only a decimal port in 1-65535 is an authority. Anything else would pass the
+ * hostname gate and then earn a bare, envelope-less 400 from the SDK adapter.
+ */
+function withPort(hostname: string, port: string): Authority | undefined {
+  if (!/^\d{1,5}$/.test(port)) return undefined;
+  const value = Number(port);
+  // Re-spelled: `:080` is port 80, and the comparison against the bound port
+  // is by string.
+  return value >= 1 && value <= 65_535 ? { hostname, port: String(value) } : undefined;
+}
+
+/**
+ * The `Host` a request is handed to the SDK with, once the gate has accepted
+ * it: the authority re-spelled canonically. The SDK's request adapter checks
+ * `Host` again with its own, narrower grammar and answers a bare 400 to a
+ * spelling it cannot reconcile with the URL parser's — `127.1` with a port of
+ * 60000 or more, which an ephemeral bind hands out routinely — so a host the
+ * gate already accepted must reach it in the one form both agree on.
+ *
+ * A value that does not parse is returned as it came: the gate refuses it
+ * before this runs, so there is nothing to re-spell. Exported for the same
+ * reason as the gate: the no-port form arrives only on the default port or through a proxy.
+ */
+export function canonicalHostHeader(value: string | undefined): string | undefined {
+  const host = value === undefined ? undefined : parseAuthority(value);
+  if (host === undefined) return value;
+  const name = host.hostname.includes(':') ? `[${host.hostname}]` : host.hostname;
+  return host.port === undefined ? name : `${name}:${host.port}`;
 }
 
 /**
@@ -155,6 +237,8 @@ export function dnsRebindingRejection(
 ): 'Host' | 'Origin' | undefined {
   const host = headers.host === undefined ? undefined : parseAuthority(headers.host);
   if (host === undefined) return 'Host';
+  const { allowedHosts } = policy;
+  if (allowedHosts !== undefined && !allowedHosts.has(host.hostname)) return 'Host';
   if (policy.loopbackOnly) {
     if (!isLoopbackName(host.hostname)) return 'Host';
     if ((host.port ?? DEFAULT_HTTP_PORT) !== String(policy.port)) return 'Host';
@@ -172,6 +256,7 @@ export function dnsRebindingRejection(
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return 'Origin';
   const originHost = stripBrackets(url.hostname).toLowerCase();
+  if (allowedHosts !== undefined && !allowedHosts.has(originHost)) return 'Origin';
   if (!policy.loopbackOnly) {
     return originHost === host.hostname ? undefined : 'Origin';
   }
@@ -226,8 +311,21 @@ export interface HttpTransportOptions {
    * requests.
    */
   createHandle: (sessionId: string) => McpServerHandle | Promise<McpServerHandle>;
+  /**
+   * Called exactly once for every handle `createHandle` returned, when its
+   * transport closes — a DELETE, an idle or shutdown close, or a POST that was
+   * not an `initialize` and so never became a session. The owner drops the
+   * handle from whatever it keeps them in.
+   */
+  releaseHandle?: (handle: McpServerHandle) => void;
   /** Injected so session ages are deterministic under `mockClock` (CC-H4). */
   clock?: Clock;
+  /** Live-session cap; defaults to 128. A test seam, not a setting. */
+  maxSessions?: number;
+  /** Idle age after which a session is closed; defaults to 30 minutes. A test seam. */
+  sessionIdleMs?: number;
+  /** How long `close()` waits for requests in flight; defaults to 10 s. A test seam. */
+  drainMs?: number;
 }
 
 export interface HttpTransportHandle {
@@ -239,13 +337,43 @@ export interface HttpTransportHandle {
   readonly url: string;
   /** Live sessions; a diagnostic, never a protocol input. */
   sessions(): number;
-  /** Ends every session and releases the port. Idempotent. */
+  /**
+   * Refuses new requests, waits up to the drain budget for the ones in flight,
+   * then ends every session and releases the port. Idempotent: a second call
+   * returns the first call's promise.
+   */
   close(): Promise<void>;
 }
 
 interface Session {
   readonly transport: StreamableHTTPServerTransport;
   readonly openedAtMs: number;
+  /** When the last request on it arrived or finished. */
+  lastSeenMs: number;
+  /** Requests whose response is still open — a GET stream counts until it ends. */
+  active: number;
+  /**
+   * JSON-RPC calls not yet answered. A handler outlives its POST when the
+   * client drops the connection, so `active` alone would let the idle sweep
+   * close a session — and abort the handler — mid-publish.
+   */
+  readonly calls: ReadonlySet<RequestId>;
+}
+
+/**
+ * `open` serves; `draining` refuses new requests while the accepted ones
+ * finish; `closed` has torn the sessions down.
+ */
+type Phase = 'open' | 'draining' | 'closed';
+
+/** A request that arrived after `close()` began: no new work is accepted. */
+function sendShuttingDown(res: ServerResponse): void {
+  sendJsonRpcError(
+    res,
+    503,
+    TRANSPORT_ERROR,
+    'Service Unavailable: the server is shutting down',
+  );
 }
 
 function sendJsonRpcError(
@@ -265,6 +393,65 @@ function sendJsonRpcError(
 }
 
 /**
+ * The raw body of a request, or `undefined` when it exceeds `limit`. Past the
+ * limit the rest is drained and dropped, so memory stays bounded while the
+ * caller still gets to answer before the socket is ended.
+ */
+function readBody(req: IncomingMessage, limit: number): Promise<Buffer | undefined> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const onData = (chunk: Buffer): void => {
+      size += chunk.length;
+      if (size > limit) {
+        // Stop collecting and keep the stream flowing into nothing. The `end`
+        // that may still follow resolves a promise that is already settled.
+        req.off('data', onData);
+        req.resume();
+        chunks.length = 0;
+        resolve(undefined);
+        return;
+      }
+      chunks.push(chunk);
+    };
+    req.on('data', onData);
+    req.on('end', () => {
+      resolve(Buffer.concat(chunks));
+    });
+    req.on('error', reject);
+  });
+}
+
+/**
+ * The parsed JSON body of a POST, or `undefined` once the request has been
+ * answered here: 413 past {@link MAX_BODY_BYTES}, 400 for a body that is not
+ * JSON — the same answer the SDK gives, without the SDK ever buffering it.
+ */
+async function readJsonBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<{ body: unknown } | undefined> {
+  const declared = Number(headerValue(req, 'content-length'));
+  const raw = declared > MAX_BODY_BYTES ? undefined : await readBody(req, MAX_BODY_BYTES);
+  if (raw === undefined) {
+    sendJsonRpcError(res, 413, TRANSPORT_ERROR, 'Payload Too Large', {
+      connection: 'close',
+    });
+    // Whatever is still arriving is not read; the socket goes with the answer.
+    res.once('finish', () => {
+      req.destroy();
+    });
+    return undefined;
+  }
+  try {
+    return { body: JSON.parse(raw.toString('utf8')) };
+  } catch {
+    sendJsonRpcError(res, 400, PARSE_ERROR, 'Parse error: Invalid JSON');
+    return undefined;
+  }
+}
+
+/**
  * One header value as a string. Node folds repeated headers itself; the only
  * ones it hands back as an array are irrelevant here, and an array is not a
  * value this transport can act on.
@@ -274,27 +461,21 @@ function headerValue(req: IncomingMessage, name: string): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-/* c8 ignore start -- both fallbacks are unreachable through the public surface:
-   `req.url` is set on every server request, and llhttp rejects a target this
-   parser could not read long before it gets here. They exist because the value
-   is untrusted input and its type says it may be absent. */
-/** The path out of a request target, or `undefined` when it does not parse. */
-function requestPath(target: string | undefined): string | undefined {
+/**
+ * The path out of a request target, or `undefined` when it does not parse.
+ *
+ * A target llhttp accepts is not necessarily one the WHATWG parser can read:
+ * `//` arrives here verbatim, and as a URL reference it is an authority with no
+ * host, which throws. A target that names no path names no `MCP_PATH` either,
+ * so the caller treats `undefined` the same way it treats any other path.
+ */
+function requestPath(target: string): string | undefined {
   try {
-    return new URL(target ?? '/', 'http://placeholder.invalid').pathname;
+    return new URL(target, 'http://placeholder.invalid').pathname;
   } catch {
     return undefined;
   }
 }
-
-/** The port the socket actually got — `TT_PORT` may be 0 under test. */
-function boundPortOf(server: NodeHttpServer, fallback: number): number {
-  const address = server.address();
-  // A listening TCP server always reports an `AddressInfo`; the string arm of
-  // the union is the unix-socket case this transport never takes.
-  return typeof address === 'object' && address !== null ? address.port : fallback;
-}
-/* c8 ignore stop */
 
 function listen(server: NodeHttpServer, host: string, port: number): Promise<void> {
   return new Promise<void>((resolve, reject) => {
@@ -346,26 +527,202 @@ export async function startHttpTransport(
     // Replaced with the real port once the socket is bound.
     port: settings.port,
   };
+  if (settings.httpAllowedHosts !== undefined) {
+    policy.allowedHosts = new Set(settings.httpAllowedHosts);
+  }
 
   const sessions = new Map<string, Session>();
+  const maxSessions = opts.maxSessions ?? DEFAULT_MAX_SESSIONS;
+  // Sessions being opened: counted against the cap from the check onward, since
+  // a session only joins `sessions` once the SDK has handled its `initialize`.
+  let opening = 0;
+  const sessionIdleMs = opts.sessionIdleMs ?? DEFAULT_SESSION_IDLE_MS;
+  const drainMs = opts.drainMs ?? DEFAULT_DRAIN_MS;
   const httpLog = log.child({ component: 'mcp/http' });
-  let closed = false;
+  let phase: Phase = 'open';
+  let closing: Promise<void> | undefined;
+  /**
+   * What the drain waits for: responses to non-GET requests still open (a GET
+   * is a stream with no end), plus JSON-RPC requests whose handler has not
+   * answered yet — a client that hung up mid-call leaves its handler running
+   * with no response to count, and closing its session would abort it.
+   */
+  let pending = 0;
+  let onIdle: (() => void) | undefined;
 
-  async function openSession(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  function settle(): void {
+    pending -= 1;
+    if (pending === 0) onIdle?.();
+  }
+
+  function track(res: ServerResponse): void {
+    pending += 1;
+    res.once('close', settle);
+  }
+
+  /**
+   * Count the transport's requests from arrival to answer. Wrapped after
+   * `connect`, because the SDK installs its own `onmessage` there. A request the
+   * client cancels gets no answer, so the cancellation settles it; closing the
+   * transport settles whatever is left. Returns that close-time settle.
+   */
+  function trackCalls(
+    transport: StreamableHTTPServerTransport,
+    open: Set<RequestId>,
+  ): () => void {
+    const done = (id: RequestId | undefined): void => {
+      if (id !== undefined && open.delete(id)) settle();
+    };
+    const receive = transport.onmessage;
+    transport.onmessage = (message, extra) => {
+      if (isJSONRPCRequest(message) && !open.has(message.id)) {
+        open.add(message.id);
+        pending += 1;
+      } else if (
+        isJSONRPCNotification(message) &&
+        message.method === 'notifications/cancelled'
+      ) {
+        done(message.params?.['requestId'] as RequestId | undefined);
+      }
+      receive?.(message, extra);
+    };
+    const send = transport.send.bind(transport);
+    transport.send = (message, options) => {
+      if (isJSONRPCResultResponse(message) || isJSONRPCErrorResponse(message)) {
+        done(message.id);
+      }
+      return send(message, options);
+    };
+    return () => {
+      for (const id of [...open]) done(id);
+    };
+  }
+
+  /** Resolve once no tracked response is open, or once the budget is spent. */
+  async function drain(): Promise<void> {
+    if (pending === 0) return;
+    const idle = new Promise<'idle'>((resolve) => {
+      onIdle = () => {
+        resolve('idle');
+      };
+    });
+    const timer = new AbortController();
+    const timeout = clock.sleep(drainMs, timer.signal).then(
+      () => 'timeout' as const,
+      () => 'aborted' as const,
+    );
+    const outcome = await Promise.race([idle, timeout]);
+    timer.abort();
+    if (outcome === 'timeout') {
+      httpLog.warn('http shutdown did not drain; aborting requests in flight', {
+        pending,
+        drain_ms: drainMs,
+      });
+    }
+  }
+
+  /**
+   * Close every session idle past `sessionIdleMs`. Run when a session is
+   * about to be opened — the only moment the count matters — so no timer
+   * keeps the process alive. Out of the map first, like `close()`, so no
+   * request can find a transport being torn down.
+   */
+  async function sweepIdle(): Promise<void> {
+    const cutoff = clock.now() - sessionIdleMs;
+    const expired: Session[] = [];
+    for (const [id, session] of sessions) {
+      if (session.active > 0 || session.calls.size > 0 || session.lastSeenMs > cutoff) {
+        continue;
+      }
+      sessions.delete(id);
+      expired.push(session);
+      httpLog.info('mcp session expired', {
+        duration_ms: clock.now() - session.openedAtMs,
+      });
+    }
+    await Promise.allSettled(expired.map((session) => session.transport.close()));
+  }
+
+  async function openSession(
+    req: IncomingMessage,
+    res: ServerResponse,
+    body: unknown,
+  ): Promise<void> {
+    await sweepIdle();
+    if (sessions.size + opening >= maxSessions) {
+      httpLog.warn('http request rejected', {
+        status: 503,
+        reason: 'session limit reached',
+        method: req.method,
+      });
+      sendJsonRpcError(
+        res,
+        503,
+        TRANSPORT_ERROR,
+        'Service Unavailable: too many open sessions',
+      );
+      return;
+    }
+    // The slot is held until the session is in the map or has failed — once
+    // and only once, or a session still answering its `initialize` would count
+    // twice and refuse a request the cap has room for.
+    opening += 1;
+    let reserved = true;
+    const release = (): void => {
+      if (!reserved) return;
+      reserved = false;
+      opening -= 1;
+    };
+    try {
+      await openReservedSession(req, res, body, release);
+    } finally {
+      release();
+    }
+  }
+
+  async function openReservedSession(
+    req: IncomingMessage,
+    res: ServerResponse,
+    body: unknown,
+    release: () => void,
+  ): Promise<void> {
     const id = randomUUID();
     const handle = await opts.createHandle(id);
+    const openCalls = new Set<RequestId>();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => id,
       // The SDK assigns the id while it handles `initialize`; registering from
       // its own hook is what keeps the map and the transport from disagreeing.
       onsessioninitialized: (sessionId: string) => {
-        sessions.set(sessionId, { transport, openedAtMs: clock.now() });
+        release();
+        // A drain that timed out has already emptied the map; a session
+        // registered now would never be closed.
+        if (phase === 'closed') {
+          void transport.close();
+          return;
+        }
+        const now = clock.now();
+        sessions.set(sessionId, {
+          transport,
+          openedAtMs: now,
+          lastSeenMs: now,
+          active: 0,
+          calls: openCalls,
+        });
         httpLog.info('mcp session opened');
       },
     });
     // Set before `connect`: the SDK chains onto an existing handler instead of
     // replacing it, so this cleanup and the server's own teardown both run.
+    let released = false;
+    // Filled in after `connect`; a transport closing before then had no calls.
+    const calls: { settle?: () => void } = {};
     transport.onclose = (): void => {
+      calls.settle?.();
+      if (!released) {
+        released = true;
+        opts.releaseHandle?.(handle);
+      }
       const session = sessions.get(id);
       if (session === undefined) return;
       sessions.delete(id);
@@ -373,10 +730,27 @@ export async function startHttpTransport(
         duration_ms: clock.now() - session.openedAtMs,
       });
     };
-    await handle.server.connect(transport);
+    try {
+      await handle.server.connect(transport);
+    } catch (cause) {
+      // No `onclose` will ever run for a transport that never connected.
+      released = true;
+      opts.releaseHandle?.(handle);
+      throw cause;
+    }
+    calls.settle = trackCalls(transport, openCalls);
+    // `close()` may have torn the sessions down while the handle was being
+    // built or connected; a session opened now would outlive the listener that
+    // was meant to end it. While it is only draining, this request was accepted
+    // before the shutdown and is allowed to finish.
+    if (phase === 'closed') {
+      await transport.close();
+      sendShuttingDown(res);
+      return;
+    }
 
     try {
-      await transport.handleRequest(req, res);
+      await transport.handleRequest(req, res, body);
     } finally {
       if (transport.sessionId === undefined) {
         // The POST was not an `initialize`, so the SDK answered 400 and took no
@@ -387,7 +761,25 @@ export async function startHttpTransport(
   }
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (phase === 'closed' || (phase === 'draining' && req.method !== 'POST')) {
+      sendShuttingDown(res);
+      return;
+    }
+    let body: unknown;
+    if (req.method === 'POST') {
+      const parsed = await readJsonBody(req, res);
+      if (parsed === undefined) return;
+      body = parsed.body;
+    }
     const sessionId = headerValue(req, 'mcp-session-id');
+    // While draining, only a cancel for a live session gets through: it is what
+    // lets the drain stop waiting for the call it names. Checked after the body
+    // read, so a slow body that outlasts the drain is still told "shutting
+    // down" rather than the "Session not found" an emptied map would give.
+    if (phase !== 'open' && !(isCancel(body) && sessions.has(sessionId ?? ''))) {
+      sendShuttingDown(res);
+      return;
+    }
     if (sessionId !== undefined && sessionId !== '') {
       const session = sessions.get(sessionId);
       if (session === undefined) {
@@ -396,7 +788,13 @@ export async function startHttpTransport(
         sendJsonRpcError(res, 404, SESSION_ERROR, 'Session not found');
         return;
       }
-      await session.transport.handleRequest(req, res);
+      session.lastSeenMs = clock.now();
+      session.active += 1;
+      res.once('close', () => {
+        session.active -= 1;
+        session.lastSeenMs = clock.now();
+      });
+      await session.transport.handleRequest(req, res, body);
       return;
     }
     if (req.method !== 'POST') {
@@ -408,7 +806,7 @@ export async function startHttpTransport(
       );
       return;
     }
-    await openSession(req, res);
+    await openSession(req, res, body);
   }
 
   async function dispatch(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -433,6 +831,7 @@ export async function startHttpTransport(
         );
         return;
       }
+      req.headers.host = canonicalHostHeader(headerValue(req, 'host'));
       if (!bearerAccepted(headerValue(req, 'authorization'), expectedDigest)) {
         // One body and one log line for both "no credential" and "wrong
         // credential" — telling them apart is exactly what a prober is after.
@@ -446,12 +845,13 @@ export async function startHttpTransport(
         });
         return;
       }
-      if (requestPath(req.url) !== MCP_PATH) {
+      // `req.url` and `req.method` are typed optional for the client-response
+      // shape of `IncomingMessage`; an absent target is simply not the MCP path,
+      // and an absent method is simply not an allowed one.
+      if (requestPath(String(req.url)) !== MCP_PATH) {
         sendJsonRpcError(res, 404, TRANSPORT_ERROR, 'Not Found');
         return;
       }
-      // `req.method` is typed optional for the client-response shape of
-      // `IncomingMessage`; an absent method is simply not an allowed one.
       if (!ALLOWED_METHODS.has(String(req.method))) {
         sendJsonRpcError(res, 405, TRANSPORT_ERROR, 'Method Not Allowed', {
           allow: [...ALLOWED_METHODS].join(', '),
@@ -472,19 +872,26 @@ export async function startHttpTransport(
   }
 
   const server = createNodeServer((req, res) => {
+    if (req.method !== 'GET') track(res);
     void dispatch(req, res);
   });
 
   await listen(server, bindHost, settings.port);
-  const boundPort = boundPortOf(server, settings.port);
+  const boundPort = boundPortOf(server.address(), settings.port);
   policy.port = boundPort;
 
   const displayHost = bindHost.includes(':') ? `[${bindHost}]` : bindHost;
   const url = `http://${displayHost}:${String(boundPort)}${MCP_PATH}`;
 
-  async function close(): Promise<void> {
-    if (closed) return;
-    closed = true;
+  function close(): Promise<void> {
+    closing ??= shutDown();
+    return closing;
+  }
+
+  async function shutDown(): Promise<void> {
+    phase = 'draining';
+    await drain();
+    phase = 'closed';
     // Take the sessions out of the map first: their `onclose` then has nothing
     // left to report, and no request in flight can find a transport being torn
     // down. `allSettled` because a stuck session must not keep the port.
