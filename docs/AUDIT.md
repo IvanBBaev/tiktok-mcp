@@ -92,26 +92,26 @@ The review transcription lists a valid Privacy Policy **and** Terms of Service
 "a placeholder or a dead link is an easy rejection".
 
 The pages are written — `site/privacy.html` and `site/terms.html` — and
-`.github/workflows/pages.yml` deploys `site/` to GitHub Pages. **Two separate
-things stand between them and a live URL, and doing either one alone still
-publishes nothing.** First, both files are only in the working tree: they are
-**untracked**, `git ls-files site/` lists neither, and `pages.yml` builds its
-artifact from the *repository's* checkout — so a deploy today would publish the
-site without a privacy policy or terms on it. Second, **GitHub Pages is not
-enabled on the repository**, so nothing is deployed at all and all three of
+`.github/workflows/pages.yml` deploys `site/` to GitHub Pages. Both files are
+committed — tracked on `main` since commit `6410fa1`, so `pages.yml`, which
+builds its artifact from the *repository's* checkout, carries them. **One thing
+still stands between them and a live URL: GitHub Pages is not enabled on the
+repository** (`gh api repos/IvanBBaev/tiktok-mcp/pages` → 404). The
+push-triggered `pages.yml` run of that commit failed for that reason, nothing is
+deployed, and all three of
 
 - `https://ivanbbaev.github.io/tiktok-mcp/`
 - `https://ivanbbaev.github.io/tiktok-mcp/privacy.html`
 - `https://ivanbbaev.github.io/tiktok-mcp/terms.html`
 
-return **404** (re-checked 2026-09-01 — the tracked-file list and all three
-URLs — not assumed). This is gap **G-4** in
-[docs/IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) and the human steps are
+return **404** (re-checked 2026-09-28 — the tracked-file list, the Pages API
+and all three URLs — not assumed). This is gap **G-4** in
+[docs/IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) and the human step is
 spelled out in the TE-5 row of [docs/TASK-BREAKDOWN.md](TASK-BREAKDOWN.md):
-commit the two page files, enable Pages with **Source = GitHub Actions**, then
-run `pages.yml` — it auto-triggers only on pushes that touch `site/**`, so if
-the commit lands before Pages is enabled you will need its `workflow_dispatch`
-— and confirm both URLs resolve in a browser. Do not open the submission before
+enable Pages with **Source = GitHub Actions**, then run `pages.yml` by its
+`workflow_dispatch` — it auto-triggers only on pushes that touch `site/**`, and
+the commit carrying the pages has already been pushed — and confirm both URLs
+resolve in a browser. Do not open the submission before
 that; a 404 on the policy URL is the cheapest possible rejection.
 
 If you are a third-party operator submitting your **own** app, these are not
@@ -201,7 +201,7 @@ domain first or keep URL posting out of the demo entirely.
 "Apps still in development or testing" is a documented rejection class
 ([§ 5.7](reviews/round2/tiktok-platform-deep-review.md) item 5). Today
 `https://registry.npmjs.org/tiktok-mcp-ai` returns **404** and `git tag -l` is
-empty (both re-checked 2026-09-01) because the first release has not been
+empty (both re-checked 2026-09-28) because the first release has not been
 published: gap **G-14** (first-release bootstrap) in
 [docs/IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md), still **open** there,
 executed in TE-5. Note the contradiction to resolve before you cite a version
@@ -228,7 +228,7 @@ is shot in production and recorded here. PROBE-LOG's own rules say the demo
 "is not a probe and does not belong in this file". Its status line now reads
 that **one** probe has been run — P-15, the offline engineering spike, on
 2026-08-31 — and that every probe needing a live sandbox account is still
-`not run` (re-checked 2026-09-01). Nothing in the sandbox programme has to
+`not run` (re-checked 2026-09-28). Nothing in the sandbox programme has to
 finish before you submit.
 
 ## 3. What the submission asks for
@@ -350,10 +350,10 @@ for every profile ([docs/SETUP-TIKTOK-APP.md § 4](SETUP-TIKTOK-APP.md#4-store-t
 
 Work top to bottom; every item points at the section that defines it.
 
-1. `site/privacy.html` and `site/terms.html` **committed** (they are untracked
-   today, and the workflow deploys the repository, not your working tree),
-   GitHub Pages enabled, `pages.yml` deployed, both pages loading over HTTPS —
-   verified in a browser, not assumed (§ 2.1, G-4).
+1. GitHub Pages enabled, `pages.yml` deployed, both `privacy.html` and
+   `terms.html` loading over HTTPS — verified in a browser, not assumed (§ 2.1,
+   G-4). The two page files are already committed; the workflow deploys the
+   repository, not your working tree, so keep any edit to them committed too.
 2. Official website live and its domain consistent with the app name (§ 2.2).
 3. App name, icon and description free of TikTok-confusable branding and
    carrying the unofficial-status disclaimer (§ 2.3, G-2).

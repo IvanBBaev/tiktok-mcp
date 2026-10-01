@@ -837,6 +837,16 @@ test('an unknown argument is rejected by the strict schema (CC-G1)', () => {
   assert.throws(() => postVideoTool.input.parse(previewArgs({ privacy: 'SELF_ONLY' })));
 });
 
+test('cc-e3 the video title cap counts UTF-16 code units, so an emoji costs 2', () => {
+  assert.doesNotThrow(() =>
+    postVideoTool.input.parse(previewArgs({ title: '🙂'.repeat(1100) })),
+  );
+  // 1101 code points would pass a code point cap; 2202 units do not pass TikTok's.
+  assert.throws(() =>
+    postVideoTool.input.parse(previewArgs({ title: '🙂'.repeat(1101) })),
+  );
+});
+
 // ---------------------------------------------------------------------------
 // preview (§ 2.6.1)
 // ---------------------------------------------------------------------------

@@ -50,12 +50,11 @@ windows × 24, advisory 26) — this phase is release engineering only.
 - Shipped here beyond the original outline: the documentation site (`site/`,
   deployed by `.github/workflows/pages.yml`) and the packed-tarball smoke gate
   (`npm run smoke:pack`, re-run in `publish.yml` before publishing), which
-  replaced the hand-run RC checklist. Two manual steps still stand between the
-  site and the audit (G-4), and naming only the second one reads as a single
-  click: `site/privacy.html` and `site/terms.html` are **untracked**, and
-  `pages.yml` builds the artifact from the repository's checkout, so a deploy
-  today would publish a site without the two pages the audit requires; and
-  GitHub Pages is not enabled, so every URL on the site returns 404.
+  replaced the hand-run RC checklist. One manual step still stands between the
+  site and the audit (G-4): `site/privacy.html` and `site/terms.html` are
+  committed (since `6410fa1`), but GitHub Pages is not enabled, so every URL on
+  the site returns 404 (re-checked 2026-09-28). Enable it with Source = GitHub
+  Actions and run `pages.yml` by `workflow_dispatch`.
 - npm publish `0.x`; **submit** the TikTok content-sharing audit (required to
   lift SELF_ONLY). Audit *passed* is a 1.x platform milestone outside our
   control — v1.0 does not wait on TikTok's review queue. The submission

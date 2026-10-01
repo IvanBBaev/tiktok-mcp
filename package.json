@@ -15,7 +15,7 @@
   "type": "module",
   "mcpName": "io.github.IvanBBaev/tiktok-mcp-ai",
   "bin": {
-    "tiktok-mcp-ai": "./bin/tiktok-mcp-ai.cjs"
+    "tiktok-mcp-ai": "bin/tiktok-mcp-ai.cjs"
   },
   "main": "./build/src/index.js",
   "files": [

@@ -241,6 +241,23 @@ plumbing stay in the commit history where they belong.
 
 ### Fixed
 
+- On Windows the media-file swap guard compared `dev` and `ino` as numbers.
+  NTFS file IDs routinely exceed `Number.MAX_SAFE_INTEGER`, where neighbouring
+  IDs round to the same double, so a file swapped for one with the same size,
+  mtime and a nearby file ID passed as the pinned file. The four-tuple is now
+  read with `stat({ bigint: true })` and compared exactly; the in-upload
+  modification check compares `mtimeNs` instead of `mtimeMs`.
+- On Windows a directory standing where the publish journal belongs read as an
+  empty journal, so the duplicate guard silently reported no duplicates instead
+  of warning that the journal was unreadable. The tail read now refuses
+  anything but a regular file, and every platform takes the same
+  warn-and-allow path.
+- Text caps (video title 2200, photo title 90, photo description 4000) are
+  measured in UTF-16 code units at the schema boundary on every zod 4 release.
+  zod 4.6 changed `.max()` to count Unicode code points, so an emoji-heavy
+  title up to twice the cap slipped past the schema and was refused only later
+  by the API layer, on a different error path. A shared `utf16String(max)`
+  keeps the advertised `maxLength` and adds the UTF-16 check (CC-E3).
 - CI failed its production-dependency audit on a high advisory in the
   transitive `fast-uri` (`npm audit --omit=dev --audit-level=high`). The
   lockfiles now resolve `fast-uri` 3.1.8, `hono` 4.13.8, `qs` 6.16.0 and the

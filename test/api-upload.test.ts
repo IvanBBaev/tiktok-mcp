@@ -242,8 +242,16 @@ function recordHeaders(inner: FetchStub): {
  * `clock.sleep(backoff)`, so a retry case that does not step time hangs.
  * Only the retry cases need this; the per-request timeout waiter is cancelled
  * when the request settles, so everything else can simply be awaited.
+ *
+ * `holdTime` pauses the clock while it answers true: a stub that awaits real
+ * file I/O inside a request would otherwise see that request's timeout fire in
+ * virtual time before the I/O returns, and fail for a reason it did not stage.
  */
-async function runVirtual<T>(clock: MockClock, pending: Promise<T>): Promise<T> {
+async function runVirtual<T>(
+  clock: MockClock,
+  pending: Promise<T>,
+  holdTime: () => boolean = () => false,
+): Promise<T> {
   let done = false;
   const settled = pending.finally(() => {
     done = true;
@@ -255,7 +263,7 @@ async function runVirtual<T>(clock: MockClock, pending: Promise<T>): Promise<T> 
   // read, and the call would then be failed for someone else's I/O contention
   // (the coverage run puts one instrumented process per test file on the box).
   const giveUpAt = Date.now() + 20_000;
-  while (!done && Date.now() < giveUpAt) await clock.advance(500);
+  while (!done && Date.now() < giveUpAt) await clock.advance(holdTime() ? 0 : 500);
   assert.ok(done, 'virtual time ran out before the call settled');
   return await settled;
 }
@@ -1721,18 +1729,22 @@ test('a media file that is gone before the transfer is a plan_mismatch, not an e
 
 test('the verified identity must be the file the descriptor opened', async () => {
   await withMedia({ size: 25_000 }, async (media) => {
-    const current = await stat(media.path);
+    // A `bigint` stat, as the upload itself takes: on win32 an NTFS file ID sits
+    // above 2^53, where `ino + 1` as a double rounds straight back to `ino` —
+    // the very precision loss the `bigint` identity exists to close.
+    const current = await stat(media.path, { bigint: true });
+    const plain = await stat(media.path);
     const identity = {
-      size: current.size,
-      mtimeMs: current.mtimeMs,
+      size: plain.size,
+      mtimeMs: plain.mtimeMs,
       dev: current.dev,
       ino: current.ino,
     };
     const skews = [
       { field: 'size', identity: { ...identity, size: identity.size + 1 } },
       { field: 'mtimeMs', identity: { ...identity, mtimeMs: identity.mtimeMs - 1_000 } },
-      { field: 'dev', identity: { ...identity, dev: identity.dev + 1 } },
-      { field: 'ino', identity: { ...identity, ino: identity.ino + 1 } },
+      { field: 'dev', identity: { ...identity, dev: identity.dev + 1n } },
+      { field: 'ino', identity: { ...identity, ino: identity.ino + 1n } },
     ];
 
     for (const skew of skews) {
@@ -1887,13 +1899,22 @@ test('a file truncated while its chunk body is being read fails the upload loudl
   await withMedia({ size }, async (media) => {
     const clock = mockClock();
     let puts = 0;
+    let inRequest = false;
     const shrink: FetchStub = async (_input, init) => {
       puts += 1;
-      if (puts === 1) await truncate(media.path, 1_048_576);
-      await drainBody(init?.body);
-      return bare(201);
+      inRequest = true;
+      try {
+        if (puts === 1) await truncate(media.path, 1_048_576);
+        await drainBody(init?.body);
+        return bare(201);
+      } finally {
+        inRequest = false;
+      }
     };
 
+    // Virtual time stands still while the stub truncates and reads: on a slow
+    // disk the request timeout would otherwise win the race and the short read
+    // under test would never be the failure.
     const error = await withFetch(shrink, () =>
       rejection(
         runVirtual(
@@ -1904,6 +1925,7 @@ test('a file truncated while its chunk body is being read fails the upload loudl
             uploadUrl: UPLOAD_URL,
             random: () => 0,
           }),
+          () => inRequest,
         ),
       ),
     );

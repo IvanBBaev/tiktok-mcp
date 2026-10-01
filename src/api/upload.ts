@@ -31,7 +31,7 @@
  * (plus the shared api context).
  */
 
-import type { Stats } from 'node:fs';
+import type { BigIntStats } from 'node:fs';
 import { open, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path';
 
@@ -177,14 +177,36 @@ function planFileSize(plan: ChunkPlan): number {
  *
  * `(size, mtimeMs, dev, ino)` is the four-tuple SECURITY.md pins: size alone
  * misses a same-length edit, and mtime alone misses a swap that preserved it.
+ *
+ * `dev` and `ino` are `bigint` because a `number` cannot hold them exactly:
+ * NTFS file IDs carry a sequence number in their top 16 bits and routinely sit
+ * above `Number.MAX_SAFE_INTEGER`, where neighbouring IDs round to the same
+ * double — two different files would compare as the same inode on win32.
  */
 export interface MediaFile {
   /** Canonical absolute path — symlinks already resolved. */
   path: string;
   size: number;
   mtimeMs: number;
-  dev: number;
-  ino: number;
+  dev: bigint;
+  ino: bigint;
+}
+
+const NS_PER_S = 1_000_000_000n;
+
+/**
+ * The identity four-tuple of a `bigint` stat. `mtimeMs` is rebuilt from the
+ * exact nanoseconds with the formula Node itself uses for a `number` stat
+ * (`sec * 1e3 + nsec / 1e6`), so it is the very double a plain `stat` reports.
+ */
+function identityOf(stats: BigIntStats): FileIdentity {
+  return {
+    size: Number(stats.size),
+    mtimeMs:
+      Number(stats.mtimeNs / NS_PER_S) * 1e3 + Number(stats.mtimeNs % NS_PER_S) / 1e6,
+    dev: stats.dev,
+    ino: stats.ino,
+  };
 }
 
 const MEDIA_ROOT_UNSET =
@@ -272,9 +294,10 @@ export async function resolveMediaFile(
 
   // The file can vanish between `realpath` and `stat`; that is the same
   // answer as never having existed, not a raw errno.
-  const stats = await stat(real).catch(() => undefined);
+  const stats = await stat(real, { bigint: true }).catch(() => undefined);
   if (stats === undefined || !stats.isFile()) throw notFound(real, mediaRoot);
-  if (stats.size === 0) {
+  const identity = identityOf(stats);
+  if (identity.size === 0) {
     throw new TikTokError({
       kind: 'validation',
       code: 'file_empty',
@@ -283,23 +306,17 @@ export async function resolveMediaFile(
         `correct path under ${mediaRoot}.`,
     });
   }
-  if (stats.size > MAX_FILE_BYTES) {
+  if (identity.size > MAX_FILE_BYTES) {
     throw new TikTokError({
       kind: 'validation',
       code: 'file_too_large',
       message:
-        `The file is ${String(stats.size)} bytes; TikTok's maximum is ` +
+        `The file is ${String(identity.size)} bytes; TikTok's maximum is ` +
         `${String(MAX_FILE_BYTES)}. The user must shorten or re-encode the video.`,
     });
   }
 
-  return {
-    path: real,
-    size: stats.size,
-    mtimeMs: stats.mtimeMs,
-    dev: stats.dev,
-    ino: stats.ino,
-  };
+  return { path: real, ...identity };
 }
 
 function outsideRoot(resolved: string, root: string): TikTokError {
@@ -364,7 +381,7 @@ async function pinFile(
   filePath: string,
   total: number,
   identity: FileIdentity | undefined,
-): Promise<{ handle: FileHandle; pinned: Stats }> {
+): Promise<{ handle: FileHandle; pinned: BigIntStats }> {
   let handle: FileHandle;
   try {
     handle = await open(filePath, 'r');
@@ -372,14 +389,15 @@ async function pinFile(
     throw fileChanged(filePath, cause);
   }
   try {
-    const pinned = await handle.stat();
+    const pinned = await handle.stat({ bigint: true });
+    const held = identityOf(pinned);
     const same =
-      pinned.size === total &&
+      held.size === total &&
       (identity === undefined ||
-        (pinned.size === identity.size &&
-          pinned.mtimeMs === identity.mtimeMs &&
-          pinned.dev === identity.dev &&
-          pinned.ino === identity.ino));
+        (held.size === identity.size &&
+          held.mtimeMs === identity.mtimeMs &&
+          held.dev === identity.dev &&
+          held.ino === identity.ino));
     if (!same) throw fileChanged(filePath);
     return { handle, pinned };
   } catch (error) {
@@ -777,7 +795,7 @@ interface ChunkAttemptOptions {
   /** The pinned descriptor; each attempt streams its range from it. */
   handle: FileHandle;
   /** What the descriptor looked like when pinned; a retry re-checks it. */
-  pinned: Stats;
+  pinned: BigIntStats;
   uploadUrl: string;
   signal?: AbortSignal;
 }
@@ -840,9 +858,9 @@ const MODIFIED = 'the media file was modified during the upload';
  * The descriptor survives a rename, not an in-place rewrite: bytes that change
  * under an open upload would reach TikTok as a different video.
  */
-async function fileModified(handle: FileHandle, pinned: Stats): Promise<boolean> {
-  const current = await handle.stat();
-  return current.size !== pinned.size || current.mtimeMs !== pinned.mtimeMs;
+async function fileModified(handle: FileHandle, pinned: BigIntStats): Promise<boolean> {
+  const current = await handle.stat({ bigint: true });
+  return current.size !== pinned.size || current.mtimeNs !== pinned.mtimeNs;
 }
 
 /** Bytes read per pull — bounds memory whatever the chunk size. */

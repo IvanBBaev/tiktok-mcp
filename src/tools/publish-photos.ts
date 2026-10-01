@@ -39,7 +39,7 @@ import {
   type CreatorInfo,
   type PhotoPostInput,
 } from '../api/publish.js';
-import { defineTool, toolInput, type ToolCtx } from '../mcp/define.js';
+import { defineTool, toolInput, utf16String, type ToolCtx } from '../mcp/define.js';
 import { invalidParamsError, publishToolError } from '../mcp/errors.js';
 import {
   payloadDigest,
@@ -226,10 +226,8 @@ const POST_PHOTOS_INPUT = toolInput({
     .nonnegative()
     .optional()
     .describe(COVER_INDEX_DESCRIPTION),
-  title: z.string().max(PHOTO_TITLE_MAX).optional().describe(TITLE_DESCRIPTION),
-  description: z
-    .string()
-    .max(PHOTO_DESCRIPTION_MAX)
+  title: utf16String(PHOTO_TITLE_MAX).optional().describe(TITLE_DESCRIPTION),
+  description: utf16String(PHOTO_DESCRIPTION_MAX)
     .optional()
     .describe(DESCRIPTION_DESCRIPTION),
   privacy_level: z
@@ -532,10 +530,8 @@ const UPLOAD_PHOTOS_DRAFT_INPUT = toolInput({
     .nonnegative()
     .optional()
     .describe(COVER_INDEX_DESCRIPTION),
-  title: z.string().max(PHOTO_TITLE_MAX).optional().describe(TITLE_DESCRIPTION),
-  description: z
-    .string()
-    .max(PHOTO_DESCRIPTION_MAX)
+  title: utf16String(PHOTO_TITLE_MAX).optional().describe(TITLE_DESCRIPTION),
+  description: utf16String(PHOTO_DESCRIPTION_MAX)
     .optional()
     .describe(DESCRIPTION_DESCRIPTION),
   wait_for_completion: z

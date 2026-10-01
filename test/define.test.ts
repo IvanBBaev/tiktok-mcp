@@ -8,6 +8,7 @@ import {
   ACCOUNT_DESCRIPTION,
   defineTool,
   toolInput,
+  utf16String,
   type ToolSpec,
 } from '../src/mcp/define.js';
 
@@ -217,4 +218,22 @@ test('defineTool rejects a tool that is both read-only and destructive', () => {
     spec.annotations.destructiveHint = true;
   });
   assert.match(err.message, /cannot also be destructive/);
+});
+
+test('utf16String caps UTF-16 code units and reports an overflow exactly once', () => {
+  const schema = utf16String(4);
+  assert.equal(schema.safeParse('🙂🙂').success, true);
+  // Three code points but six units: only the refinement sees the overflow.
+  const emoji = schema.safeParse('🙂🙂🙂');
+  assert.equal(emoji.success, false);
+  assert.deepEqual(
+    emoji.error?.issues.map((issue) => [issue.code, issue.message]),
+    [['too_big', 'Too big: expected string to have <=4 characters']],
+  );
+  // An overflow in code points is `.max()`'s to report; the refinement stays quiet.
+  const ascii = schema.safeParse('abcde');
+  assert.equal(ascii.success, false);
+  assert.equal(ascii.error?.issues.length, 1);
+  // The advertised JSON Schema bound is kept.
+  assert.equal(z.toJSONSchema(schema).maxLength, 4);
 });

@@ -166,18 +166,20 @@ test('TT_HTTP_INSECURE on a loopback bind starts the http server without either 
     });
     let stderr = '';
     child.stderr.setEncoding('utf8');
-    const exited = new Promise<number | null>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        child.kill('SIGKILL');
-        reject(new Error(`the entry did not finish in time; stderr: ${stderr}`));
-      }, 20_000);
-      timer.unref();
-      child.on('error', reject);
-      child.on('close', (code) => {
-        clearTimeout(timer);
-        resolve(code);
-      });
-    });
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve, reject) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          reject(new Error(`the entry did not finish in time; stderr: ${stderr}`));
+        }, 20_000);
+        timer.unref();
+        child.on('error', reject);
+        child.on('close', (code, signal) => {
+          clearTimeout(timer);
+          resolve({ code, signal });
+        });
+      },
+    );
     const serving = new Promise<void>((resolve, reject) => {
       child.stderr.on('data', (chunk: string) => {
         stderr += chunk;
@@ -190,7 +192,16 @@ test('TT_HTTP_INSECURE on a loopback bind starts the http server without either 
 
     await serving;
     child.kill('SIGTERM');
-    assert.equal(await exited, 0, stderr);
+    // win32 has no signals to deliver: `kill` there is TerminateProcess whatever
+    // the name, so the child never runs its SIGTERM handler and the close
+    // reports the signal instead of an exit code. The graceful drain is only
+    // observable on POSIX; on win32 the assertion is that nothing else killed it.
+    const { code, signal } = await exited;
+    if (process.platform === 'win32') {
+      assert.deepEqual({ code, signal }, { code: null, signal: 'SIGTERM' }, stderr);
+    } else {
+      assert.equal(code, 0, stderr);
+    }
     // The startup line is the proof the warnings had their chance: both are
     // logged after the bind and before it.
     assert.match(stderr, /serving MCP over http/);

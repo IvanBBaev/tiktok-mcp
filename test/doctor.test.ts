@@ -26,8 +26,9 @@ import {
   utimes,
   writeFile,
 } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 
 import {
   DOCTOR_CHECKS,
@@ -2155,11 +2156,10 @@ test('with nothing but the output seams injected the run still reports', async (
 test('resolveModulePath answers a file: URL and degrades on anything else', () => {
   // The default is `import.meta.url`, which is what production wants and what a
   // test cannot move — so the URL is a parameter and both arms are reachable.
-  assert.ok(
-    resolveModulePath('file:///opt/app/build/src/cli/doctor.js').endsWith(
-      join('opt', 'app', 'build', 'src', 'cli', 'doctor.js'),
-    ),
-  );
+  // Built from an absolute path of this platform: a drive-less `file:///opt/…`
+  // is not an absolute path on win32, where `fileURLToPath` refuses it.
+  const modulePath = resolve('opt', 'app', 'build', 'src', 'cli', 'doctor.js');
+  assert.equal(resolveModulePath(pathToFileURL(modulePath).href), modulePath);
   // Not a `file:` URL: there is no path to hand back, and a doctor run must not
   // die over where it was loaded from. The install check reads '' as "unknown".
   assert.equal(resolveModulePath('https://example.invalid/doctor.js'), '');

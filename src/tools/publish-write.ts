@@ -51,7 +51,7 @@ import {
   type ChunkPlan,
   type MediaFile,
 } from '../api/upload.js';
-import { defineTool, toolInput, type ToolCtx } from '../mcp/define.js';
+import { defineTool, toolInput, utf16String, type ToolCtx } from '../mcp/define.js';
 import { invalidParamsError, publishToolError } from '../mcp/errors.js';
 import type { IntentSource } from '../mcp/journal.js';
 import {
@@ -396,9 +396,7 @@ const POST_VIDEO_INPUT = toolInput({
   source: z.enum(['file', 'url']).describe(SOURCE_DESCRIPTION),
   file_path: z.string().min(1).optional().describe(FILE_PATH_DESCRIPTION),
   video_url: z.string().min(1).optional().describe(VIDEO_URL_DESCRIPTION),
-  title: z
-    .string()
-    .max(VIDEO_TITLE_MAX)
+  title: utf16String(VIDEO_TITLE_MAX)
     .optional()
     .describe(
       'Caption. Up to 2200 UTF-16 code units (emoji count as 2, the way TikTok counts). ' +

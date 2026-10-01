@@ -1613,19 +1613,24 @@ test("cc-f5 a tombstone that cannot be stat'ed after the rename is not treated a
     };
 
     let ran = false;
-    await driveClock(
-      f.clock,
-      withEnvLock(
-        f.envFile,
-        () => {
-          ran = true;
-          return Promise.resolve();
-        },
-        { waitMs: 500, staleMs: 15_000, clock: f.clock, logger },
-      ),
+    const held = withEnvLock(
+      f.envFile,
+      () => {
+        ran = true;
+        return Promise.resolve();
+      },
+      { waitMs: 500, staleMs: 15_000, clock: f.clock, logger },
     );
-
+    // Virtual time must not move while the first attempt is still doing real
+    // I/O: `driveClock` would advance it on every real millisecond, and on a
+    // loaded machine the whole 500 ms budget is gone before the retry sleep is
+    // even armed. Wait for that sleep, then let exactly it fire.
+    await until(() => f.clock.pending() === 1, 'the retry after the unverified break');
     assert.equal(removed, true, 'the tombstone must have been removed under the breaker');
+    assert.equal(ran, false, 'the break was not claimed, so the lock is not taken yet');
+    await f.clock.advance(150); // the longest jittered retry
+    await held;
+
     assert.equal(ran, true, 'the path is clear, so a later attempt takes the lock');
     assert.deepEqual(warnings(records), [], 'this call broke nothing it could verify');
     assert.equal(

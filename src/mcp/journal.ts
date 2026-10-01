@@ -511,7 +511,15 @@ async function readTail(
   // Same nesting as `readWhole` above: the close is the outer `try`'s job.
   try {
     try {
-      const { size } = await handle.stat();
+      const stats = await handle.stat();
+      // win32 hands out a handle for a directory and reports it as zero bytes,
+      // and a zero-length read never reaches the OS — so without this check a
+      // directory standing where the journal belongs would read as an empty
+      // journal there, while POSIX fails the read with EISDIR. Refusing
+      // anything but a regular file makes the guard's warn-and-allow path the
+      // same on every platform instead of a silent "no duplicates".
+      if (!stats.isFile()) throw new Error('not a regular file');
+      const { size } = stats;
       const length = Math.min(size, maxBytes);
       const buffer = Buffer.alloc(length);
       await handle.read(buffer, 0, length, size - length);

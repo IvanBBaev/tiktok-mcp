@@ -176,7 +176,8 @@ passed":
 scheduled as a concrete task in `docs/TASK-BREAKDOWN.md` ("Lands in"). The
 **Status** column is an audit of the tree, not a restatement of intent: every
 row below was checked against the file, code path, test or workflow that is
-supposed to close it (audited 2026-09-01). Four values are used — **closed**
+supposed to close it (audited 2026-09-01; the two rows still not closed, G-4
+and G-14, re-audited 2026-09-28). Four values are used — **closed**
 (delivered and verifiable in the repo), **closed pending an owner action** (the
 repo's half is done, a human step outside it remains), **partial** (with the
 shortfall named), **open**. The **Gap** column keeps its original wording — it
@@ -189,7 +190,7 @@ is the current fact.
 | G-1 | `LICENSE` file (MIT) — README says "MIT (planned)"; no WP creates the file | TB-1 | **closed** — `LICENSE` (MIT, © 2026 Ivan Baev), `"license": "MIT"` in `package.json`, README's license badge links to the file; no "MIT (planned)" text survives in README |
 | G-2 | Unofficial-status/trademark disclaimer in README + npm package description ("not affiliated with TikTok/ByteDance") | TB-1, TE-4 | **closed** — README callout at the top + § Trademark; `package.json` `description` opens with "Unofficial" and a `trademark` field carries the full text; `extension/package.json` `description` — the one line Marketplace search shows — opens with "Unofficial:" and closes with the disclaimer, and `extension/README.md` § Trademark carries it into the listing body; the three site pages each carry it too (`site/index.html` hero, footer and two FAQ answers; `site/privacy.html` and `site/terms.html` in both the meta description and the body) |
 | G-3 | `docs/SETUP-TIKTOK-APP.md` — operator walkthrough of the developer portal: app creation, Login Kit + Content Posting products, redirect URI registration, sandbox setup, domain verification | TE-4 | **closed** — `docs/SETUP-TIKTOK-APP.md` §§ 1–9 covers every item the gap names: app creation (§ 1), both products (§ 2), redirect URI (§ 3), sandbox vs. production (§ 6), the audit gate (§ 7), domain verification (§ 8) |
-| G-4 | Privacy Policy + Terms of Service at live URLs — hard prerequisite for the TikTok audit. No longer external: since the Pages site landed (`site/`, deployed by `pages.yml`), the two pages are in-repo deliverables — `site/privacy.html` and `site/terms.html`, served at `https://ivanbbaev.github.io/tiktok-mcp/privacy.html` and `…/terms.html`. They describe this project's own distribution and the software's data behavior; a developer running the server registers **their own** TikTok app and owes the portal their own policy URLs (SETUP-TIKTOK-APP.md § 1). One step is outside the repo: GitHub Pages must be enabled on the repository with Source = GitHub Actions — no workflow and no commit can do that, and until it is done the whole site 404s | TE-5 | **closed pending an owner action** — both pages are written (`site/privacy.html`, `site/terms.html`), carry the right canonical URLs and are linked from `site/index.html` and `site/sitemap.xml`; `pages.yml` deploys `site/`. Two things outside the repo's reach remain: the two files are still **untracked** (`git status`), and Pages is not enabled, so both URLs return 404 (`docs/AUDIT.md` § 2.1, re-checked 2026-09-01). Owner steps: commit the pages, enable Pages with Source = GitHub Actions, run `pages.yml` (it auto-triggers only on `site/**` pushes), confirm both URLs in a browser |
+| G-4 | Privacy Policy + Terms of Service at live URLs — hard prerequisite for the TikTok audit. No longer external: since the Pages site landed (`site/`, deployed by `pages.yml`), the two pages are in-repo deliverables — `site/privacy.html` and `site/terms.html`, served at `https://ivanbbaev.github.io/tiktok-mcp/privacy.html` and `…/terms.html`. They describe this project's own distribution and the software's data behavior; a developer running the server registers **their own** TikTok app and owes the portal their own policy URLs (SETUP-TIKTOK-APP.md § 1). One step is outside the repo: GitHub Pages must be enabled on the repository with Source = GitHub Actions — no workflow and no commit can do that, and until it is done the whole site 404s | TE-5 | **closed pending an owner action** — both pages are written (`site/privacy.html`, `site/terms.html`), carry the right canonical URLs and are linked from `site/index.html` and `site/sitemap.xml`; `pages.yml` deploys `site/`. Both files are tracked on `main` since commit `6410fa1` (`git ls-files site/` lists them). One thing outside the repo's reach remains: Pages is not enabled (`gh api repos/IvanBBaev/tiktok-mcp/pages` → 404), so the push-triggered `pages.yml` run of that commit failed and both URLs return 404 (`docs/AUDIT.md` § 2.1; re-audited 2026-09-28). Owner step: enable Pages with Source = GitHub Actions, run `pages.yml` by `workflow_dispatch` (it auto-triggers only on `site/**` pushes, and the commit carrying the pages has already been pushed), confirm both URLs in a browser |
 | G-5 | `login --revoke` (logout/disconnect) implementation + tests — mentioned in AUTH.md, absent from every WP; includes § 2.10 semantics (revoke keeps the journal; purge only with explicit `--purge-journal`) | TC-2 | **closed** — `runRevoke` in `src/cli/login.ts` revokes upstream, clears the profile's tokens and states that the journal was kept; purge happens only under `--purge-journal`, which `parseLoginArgs` rejects on its own. Tests in `test/login.test.ts`: `--revoke clears the tokens but keeps the journal`, `--revoke --purge-journal deletes the journal and its rotation`, `--purge-journal without --revoke is rejected` |
 | G-6 | `docs/CLIENTS.md` — per-client configuration: Claude Code, Claude Desktop, VS Code, Cursor | TE-4 | **closed** — `docs/CLIENTS.md` has a section per named client (Claude Code, Claude Desktop, VS Code, Cursor) plus MCP Inspector, a launch-command decision table and a "confirm the wiring" step |
 | G-7 | `docs/TROUBLESHOOTING.md` — top failure modes, doctor-first diagnostic flow | TE-4 | **closed** — `docs/TROUBLESHOOTING.md` opens with § Run doctor first (incl. `--json` for CI), then a row per check and the failure modes grouped by area (setup, login, scopes, env lock, rate limits, publishing) |
@@ -202,8 +203,8 @@ is the current fact.
 | G-14 | First-release bootstrap: npm trusted publishing cannot publish a package's *first* version, so the initial `npm publish` is manual and must happen — together with the trusted-publisher configuration — **before** any `v*` tag is pushed. See below | TE-5 | **open** — an owner action with nothing left for the repo to contribute. The pipeline is as designed (`publish.yml` holds no `NPM_TOKEN`, requests `id-token: write`, omits `registry-url`) and the package has never been published, so the bootstrap below has not happened. The tag is no longer a trap: only `publish.yml` runs on `tags: ['v*']`; `publish-mcp.yml` and `publish-vscode.yml` both follow it (`workflow_run` on *Publish*, gated on a successful, push-started `publish.yml` run of this repository), so a premature tag fails at `npm publish` and ships nothing anywhere. It still does not release anything either — do the manual publish before the first `v*` tag |
 
 **Where that leaves 1.0.** Twelve of the fourteen gaps are closed in the
-repository. Neither of the two that remain is code: G-4 needs its two pages
-committed and GitHub Pages enabled so the URLs the audit requires resolve, and
+repository. Neither of the two that remain is code: G-4 needs GitHub Pages
+enabled (and `pages.yml` run once) so the URLs the audit requires resolve, and
 G-14 needs the one manual `npm publish` described next. Both are the owner's to
 perform, and G-14 is what lets the first `v*` tag actually ship a release.
 
@@ -239,12 +240,36 @@ is launching `npx -y tiktok-mcp-ai` against a package the registry does not have
 — a spent, unreusable Marketplace version.) The trap is defused, but the tag
 still releases nothing until G-14 is done.
 
-The first release is therefore a one-time manual sequence: `npm publish
---access public` from a logged-in machine, then configure the trusted publisher
-for `IvanBBaev/tiktok-mcp` + workflow `publish.yml`, and only then push the tag.
-Every release after that is a tag push. `release-guard` cannot substitute for
-this — it compares the tag against the five version fields and the changelog and
-knows nothing about what the registry holds.
+The first release is therefore a one-time manual sequence, run once the release
+commit (every version field bumped and the changelog cut, per CONTRIBUTING.md
+§ Releasing) is on `main` with CI green, from a clean checkout of that commit:
+
+1. `npm ci && npm run build`, then
+   `node build/scripts/release-guard.js --tag vX.Y.Z` and `npm run smoke:pack`.
+   The package has no `prepack` script, so `npm publish` ships whatever
+   `build/src` holds — build it from that tree first.
+2. `npm login`, then `npm publish --access public` (npm asks for the 2FA
+   one-time password, or pass `--otp <code>`). No `--provenance`: provenance
+   is attested from a CI OIDC identity and fails on a laptop, so this one
+   version ships without it; every CI-published version after it carries it.
+3. Configure the trusted publisher on npmjs.com → `tiktok-mcp-ai` → Settings →
+   Trusted Publisher → GitHub Actions: owner `IvanBBaev`, repository
+   `tiktok-mcp`, workflow filename `publish.yml`, environment left empty
+   (`publish.yml` declares no `environment:`).
+4. Push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+Step 4 tags a version npm already has, so that one *Publish* run passes the
+guard, `check` and `smoke:pack` and then fails at `npm publish` (E403 — a
+published version cannot be overwritten). The followers require a successful
+*Publish* run, so nothing else happens on its own; finish that release by hand
+from the tag —
+`node build/scripts/release-guard.js --tag vX.Y.Z --notes > notes.md`,
+`gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file notes.md`,
+`gh workflow run publish-mcp.yml --ref vX.Y.Z` and
+`gh workflow run publish-vscode.yml --ref vX.Y.Z` (the last needs the
+`VSCE_PAT` repository secret). Every release after that is a tag push. `release-guard` cannot
+substitute for this — it compares the tag against the five version fields and
+the changelog and knows nothing about what the registry holds.
 
 ## Risk register
 

@@ -558,9 +558,12 @@ test('cc-d8 a file under the root resolves canonically and carries its identity'
     // mtime alone misses a swap that preserved it.
     assert.equal(media.mtimeMs, PINNED_MTIME_S * 1000);
     assert.equal(media.mtimeMs, stats.mtimeMs);
-    assert.equal(media.dev, stats.dev);
-    assert.equal(media.ino, stats.ino);
-    assert.ok(media.ino > 0);
+    // Device and inode are exact `bigint`s: a double cannot hold an NTFS file
+    // ID, whose sequence number puts it above 2^53.
+    const exact = await stat(clip, { bigint: true });
+    assert.equal(media.dev, exact.dev);
+    assert.equal(media.ino, exact.ino);
+    assert.ok(media.ino > 0n);
   } finally {
     await box.cleanup();
   }

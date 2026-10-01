@@ -748,6 +748,13 @@ test('cc-e3 a description over 4000 UTF-16 code units is rejected by both photo 
   assert.throws(() =>
     uploadPhotosDraftTool.input.parse(draftArgs({ description: 'd'.repeat(4001) })),
   );
+  // UTF-16 code units, not code points: 2001 emoji are 4002 units (CC-E3).
+  assert.throws(() =>
+    postPhotosTool.input.parse(previewArgs({ description: '🙂'.repeat(2001) })),
+  );
+  assert.throws(() =>
+    uploadPhotosDraftTool.input.parse(draftArgs({ description: '🙂'.repeat(2001) })),
+  );
 });
 
 test('cc-g1 an unknown argument is rejected by the strict schema of both photo tools', () => {

@@ -131,6 +131,32 @@ export const ACCOUNT_DESCRIPTION =
 export const accountArg = z.string().min(1).optional().describe(ACCOUNT_DESCRIPTION);
 
 /**
+ * A string capped at `max` UTF-16 code units (CC-E3) — the unit TikTok counts,
+ * so an emoji costs 2. Since zod 4.6, `.max()` measures Unicode code points
+ * instead (before, UTF-16 units). The UTF-16 check runs first and aborts, and
+ * `.max()` follows only for the advertised JSON Schema `maxLength`: a string
+ * within the UTF-16 cap is within the code-point cap too, so on either zod
+ * the refinement is the one check that reports, and it reports once.
+ */
+export function utf16String(max: number): z.ZodString {
+  return z
+    .string()
+    .superRefine((text, ctx) => {
+      if (text.length > max) {
+        ctx.addIssue({
+          code: 'too_big',
+          origin: 'string',
+          maximum: max,
+          inclusive: true,
+          input: text,
+          continue: false,
+        });
+      }
+    })
+    .max(max);
+}
+
+/**
  * Build a tool input schema: the caller's shape plus the auto-injected
  * `account` argument (TOOLS.md § 2.2), sealed with `.strict()` (CC-G1).
  *

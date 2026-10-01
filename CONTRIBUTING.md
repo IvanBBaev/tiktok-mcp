@@ -170,17 +170,32 @@ frozen inter-module interfaces.
 
 The package is published to npm as
 [`tiktok-mcp-ai`](https://www.npmjs.com/package/tiktok-mcp-ai) from CI on a
-version tag — maintainers only:
+version tag — maintainers only. The very first version cannot be published
+this way (trusted publishing needs the package to exist); it is a one-time
+manual sequence described in
+[docs/IMPLEMENTATION-PLAN.md § First release bootstrap (G-14)](docs/IMPLEMENTATION-PLAN.md).
 
-1. Update [CHANGELOG.md](CHANGELOG.md): move `[Unreleased]` items under the new
-   version and date, and refresh the compare links.
-2. Bump the version (`npm version <patch|minor|major>`), which creates the
-   `vX.Y.Z` tag.
-3. Push the tag; CI runs the full gate and publishes on green. A prerelease
+1. Update [CHANGELOG.md](CHANGELOG.md): move `[Unreleased]` items under
+   `## [X.Y.Z] - YYYY-MM-DD`, leave an empty `## [Unreleased]` above it, and
+   refresh the compare links (`[Unreleased]` and a new `[X.Y.Z]`).
+2. Bump the version everywhere `release:guard` compares it — `npm version`
+   alone updates only `package.json` and its lockfile:
+   - `npm version X.Y.Z --no-git-tag-version` at the root and again in
+     `extension/`;
+   - `server.json` `version` and `packages[0].version`, and
+     `.claude-plugin/plugin.json` `version`, by hand;
+   - `npm run build && npm run sync:write` for the site JSON-LD
+     `softwareVersion`.
+3. Verify with `npm run check` and
+   `node build/scripts/release-guard.js --tag vX.Y.Z`, commit, push to `main`
+   and wait for CI to go green.
+4. Tag that commit and push the tag
+   (`git tag vX.Y.Z && git push origin vX.Y.Z`); CI runs the full gate and
+   publishes on green. A prerelease
    tag (`vX.Y.Z-rc.N`) goes to npm under the `next` dist-tag only — the VS Code
    Marketplace rejects semver prereleases, so `publish-vscode.yml` skips its
    publish step for such a version.
-4. Verify the published package and the GitHub release notes.
+5. Verify the published package and the GitHub release notes.
 
 Versioning follows [SemVer](https://semver.org):
 

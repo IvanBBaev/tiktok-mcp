@@ -2496,6 +2496,12 @@ interface DrainChild {
   send(frame: unknown): void;
   /** Resolves once a stdout frame answers `id`. */
   frame(id: number): Promise<Record<string, unknown>>;
+  /**
+   * Resolves once `count` stdout frames answer `id`. stdout and stderr are
+   * separate pipes, so a log line can reach the parent before a frame the
+   * worker wrote ahead of it.
+   */
+  answers(id: number, count: number): Promise<Record<string, unknown>[]>;
   /** Resolves once a stderr log line has exactly this `msg`. */
   logged(msg: string): Promise<void>;
   /** The `msg` of every stderr log line, in the order they were written. */
@@ -2568,6 +2574,14 @@ function startDrainWorker(scenario = 'calls'): DrainChild {
       await until(
         () => parse(stdout).find((frame) => frame['id'] === id),
         `frame ${String(id)}`,
+      ),
+    answers: async (id, count) =>
+      await until(
+        () => {
+          const found = parse(stdout).filter((frame) => frame['id'] === id);
+          return found.length >= count ? found : undefined;
+        },
+        `${String(count)} frames ${String(id)}`,
       ),
     logged: async (msg) =>
       await until(
@@ -2727,10 +2741,13 @@ test('a stdio drain counts a reused in-flight id twice: the first answer does no
       order.indexOf('handler returning: second') < order.indexOf('drain settled: first'),
       `the drain settled on the first of two answers to id 2: ${order.join(', ')}`,
     );
+    // Both answers were written before the drain settled, but on stdout: wait
+    // for them there rather than trusting the stderr line to arrive last.
+    await child.answers(2, 2);
     assert.equal(
       child.frames().filter((frame) => frame['id'] === 2).length,
       2,
-      'both calls under id 2 must be answered',
+      'both calls under id 2 must be answered, and only once each',
     );
   } finally {
     exitCode = await child.end();

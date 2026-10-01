@@ -23,6 +23,8 @@
  * This file is a script, not a test: it must never match the `*.test.js` glob.
  */
 
+import { writeSync } from 'node:fs';
+
 /** What the runner hands the worker's default export. */
 export interface ChildContext {
   /** 0-based index of this child within the fleet. */
@@ -33,8 +35,16 @@ export interface ChildContext {
 
 type Worker = (ctx: ChildContext) => unknown;
 
+/**
+ * Report why the child cannot run, then exit 90.
+ *
+ * The reason is written with `writeSync`, not `process.stderr.write`: stderr is
+ * a pipe here, and on macOS a pipe write is asynchronous — whatever the kernel
+ * did not take at once is still queued when `process.exit` runs, and is lost.
+ * The parent would then see a bare "exited (code 90)" with no reason attached.
+ */
 function fail(message: string): never {
-  process.stderr.write(`lock-child: ${message}\n`);
+  writeSync(2, `lock-child: ${message}\n`);
   process.exit(90);
 }
 

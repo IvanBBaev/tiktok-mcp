@@ -64,16 +64,6 @@ import { BASELINE_NOW_MS, fsSandbox, mockClock, withEnv } from './helpers.js';
 const POSIX = process.platform !== 'win32';
 
 /**
- * The tail read opens a handle rather than slurping the file, and win32 hands
- * out a handle for a directory and then reads it as zero bytes — an empty
- * journal, not a failure. Only POSIX turns "a directory stands here" into the
- * read error the warn-and-allow path is about.
- */
-const canFailTailRead: { skip?: string } = POSIX
-  ? {}
-  : { skip: 'directory-as-file: win32 opens a directory handle and reads it as empty' };
-
-/**
  * A regular file standing where a parent directory belongs is how `open` is
  * made to fail with a real errno other than ENOENT without touching
  * permissions — and unlike `chmod 000` it still denies root, which a container
@@ -1686,30 +1676,26 @@ test('duplicate: a missing journal allows the publish', async () => {
   }
 });
 
-test(
-  'duplicate: an unreadable journal warns and allows the publish',
-  canFailTailRead,
-  async () => {
-    const { path, cleanup } = await sandbox();
-    try {
-      await mkdir(path);
-      const { logger, lines: logged } = recordingLogger();
-      assert.deepEqual(
-        await checkDuplicate('d1', 'DEFAULT', mockClock(), { path, logger }),
-        {
-          duplicate: false,
-        },
-      );
-      assert.ok(
-        logged.some(
-          (line) => line.level === 'warn' && line.msg.includes('allowing the publish'),
-        ),
-      );
-    } finally {
-      await cleanup();
-    }
-  },
-);
+test('duplicate: an unreadable journal warns and allows the publish', async () => {
+  const { path, cleanup } = await sandbox();
+  try {
+    await mkdir(path);
+    const { logger, lines: logged } = recordingLogger();
+    assert.deepEqual(
+      await checkDuplicate('d1', 'DEFAULT', mockClock(), { path, logger }),
+      {
+        duplicate: false,
+      },
+    );
+    assert.ok(
+      logged.some(
+        (line) => line.level === 'warn' && line.msg.includes('allowing the publish'),
+      ),
+    );
+  } finally {
+    await cleanup();
+  }
+});
 
 test(
   'duplicate: a tail read that fails with no logger configured still allows the publish',

@@ -164,7 +164,9 @@ export async function runContendingChildren(
           child.on('message', (message: unknown) => {
             if (messageType(message) === 'ready') resolve();
           });
-          child.once('exit', (code, signal) => {
+          // `close`, not `exit`: `exit` can fire while stdio is still open, and
+          // the child's stderr is the only place its reason for dying is found.
+          child.once('close', (code, signal) => {
             reject(
               new Error(
                 `runContendingChildren: child ${String(index)} exited ` +
@@ -188,7 +190,7 @@ export async function runContendingChildren(
               error: done.error,
             });
           });
-          child.once('exit', (code, signal) => {
+          child.once('close', (code, signal) => {
             if (!outcomes.has(index)) {
               outcomes.set(index, {
                 index,
