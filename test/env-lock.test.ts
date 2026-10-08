@@ -20,7 +20,7 @@
 
 import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
-import {
+import fsp, {
   chmod,
   mkdir,
   readdir,
@@ -32,8 +32,9 @@ import {
   utimes,
   writeFile,
 } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
-import test from 'node:test';
+import test, { mock } from 'node:test';
 
 import type { Clock } from '../src/core/clock.js';
 import { canonicalPath, envLockDir, withEnvLock } from '../src/core/env-lock.js';
@@ -2465,6 +2466,292 @@ test(
     }
   },
 );
+
+// ---------------------------------------------------------------------------
+// fault injection: the same failures on every platform
+// ---------------------------------------------------------------------------
+//
+// The chmod- and symlink-based tests above are the realistic shape of these
+// failures, but win32 can produce neither, so on that leg they skip. The twins
+// below make the same `fs/promises` call fail directly, which reaches the same
+// branches on every platform (TESTING.md § CI matrix and gates).
+
+type FsName = 'lstat' | 'mkdir' | 'readFile' | 'readlink' | 'rename' | 'rm' | 'utimes';
+
+/**
+ * Replace one `fs/promises` function for the env-lock module: calls whose
+ * arguments satisfy `when` get `fake(...)`, every other call goes through.
+ * `syncBuiltinESMExports` is what makes the ESM binding in `core/env-lock.ts`
+ * see the replacement.
+ */
+function patchFs(
+  name: FsName,
+  when: (args: readonly unknown[]) => boolean,
+  fake: (args: readonly unknown[]) => Promise<unknown>,
+): { hits: () => number; restore: () => void } {
+  const real = fsp[name] as (...args: unknown[]) => Promise<unknown>;
+  let hits = 0;
+  const spy = mock.method(fsp, name, (...args: unknown[]) => {
+    if (!when(args)) return real(...args);
+    hits += 1;
+    return fake(args);
+  });
+  syncBuiltinESMExports();
+  return {
+    hits: () => hits,
+    restore: () => {
+      spy.mock.restore();
+      syncBuiltinESMExports();
+    },
+  };
+}
+
+/** Make the matching calls of `name` fail with errno `code`. */
+function failFs(
+  name: FsName,
+  when: (args: readonly unknown[]) => boolean,
+  code = 'EACCES',
+): { hits: () => number; restore: () => void } {
+  return patchFs(name, when, () =>
+    Promise.reject(Object.assign(new Error(`simulated ${code}`), { code })),
+  );
+}
+
+const firstArgIs =
+  (target: string) =>
+  (args: readonly unknown[]): boolean =>
+    args[0] === target;
+
+test('fault injection: canonicalPath follows a link to a target that is not there yet', async () => {
+  const f = await fixture();
+  const far = path.join(f.dir, 'not', 'yet', 'there.env');
+  const isLink = (args: readonly unknown[]): boolean =>
+    typeof args[0] === 'string' && path.basename(args[0]) === '.env';
+  const lstatPatch = patchFs('lstat', isLink, () =>
+    Promise.resolve({ isSymbolicLink: () => true }),
+  );
+  const readlinkPatch = patchFs('readlink', isLink, () => Promise.resolve(far));
+  try {
+    assert.equal(await canonicalPath(f.envFile), far);
+    assert.equal(readlinkPatch.hits(), 1);
+  } finally {
+    readlinkPatch.restore();
+    lstatPatch.restore();
+    await f.cleanup();
+  }
+});
+
+test('fault injection: canonicalPath gives up on a link loop and keeps the given spelling', async () => {
+  const f = await fixture();
+  const isLink = (args: readonly unknown[]): boolean =>
+    typeof args[0] === 'string' && path.basename(args[0]) === '.env';
+  // A link that names itself: every hop lands where it started.
+  const lstatPatch = patchFs('lstat', isLink, () =>
+    Promise.resolve({ isSymbolicLink: () => true }),
+  );
+  const readlinkPatch = patchFs('readlink', isLink, () => Promise.resolve('.env'));
+  try {
+    assert.equal(await canonicalPath(f.envFile), path.resolve(f.envFile));
+    assert.equal(readlinkPatch.hits(), 41, 'the hop budget is spent, then it stops');
+  } finally {
+    readlinkPatch.restore();
+    lstatPatch.restore();
+    await f.cleanup();
+  }
+});
+
+test('fault injection: a stale lock that cannot be moved aside is reported and waited out', async () => {
+  const f = await fixture();
+  await plantLock(f.lockDir, 60_000);
+  const patch = failFs('rename', firstArgIs(f.lockDir));
+  try {
+    let ran = false;
+    const err = await rejection(
+      driveClock(
+        f.clock,
+        withEnvLock(
+          f.envFile,
+          () => {
+            ran = true;
+            return Promise.resolve();
+          },
+          { waitMs: 500, staleMs: 15_000, clock: f.clock, logger: f.logger },
+        ),
+      ),
+    );
+    assert.equal(ttError(err).code, 'env_file_busy');
+    assert.equal(ran, false);
+    const warn = warningLike(f.records, 'could not remove the stale env-file lock');
+    assert.notEqual(warn, undefined, 'an unremovable stale lock must be reported');
+    assert.match(warn?.msg ?? '', /last touched 6\d{4} ms ago/);
+    assert.equal(warn?.fields?.code, 'EACCES');
+    assert.equal(warn?.fields?.dir, f.lockDir);
+    assert.equal(warn?.fields?.env_file, f.envFile);
+    assert.equal(await exists(f.lockDir), true, 'the stale lock is left where it was');
+  } finally {
+    patch.restore();
+    await f.cleanup();
+  }
+});
+
+test('fault injection: remains of a stale lock that cannot be deleted are reported, and the lock is still taken', async () => {
+  const f = await fixture();
+  await plantLock(f.lockDir, 60_000, `${JSON.stringify({ pid: 999_999 })}\n`);
+  const patch = failFs(
+    'rm',
+    (args) => typeof args[0] === 'string' && args[0].startsWith(`${f.lockDir}.stale-`),
+  );
+  try {
+    let ran = false;
+    await withEnvLock(
+      f.envFile,
+      () => {
+        ran = true;
+        return Promise.resolve();
+      },
+      { waitMs: 500, staleMs: 15_000, clock: f.clock, logger: f.logger },
+    );
+    assert.equal(ran, true, 'the path is clear, so the lock is taken');
+    const [tombstone, ...rest] = await tombstones(f.dir);
+    assert.deepEqual(rest, []);
+    assert.notEqual(tombstone, undefined, 'the undeletable remains are still there');
+    const remains = path.join(f.dir, tombstone ?? '');
+    const warn = warningLike(f.records, 'could not delete the remains');
+    assert.equal(
+      warn?.msg,
+      `could not delete the remains of the stale env-file lock at ${remains}`,
+    );
+    assert.equal(warn?.fields?.dir, remains);
+    assert.equal(warn?.fields?.env_file, f.envFile);
+    assert.equal(warn?.fields?.code, 'EACCES');
+    assert.equal(
+      warningLike(f.records, 'removed a stale env-file lock')?.fields?.pid,
+      999_999,
+    );
+    assert.equal(await exists(f.lockDir), false);
+  } finally {
+    patch.restore();
+    await f.cleanup();
+  }
+});
+
+test('fault injection: a heartbeat that cannot stamp the lock says so and stops', async () => {
+  const f = await fixture();
+  let patch: { restore: () => void } | undefined;
+  try {
+    const gate = deferred();
+    let entered = false;
+    const held = withEnvLock(
+      f.envFile,
+      async () => {
+        entered = true;
+        await gate.promise;
+        return 'kept';
+      },
+      { heartbeatMs: 2_000, staleMs: 15_000, clock: f.clock, logger: f.logger },
+    );
+    await until(() => entered, 'the holder to take the lock');
+    await until(() => f.clock.pending() > 0, 'the heartbeat to arm its first sleep');
+
+    patch = failFs('utimes', firstArgIs(f.lockDir));
+    await f.clock.advance(2_000);
+    await until(
+      () => warningLike(f.records, 'could not refresh the mtime') !== undefined,
+      'the heartbeat to report the failed stamp',
+    );
+    const warn = warningLike(f.records, 'could not refresh the mtime');
+    assert.equal(warn?.fields?.code, 'EACCES');
+    assert.match(warn?.msg ?? '', /may be declared stale while it is still held/);
+    assert.equal(warningLike(f.records, 'vanished'), undefined);
+
+    patch.restore();
+    patch = undefined;
+    gate.resolve(undefined);
+    assert.equal(await held, 'kept', 'the caller’s value survives a dead heartbeat');
+    assert.equal(await exists(f.lockDir), false, 'release still owns the lock');
+    assert.equal(f.clock.pending(), 0, 'the heartbeat must not keep ticking');
+  } finally {
+    patch?.restore();
+    await f.cleanup();
+  }
+});
+
+test('fault injection: a config directory that cannot be created fails with env_lock_unusable', async () => {
+  const f = await fixture();
+  const nested = path.join(f.dir, 'read-only-parent', '.env');
+  const patch = failFs('mkdir', firstArgIs(path.dirname(envLockDir(nested))));
+  try {
+    let ran = false;
+    const err = await rejection(
+      withEnvLock(
+        nested,
+        () => {
+          ran = true;
+          return Promise.resolve();
+        },
+        { clock: f.clock, logger: f.logger },
+      ),
+    );
+    const unusable = ttError(err);
+    assert.equal(unusable.code, 'env_lock_unusable');
+    assert.equal(unusable.retryable, false);
+    assert.notEqual(unusable.cause, undefined);
+    assert.equal(ran, false);
+    assert.equal(patch.hits(), 1, 'the recovery step is tried once, not in a loop');
+  } finally {
+    patch.restore();
+    await f.cleanup();
+  }
+});
+
+test('fault injection: a release that cannot remove the lock warns instead of failing the caller', async () => {
+  const f = await fixture();
+  let patch: { restore: () => void } | undefined;
+  try {
+    const value = await withEnvLock(
+      f.envFile,
+      () => {
+        patch = failFs('rm', firstArgIs(f.lockDir));
+        return Promise.resolve('the refresh still happened');
+      },
+      { clock: f.clock, logger: f.logger },
+    );
+    assert.equal(value, 'the refresh still happened');
+    const warn = warningLike(f.records, 'could not remove the env-file lock');
+    assert.notEqual(warn, undefined, 'a leaked lock must be reported');
+    assert.match(warn?.msg ?? '', /treat it as stale after 15000 ms/);
+    assert.equal(warn?.fields?.code, 'EACCES');
+    assert.equal(await exists(f.lockDir), true, 'the leaked lock is still there');
+  } finally {
+    patch?.restore();
+    await f.cleanup();
+  }
+});
+
+test('fault injection: a release that cannot verify ownership leaves the lock and warns', async () => {
+  const f = await fixture();
+  let patch: { restore: () => void } | undefined;
+  try {
+    const value = await withEnvLock(
+      f.envFile,
+      () => {
+        patch = failFs('readFile', firstArgIs(path.join(f.lockDir, 'holder.json')));
+        return Promise.resolve('done');
+      },
+      { clock: f.clock, logger: f.logger },
+    );
+    assert.equal(value, 'done');
+    assert.equal(await exists(f.lockDir), true, 'an unverified lock is not deleted');
+    const warn = warningLike(f.records, 'could not remove the env-file lock');
+    assert.notEqual(warn, undefined);
+    assert.match(warn?.msg ?? '', /treat it as stale after 15000 ms/);
+    assert.equal(warn?.fields?.code, 'EACCES');
+    assert.equal(warningLike(f.records, 'reclaimed'), undefined);
+  } finally {
+    patch?.restore();
+    await f.cleanup();
+  }
+});
 
 // ---------------------------------------------------------------------------
 // the one real race (CC-A2 / CC-F5)

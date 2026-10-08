@@ -510,6 +510,94 @@ test(
   },
 );
 
+/**
+ * The permissions row with the mode injected: the POSIX-only tests above need a
+ * real `chmod`, which win32 cannot express, so these drive the same branches
+ * from a hand-built snapshot on every platform.
+ */
+function permissionsContext(
+  envFilePath: string,
+  mode: number,
+  tty: { prompt: (question: string) => Promise<string> } | undefined = undefined,
+): DoctorContext {
+  return doctorContext({
+    envFilePath,
+    snapshot: {
+      path: envFilePath,
+      exists: true,
+      mode,
+      values: new Map(),
+      schema: 1,
+      warnings: [],
+      lines: [],
+      eol: '\n',
+    },
+    ...(tty === undefined
+      ? {}
+      : {
+          deps: { prompt: tty.prompt },
+          io: cliIo({ stdout: () => undefined, stderr: () => undefined, isTTY: true }),
+        }),
+  });
+}
+
+test('cc-f3: the permissions row on every platform (injected mode)', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    const check = checkById('permissions');
+    const problem = (mode: string): string =>
+      `mode ${mode} — this file holds refresh tokens and is readable by other accounts on this machine`;
+    const chmodLine = `chmod 600 ${JSON.stringify(f.envFile)}`;
+
+    assert.deepEqual(await check.run(permissionsContext(f.envFile, 0o100600)), [
+      { severity: 'ok', text: 'mode 0600' } satisfies Finding,
+    ]);
+    assert.deepEqual(await check.run(permissionsContext(f.envFile, 0o644)), [
+      {
+        severity: 'warn',
+        text: problem('0644'),
+        remediation: chmodLine,
+      } satisfies Finding,
+    ]);
+
+    const asked: string[] = [];
+    const declined = await check.run(
+      permissionsContext(f.envFile, 0o644, {
+        prompt: (question) => {
+          asked.push(question);
+          return Promise.resolve('n');
+        },
+      }),
+    );
+    assert.match(asked.join(''), /Fix it now with chmod 600\? \[y\/N\] $/);
+    assert.deepEqual(declined, [
+      {
+        severity: 'warn',
+        text: problem('0644'),
+        remediation: chmodLine,
+      } satisfies Finding,
+    ]);
+
+    const fixed = await check.run(
+      permissionsContext(f.envFile, 0o640, { prompt: () => Promise.resolve('yes') }),
+    );
+    assert.deepEqual(fixed, [
+      { severity: 'ok', text: 'mode fixed to 0600 (was 0640)' } satisfies Finding,
+    ]);
+
+    await rm(f.envFile);
+    const [failed] = await check.run(
+      permissionsContext(f.envFile, 0o644, { prompt: () => Promise.resolve('y') }),
+    );
+    assert.equal(failed?.severity, 'warn');
+    assert.match(failed?.text ?? '', /^mode 0644 — .*; the fix failed: ENOENT/);
+    assert.equal(failed?.remediation, chmodLine);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('cc-f3: on Windows the icacls line is remediation text, never a command that runs', async () => {
   const f = await fixture();
   try {

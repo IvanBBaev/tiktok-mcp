@@ -1014,6 +1014,10 @@ that nobody keeps.
   `{ skip: '<reason>' }` on assertions that cannot apply — POSIX mode bits and
   symlink privilege on win32, IPv6 on a runner without it — each naming why,
   and each counted as a skip in the summary rather than passing silently.
+  A skip never takes coverage with it: every branch a skipped test reaches has
+  a platform-neutral twin that injects the same failure (an `fs/promises` errno
+  via `mock.method` + `syncBuiltinESMExports`, a snapshot `mode`, a `stat`
+  size), so the Windows leg is held to the same coverage floors.
 - **One advisory mechanism exists, and nothing uses it.** `advisory: true` on a
   rule in `scripts/coverage-floors.json` lets that area report a shortfall
   without failing the coverage gate. No rule sets it. `src/cli/**` was the last

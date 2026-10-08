@@ -903,6 +903,38 @@ test(
   },
 );
 
+test('cc-d1 a file over 4 GiB is file_too_large at resolve time (injected size)', async () => {
+  // The sparse fixture above is skipped on win32; reporting the size from
+  // `stat` reaches the same guard on every platform.
+  const box = await mediaBox();
+  await writeFile(path.join(box.root, 'huge.mp4'), 'x');
+  const realStat = fsp.stat;
+  const oversized = mock.method(
+    fsp,
+    'stat',
+    async (...args: Parameters<typeof fsp.stat>) => {
+      const stats = await realStat(...args);
+      if (typeof stats.size === 'bigint') stats.size = BigInt(MAX_FILE_BYTES + 1);
+      return stats;
+    },
+  );
+  syncBuiltinESMExports();
+  try {
+    await assert.rejects(resolveMediaFile('huge.mp4', box.root), (error: unknown) => {
+      assert.ok(isTikTokError(error));
+      assert.equal(error.kind, 'validation');
+      assert.equal(error.code, 'file_too_large');
+      assert.ok(error.message.includes(String(MAX_FILE_BYTES + 1)));
+      assert.ok(error.message.includes(String(MAX_FILE_BYTES)));
+      return true;
+    });
+  } finally {
+    oversized.mock.restore();
+    syncBuiltinESMExports();
+    await box.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // CC-D3 / CC-D4 — the apply-time re-resolution
 // ---------------------------------------------------------------------------

@@ -81,6 +81,27 @@ async function blockedPath(dir: string): Promise<string> {
   return join(blocker, 'journal.ndjson');
 }
 
+/**
+ * Make `fs/promises.open` reject with errno `code` for `target` — the
+ * platform-neutral twin of `blockedPath`, which win32 cannot produce (TESTING.md
+ * § CI matrix and gates). Every other open goes through.
+ */
+function failOpen(target: string, code = 'EACCES'): { restore: () => void } {
+  const realOpen = fsp.open;
+  const spy = mock.method(fsp, 'open', (...args: Parameters<typeof fsp.open>) =>
+    args[0] === target
+      ? Promise.reject(Object.assign(new Error(`simulated ${code}`), { code }))
+      : realOpen(...args),
+  );
+  syncBuiltinESMExports();
+  return {
+    restore: () => {
+      spy.mock.restore();
+      syncBuiltinESMExports();
+    },
+  };
+}
+
 function intent(over: Partial<IntentRecord> = {}): IntentRecord {
   return {
     v: 1,
@@ -755,6 +776,45 @@ test(
   },
 );
 
+test('rotation lock: an unusable lock location warns and still appends (injected)', async () => {
+  const { path, cleanup } = await sandbox();
+  await appendIntent(intent({ attempt_id: 'A' }), { path });
+  const lockDir = envLockDir(path);
+  const realMkdir = fsp.mkdir;
+  const spy = mock.method(fsp, 'mkdir', (...args: Parameters<typeof fsp.mkdir>) =>
+    args[0] === lockDir
+      ? Promise.reject(Object.assign(new Error('simulated EACCES'), { code: 'EACCES' }))
+      : realMkdir(...args),
+  );
+  syncBuiltinESMExports();
+  try {
+    const { logger, lines: logged } = recordingLogger();
+    const result = await appendIntent(intent({ attempt_id: 'B' }), {
+      path,
+      maxBytes: 10,
+      logger,
+    });
+
+    assert.deepEqual(result, { ok: true });
+    const warn = logged.find((line) => line.level === 'warn');
+    assert.equal(warn?.msg, 'could not rotate the publish journal; it keeps growing');
+    assert.match(
+      String(warn.fields?.['reason']),
+      /the journal rotation lock directory .+ could not be created \(EACCES\), so concurrent writes to the publish journal cannot be made safe/,
+    );
+    assert.ok(!existsSync(lockDir));
+    assert.ok(!existsSync(`${path}.1`));
+    assert.deepEqual(
+      (await lines(path)).map((line) => parseLine(line)['attempt_id']),
+      [undefined, 'A', 'B'],
+    );
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+    await cleanup();
+  }
+});
+
 // directory durability -------------------------------------------------
 
 /** What the spied `open` saw when it was asked to open the journal's directory. */
@@ -805,6 +865,39 @@ function spyDirectoryOpens(
     },
   };
 }
+
+test('durability: a directory handle the platform hands out is synced and closed', async () => {
+  const { dir, path, cleanup } = await sandbox();
+  // win32 refuses to open a directory, so there the real `open` never reaches
+  // the sync; a handle stub reaches it on every platform.
+  const calls: string[] = [];
+  const realOpen = fsp.open;
+  const spy = mock.method(fsp, 'open', (...args: Parameters<typeof fsp.open>) =>
+    args[0] === dir
+      ? Promise.resolve({
+          sync: () => {
+            calls.push('sync');
+            return Promise.resolve();
+          },
+          close: () => {
+            calls.push('close');
+            return Promise.resolve();
+          },
+        } as unknown as Awaited<ReturnType<typeof fsp.open>>)
+      : realOpen(...args),
+  );
+  syncBuiltinESMExports();
+  try {
+    assert.deepEqual(await appendIntent(intent({ attempt_id: 'A' }), { path }), {
+      ok: true,
+    });
+    assert.deepEqual(calls, ['sync', 'close']);
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+    await cleanup();
+  }
+});
 
 test("durability: an fsync'd append that creates the file syncs its directory once", async () => {
   const { dir, path, cleanup } = await sandbox();
@@ -1158,6 +1251,23 @@ test(
     }
   },
 );
+
+test('read: an open that fails for a reason other than missing is not an empty journal (injected)', async () => {
+  const { path, cleanup } = await sandbox();
+  await appendIntent(intent({ attempt_id: 'A' }), { path });
+  const patch = failOpen(path);
+  try {
+    await assert.rejects(readMerged({ path }), (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'journal_unreadable');
+      const cause = (error as { cause?: NodeJS.ErrnoException }).cause;
+      assert.equal(cause?.code, 'EACCES');
+      return true;
+    });
+  } finally {
+    patch.restore();
+    await cleanup();
+  }
+});
 
 test('read: an outcome that lost a required field is skipped, not folded in', async () => {
   const { path, cleanup } = await sandbox();
@@ -1714,6 +1824,21 @@ test(
     }
   },
 );
+
+test('duplicate: a tail read that fails with no logger configured still allows the publish (injected)', async () => {
+  const { path, cleanup } = await sandbox();
+  await journalAttempt(path, { digest: 'd1', agoMs: 1_000, result: 'ok', id: 'HIT' });
+  const patch = failOpen(path);
+  try {
+    // The same attempt would be a duplicate if the journal could be read.
+    assert.deepEqual(await checkDuplicate('d1', 'DEFAULT', mockClock(), { path }), {
+      duplicate: false,
+    });
+  } finally {
+    patch.restore();
+    await cleanup();
+  }
+});
 
 test('duplicate: a tail window with no line boundary is dropped whole', async () => {
   const { path, cleanup } = await sandbox();

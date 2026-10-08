@@ -3207,6 +3207,24 @@ test(
   },
 );
 
+test('a file removed between the preview and the execute is refused at step 3, before any init', async () => {
+  await withCtx({}, async (ctx, dir) => {
+    const path = await writeMedia(dir, 'clip.mp4', MEDIA_BYTES);
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => {
+      const preview = previewOf(await run(ctx, fileArgs(path)));
+      // The platform-neutral half of the symlink swaps below: the re-resolution
+      // at step 3 refuses whatever the file has become since the preview.
+      await rm(path);
+      return await run(ctx, fileArgs(path, { plan_id: preview.plan_id }));
+    });
+
+    assert.equal(errorOf(result).code, 'file_not_found');
+    assert.equal(countPath(stub, INIT_PATH), 0);
+    assert.equal(stub.puts.length, 0);
+  });
+});
+
 test(
   '§ 5.1: the apply-time containment re-run still carries the move_file step',
   { skip: SYMLINK_SKIP },

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {
+import fsp, {
   chmod,
   lstat,
   mkdir,
@@ -12,9 +12,10 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { mock } from 'node:test';
 
 import {
   CONFIG_SCHEMA_VERSION,
@@ -166,6 +167,31 @@ function tick(): Promise<void> {
   });
 }
 
+/**
+ * Make `fs/promises.open` reject with errno `code` for `target` — the
+ * platform-neutral twin of the chmod, ENOTDIR and NAME_MAX fixtures, none of
+ * which win32 can produce (TESTING.md § CI matrix and gates).
+ */
+async function withFailingOpen(
+  target: string,
+  code: string,
+  fn: () => Promise<void>,
+): Promise<void> {
+  const realOpen = fsp.open;
+  const spy = mock.method(fsp, 'open', (...args: Parameters<typeof fsp.open>) =>
+    args[0] === target
+      ? Promise.reject(Object.assign(new Error(`simulated ${code}`), { code }))
+      : realOpen(...args),
+  );
+  syncBuiltinESMExports();
+  try {
+    await fn();
+  } finally {
+    spy.mock.restore();
+    syncBuiltinESMExports();
+  }
+}
+
 async function withSandbox(fn: (dir: string) => Promise<void>): Promise<void> {
   const sandbox = await fsSandbox();
   try {
@@ -278,6 +304,19 @@ test('cc-f1 an unreadable env file is an error, not silence', canDenyAccess, asy
     assert.match(err.message, /EACCES/);
     assert.match(err.remediation ?? '', /0600/);
     await chmod(file, 0o600); // so the sandbox can be removed
+  });
+});
+
+test('cc-f1 an unreadable env file is an error, not silence (injected)', async () => {
+  await withSandbox(async (dir) => {
+    const file = path.join(dir, '.env');
+    await writeFile(file, 'TT_CLIENT_KEY=abc\n', { mode: 0o600 });
+    await withFailingOpen(file, 'EACCES', async () => {
+      const err = await rejects(() => readEnvFile(file));
+      assert.equal(err.code, 'env_file_unreadable');
+      assert.match(err.message, /EACCES/);
+      assert.match(err.remediation ?? '', /0600/);
+    });
   });
 });
 
@@ -1016,6 +1055,58 @@ test(
     });
   },
 );
+
+test('a pre-upgrade copy that cannot be made is reported, and the write still happens (injected)', async () => {
+  await withSandbox(async (dir) => {
+    const file = path.join(dir, '.env');
+    await writeFile(file, 'TT_CONFIG_SCHEMA=0\nTT_ACCESS_TOKEN=old\n');
+    const { logger, records } = recordingLogger();
+    await withFailingOpen(`${file}.pre-schema0`, 'ENAMETOOLONG', async () => {
+      const result = await persistProfilePatch(
+        file,
+        'DEFAULT',
+        { accessToken: 'new' },
+        { logger },
+      );
+      assert.deepEqual(result, { persisted: true });
+    });
+    assert.equal((await readEnvFile(file)).values.get('TT_ACCESS_TOKEN'), 'new');
+    assert.equal(records.length, 1);
+    assert.match(records[0]?.msg ?? '', /could not keep a pre-upgrade copy/);
+    assert.equal(records[0]?.fields?.['code'], 'ENAMETOOLONG');
+    assert.equal(records[0]?.fields?.['path'], `${file}.pre-schema0`);
+  });
+});
+
+test('a directory created for a new env file is hardened unless the platform is win32', async () => {
+  for (const platform of ['linux', 'win32'] as const) {
+    await withSandbox(async (dir) => {
+      const file = path.join(dir, 'nested', '.env');
+      const realChmod = fsp.chmod;
+      const spy = mock.method(fsp, 'chmod', (...args: Parameters<typeof fsp.chmod>) =>
+        realChmod(...args),
+      );
+      syncBuiltinESMExports();
+      try {
+        const result = await persistProfilePatch(
+          file,
+          'DEFAULT',
+          { accessToken: 'act.new' },
+          { platform },
+        );
+        assert.deepEqual(result, { persisted: true });
+      } finally {
+        spy.mock.restore();
+        syncBuiltinESMExports();
+      }
+      const hardened = spy.mock.calls.some(
+        (call) => call.arguments[0] === path.dirname(file) && call.arguments[1] === 0o700,
+      );
+      assert.equal(hardened, platform !== 'win32', platform);
+      assert.equal((await readEnvFile(file)).values.get('TT_ACCESS_TOKEN'), 'act.new');
+    });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // CC-H3 — a failed write never fails a tool call
