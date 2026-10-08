@@ -1677,6 +1677,133 @@ test('a file rewritten in place with the same size interrupts on its mtime', asy
   });
 });
 
+/**
+ * An in-place rewrite that keeps the size: new bytes, and an mtime moved off
+ * the pinned one explicitly — a rewrite within the filesystem's timestamp
+ * granularity would otherwise leave the only signal to chance.
+ */
+async function rewriteSameSize(media: Media): Promise<void> {
+  const before = await stat(media.path);
+  await writeFile(
+    media.path,
+    Uint8Array.from(media.bytes, (byte) => 255 - byte),
+  );
+  await utimes(media.path, before.atime, new Date(before.mtimeMs - 60_000));
+}
+
+test('cc-g4 a same-size rewrite during the final chunk answered 201 is network_ambiguous', async () => {
+  await withMedia({ size: 25_000 }, async (media) => {
+    const stub = putStub((ordinal) => (ordinal === 1 ? bare(206) : bare(201)));
+    // Lands while the final chunk is on the wire: no chunk follows whose
+    // pre-flight re-stat would see it, and TikTok has already said "complete".
+    const rewrite = afterPut(stub.fetch, 2, () => rewriteSameSize(media));
+    const progress: number[] = [];
+
+    const error = ttError(
+      await withFetch(rewrite, () =>
+        rejection(
+          uploadFile(apiCtx(), {
+            filePath: media.path,
+            plan: ladder(25_000, 10_000),
+            uploadUrl: UPLOAD_URL,
+            random: () => 0,
+            onProgress: (index) => progress.push(index),
+          }),
+        ),
+      ),
+    );
+
+    // Not `upload_interrupted`: TikTok holds a complete upload and may post it,
+    // so "failed, start a new attempt" would invite a second post.
+    assert.equal(error.kind, 'network');
+    assert.equal(error.code, 'network_ambiguous');
+    assert.match(
+      error.message,
+      /chunk 2\/2 \(bytes 10000-24999\) as the end of the upload, but the media file was modified during the upload/,
+    );
+    assert.match(error.remediation ?? '', /the post may exist/);
+    assert.equal(stub.puts.length, 2, 'a completed upload is never re-sent');
+    assert.deepEqual(progress, [0], 'the unconfirmed final chunk is not reported');
+  });
+});
+
+test('cc-g4 a same-size rewrite during a chunk answered with an early 201 is network_ambiguous', async () => {
+  await withMedia({ size: 30_000 }, async (media) => {
+    const stub = putStub((ordinal) => (ordinal === 1 ? bare(206) : bare(201)));
+    const rewrite = afterPut(stub.fetch, 2, () => rewriteSameSize(media));
+
+    const error = ttError(
+      await withFetch(rewrite, () =>
+        rejection(
+          uploadFile(apiCtx(), {
+            filePath: media.path,
+            plan: ladder(30_000, 10_000),
+            uploadUrl: UPLOAD_URL,
+            random: () => 0,
+          }),
+        ),
+      ),
+    );
+
+    assert.equal(error.code, 'network_ambiguous');
+    assert.match(error.message, /chunk 2\/3 .*modified during the upload/);
+    assert.equal(stub.puts.length, 2);
+  });
+});
+
+test('cc-g4 a same-size rewrite before a 416 that completes the upload is network_ambiguous', async () => {
+  await withMedia({ size: 25_000 }, async (media) => {
+    // The final PUT's 201 is lost to a transport failure, the retry draws the
+    // 416 that reports every byte held — and the file changed in between.
+    const clock = mockClock();
+    const stub = putStub((ordinal) => {
+      if (ordinal === 1) return bare(206);
+      if (ordinal === 2) return new TypeError('fetch failed');
+      return bare(416, { 'content-range': 'bytes 0-25000/25000' });
+    });
+    let inRequest = false;
+    const rewrite: FetchStub = async (input, init) => {
+      inRequest = true;
+      try {
+        const response = await stub.fetch(input, init);
+        if (stub.puts.length === 3) await rewriteSameSize(media);
+        return response;
+      } finally {
+        inRequest = false;
+      }
+    };
+    const progress: number[] = [];
+
+    // The retry needs virtual time for its backoff; time stands still while the
+    // stub does real file I/O, so the request timeout cannot win that race.
+    const error = ttError(
+      await withFetch(rewrite, () =>
+        rejection(
+          runVirtual(
+            clock,
+            uploadFile(apiCtx({ TT_CHUNK_RETRIES: '1' }, clock), {
+              filePath: media.path,
+              plan: ladder(25_000, 10_000),
+              uploadUrl: UPLOAD_URL,
+              random: () => 0,
+              onProgress: (index) => progress.push(index),
+            }),
+            () => inRequest,
+          ),
+        ),
+      ),
+    );
+
+    assert.equal(error.code, 'network_ambiguous');
+    assert.match(
+      error.message,
+      /chunk 2\/2 \(bytes 10000-24999\) as the end of the upload, but the media file was modified/,
+    );
+    assert.equal(stub.puts.length, 3, 'nothing is re-sent after the resync');
+    assert.deepEqual(progress, [0]);
+  });
+});
+
 test('a plan whose total is not the file size is refused before the first PUT', async () => {
   await withMedia({ size: 20_000 }, async (media) => {
     const stub = putStub(() => bare(201));

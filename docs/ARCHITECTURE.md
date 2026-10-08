@@ -535,7 +535,9 @@ When `plan_id` is present, the order is **normative**:
    `creator_info` pre-flight on direct-post tools. The upload later opens the
    file once and reads every chunk and retry from that descriptor, whose
    identity must equal the one confirmed here (`plan_mismatch`); an in-place
-   modification between chunks fails with `upload_interrupted`. The file
+   modification between chunks fails with `upload_interrupted`, and one found
+   after TikTok completed the upload with `network_ambiguous` (the complete
+   upload may be posted, CC-G4). The file
    identity (`size:mtimeMs:dev:ino`) is bound to the plan
    (`PlanRecord.fileIdentity`) — never sent upstream and never in the digest —
    so applying after the file changed fails verification with `plan_mismatch`,

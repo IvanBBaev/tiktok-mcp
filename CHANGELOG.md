@@ -241,6 +241,15 @@ plumbing stay in the commit history where they belong.
 
 ### Fixed
 
+- A media file rewritten in place with the same size while the chunk that
+  completes the upload was being read went unnoticed: the modification check
+  runs before each chunk, and after the last one TikTok's `201` ended the
+  upload as a success although it may have received a mix of old and new
+  bytes. The file is now re-checked when TikTok completes the upload, and a
+  change fails the call as `network_ambiguous` (journal `send_ambiguous`), not
+  `upload_interrupted` — TikTok holds a complete upload and may post it, so the
+  caller is told to check the publish status before anything else, and the
+  duplicate guard refuses a second post.
 - On Windows the media-file swap guard compared `dev` and `ino` as numbers.
   NTFS file IDs routinely exceed `Number.MAX_SAFE_INTEGER`, where neighbouring
   IDs round to the same double, so a file swapped for one with the same size,

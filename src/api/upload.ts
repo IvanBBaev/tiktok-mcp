@@ -631,6 +631,7 @@ export async function uploadFile(
             total_chunks: chunkCount,
           });
         }
+        await assertIntactAtCompletion(handle, pinned, chunk, chunkCount);
         opts.onProgress?.(chunk.index, chunkCount);
         return;
       }
@@ -653,16 +654,18 @@ export async function uploadFile(
           );
         }
         index = resyncIndex(opts.plan, chunk, chunkCount, result.uploadedBytes, log);
-        // The chunks TikTok says it holds count as accepted: the caller reads
-        // both its progress and the position of a later failure from here, so a
-        // resync backwards moves it back too.
-        if (index !== chunk.index) opts.onProgress?.(index - 1, chunkCount);
         if (index === chunkCount) {
           // TikTok already holds every byte of the final chunk: its 201 was the
           // response lost to the retry that drew this 416. The progress it reports
           // is the completion the 201 would have signalled.
+          await assertIntactAtCompletion(handle, pinned, chunk, chunkCount);
+          opts.onProgress?.(index - 1, chunkCount);
           return;
         }
+        // The chunks TikTok says it holds count as accepted: the caller reads
+        // both its progress and the position of a later failure from here, so a
+        // resync backwards moves it back too.
+        if (index !== chunk.index) opts.onProgress?.(index - 1, chunkCount);
         continue;
       }
 
@@ -853,6 +856,36 @@ async function putChunkWithRetries(
 }
 
 const MODIFIED = 'the media file was modified during the upload';
+
+/**
+ * The re-stat before each chunk cannot see a rewrite that lands while the
+ * chunk that completes the upload is being read: there is no next chunk to
+ * check before. So completion is checked once more, after TikTok said so.
+ *
+ * Not `upload_interrupted`: TikTok holds a complete upload and posts what
+ * completes, so "failed, it will expire on its own" would be false and would
+ * let the duplicate guard wave a second post through. What it received may mix
+ * the verified bytes with the new ones, and whether that becomes a post is
+ * unknown — the same answer as a final chunk whose 201 was lost (CC-G4).
+ * Progress is not reported for the chunk, so the failure names it.
+ */
+async function assertIntactAtCompletion(
+  handle: FileHandle,
+  pinned: BigIntStats,
+  chunk: ChunkRange,
+  chunkCount: number,
+): Promise<void> {
+  if (!(await fileModified(handle, pinned))) return;
+  throw new TikTokError({
+    kind: 'network',
+    code: 'network_ambiguous',
+    message:
+      `TikTok accepted chunk ${String(chunk.index + 1)}/${String(chunkCount)} ` +
+      `(bytes ${String(chunk.start)}-${String(chunk.end)}) as the end of the upload, ` +
+      `but ${MODIFIED}: what it received may mix the original bytes with the new ones.`,
+    remediation: AMBIGUOUS,
+  });
+}
 
 /**
  * The descriptor survives a rename, not an in-place rewrite: bytes that change

@@ -525,7 +525,10 @@ Binding retry rules (rationale: SYNTHESIS § 2.13):
   retry read from that descriptor by positional reads in 1 MiB slices (a
   re-PUT is byte-identical even if the path is renamed or replaced). Identity mismatch against the verified file ⇒
   `plan_mismatch` before the first PUT; a size/mtime change between chunks ⇒
-  `upload_interrupted` ("the media file was modified during the upload").
+  `upload_interrupted` ("the media file was modified during the upload"). The
+  file is re-checked once more after TikTok completes the upload; a change
+  there ⇒ `network_ambiguous` with the same detail, since TikTok holds a
+  complete upload that may mix old and new bytes and may post it (CC-G4).
 - **Resume algorithm after an ambiguous outcome** (timeout / connection reset
   mid-PUT):
   1. Query status/fetch → read `uploaded_bytes`.
