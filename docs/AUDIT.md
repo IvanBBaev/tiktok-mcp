@@ -201,20 +201,22 @@ domain first or keep URL posting out of the demo entirely.
 "Apps still in development or testing" is a documented rejection class
 ([§ 5.7](reviews/round2/tiktok-platform-deep-review.md) item 5). Today
 `https://registry.npmjs.org/tiktok-mcp-ai` returns **404** and `git tag -l` is
-empty (both re-checked 2026-09-28) because the first release has not been
+empty (both re-checked 2026-10-08) because the first release has not been
 published: gap **G-14** (first-release bootstrap) in
 [docs/IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md), still **open** there,
-executed in TE-5. Note the contradiction to resolve before you cite a version
-anywhere in the submission: `CHANGELOG.md` carries a dated `0.7.0` entry
-describing itself as "First published release" and `package.json` is at `0.7.0`
-— that release landed on `main` in commit `2794dbd` — while the registry has no
-such package. Publish first, then submit, and make the version you name in the
-form the one a reviewer can install. The publish is manual: G-14 records that
-trusted publishing cannot ship a package's first version, so a `v*` tag pushed
-before it fails at `npm publish` and releases nothing. It spends nothing either:
-`publish-vscode.yml` and `publish-mcp.yml` follow a successful npm publish
-rather than the tag, so no Marketplace or MCP Registry version is burnt — but
-the release still waits on the manual publish.
+executed in TE-5. The version to publish and to cite is **0.8.0**: every
+version field and `CHANGELOG.md` `[0.8.0] - 2026-10-01` name it, and
+`release-guard --tag v0.8.0` passes. The dated `0.7.0` entry is an internal
+milestone (commit `2794dbd`) that was never published and never tagged, and
+the changelog says so — do not cite it. Publish first, then submit, and make
+the version you name in the form the one a reviewer can install. The publish
+is manual: G-14 records that trusted publishing cannot ship a package's first
+version. The `v0.8.0` tag pushed after it does not fail: `publish.yml` finds
+the version already on the registry, verifies it is the tagged commit's
+(`scripts/registry-state.ts`), skips `npm publish` and goes on to the GitHub
+release, after which `publish-vscode.yml` and `publish-mcp.yml` follow. A tag
+pushed *before* the manual publish fails at `npm publish` and ships nothing
+anywhere — no Marketplace or MCP Registry version is burnt.
 
 ### 2.7 Do not confuse this with the sandbox probes
 

@@ -1,6 +1,6 @@
 {
   "name": "tiktok-mcp-ai",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Unofficial MCP server for TikTok (Display API + Content Posting API). Not affiliated with, endorsed by, or sponsored by TikTok or ByteDance; \"TikTok\" is a trademark of its owner, used here nominatively to indicate what this server connects to.",
   "license": "MIT",
   "author": "Ivan Baev <ivanbbaev@gmail.com>",
