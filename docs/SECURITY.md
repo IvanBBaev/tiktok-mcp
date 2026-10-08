@@ -472,7 +472,15 @@ names the file so it can be checked rather than believed.
   `npm run check` before `npm publish`. The VS Code Marketplace
   (`publish-vscode.yml`) and MCP Registry (`publish-mcp.yml`) publishes follow
   the npm publish via `workflow_run` rather than racing it on the same tag, so
-  a tag whose npm publish fails ships nowhere. A prerelease version
+  a tag whose npm publish fails ships nowhere. The one exception to
+  "publish or fail" is a version already on the registry (the hand-published
+  first version, or a re-run after the GitHub release step failed): the
+  publish is skipped — and the release and followers proceed — only when
+  `scripts/registry-state.ts` proves it is this commit's version (exact
+  version, `gitHead` equal to the tagged commit, registry tarball matching
+  its `dist.integrity` and holding the same files as this commit's
+  `npm pack`). It reads the public registry without credentials; E404
+  publishes, and any other failure or mismatch fails the run. A prerelease version
   (`vX.Y.Z-rc.N`, anything with a `-`) ships to npm under the `next` dist-tag
   only: the Marketplace rejects semver prereleases, so `publish-vscode.yml`
   skips its publish step for one rather than failing after npm already has

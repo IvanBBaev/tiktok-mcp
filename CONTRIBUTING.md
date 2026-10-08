@@ -174,6 +174,9 @@ version tag — maintainers only. The very first version cannot be published
 this way (trusted publishing needs the package to exist); it is a one-time
 manual sequence described in
 [docs/IMPLEMENTATION-PLAN.md § First release bootstrap (G-14)](docs/IMPLEMENTATION-PLAN.md).
+Its tag run then finds the version already on the registry, verifies it is
+this commit's, skips `npm publish` and still creates the GitHub release and
+runs the follower publishes.
 
 1. Update [CHANGELOG.md](CHANGELOG.md): move `[Unreleased]` items under
    `## [X.Y.Z] - YYYY-MM-DD`, leave an empty `## [Unreleased]` above it, and

@@ -145,6 +145,15 @@ plumbing stay in the commit history where they belong.
   (`publish-vscode.yml`, `publish-mcp.yml`) accept only a successful,
   push-started `publish.yml` run of this repository and check out the tagged
   commit.
+- **`publish.yml` skips `npm publish` when this exact version is already on
+  the registry**, so the tag run after the hand-published first version — and
+  a re-run whose GitHub release step failed after npm — completes the release
+  and triggers both followers instead of dying on E403. It skips only on
+  proof (`scripts/registry-state.ts`): `npm view` answers exactly that
+  version, its `gitHead` is the tagged commit, and the registry tarball
+  passes its `dist.integrity` and holds the same files as this commit's
+  `npm pack`. E404 publishes; any other registry failure, a mismatch, or a
+  prerelease holding `latest` fails the run.
 - The lint and test toolchain moves to its current majors: `eslint` 10 with
   `@eslint/js` 10 and `typescript-eslint` 8.67, `fast-check` 4 and `globals` 17.
   Dependabot no longer proposes `@types/node` majors (the types track the

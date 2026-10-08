@@ -230,8 +230,10 @@ the other two follow it. `publish.yml` runs on the tag; `publish-mcp.yml` and
 that run concluded `success`, ran `.github/workflows/publish.yml`, was started
 by a `push` and belongs to this repository (or on a manual `workflow_dispatch`
 from a `v*` tag, which runs `release:guard` itself before publishing).
-`publish.yml` creates its GitHub release only after `npm publish` succeeds, so a
-premature tag leaves no npm version, no VS Code Marketplace version, no MCP
+`publish.yml` creates its GitHub release only after `npm publish` succeeds (or
+after its registry step has verified that this commit's version is already
+published — see step 4 below; a premature tag finds E404 and goes on to
+publish), so a premature tag leaves no npm version, no VS Code Marketplace version, no MCP
 Registry entry and no GitHub release — only a failed run and a pushed tag, which
 can be deleted and pushed again once the bootstrap is done. (Before the
 chaining, `publish-vscode.yml` fired on the same tag with its own `VSCE_PAT` and
@@ -242,7 +244,9 @@ still releases nothing until G-14 is done.
 
 The first release is therefore a one-time manual sequence, run once the release
 commit (every version field bumped and the changelog cut, per CONTRIBUTING.md
-§ Releasing) is on `main` with CI green, from a clean checkout of that commit:
+§ Releasing) is on `main` with CI green, from a clean clone of that commit — a
+plain clone rather than a linked worktree, because npm records the `gitHead`
+that step 4 relies on only when `.git` is a directory:
 
 1. `npm ci && npm run build`, then
    `node build/scripts/release-guard.js --tag vX.Y.Z` and `npm run smoke:pack`.
@@ -258,18 +262,37 @@ commit (every version field bumped and the changelog cut, per CONTRIBUTING.md
    (`publish.yml` declares no `environment:`).
 4. Push the tag: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 
-Step 4 tags a version npm already has, so that one *Publish* run passes the
-guard, `check` and `smoke:pack` and then fails at `npm publish` (E403 — a
-published version cannot be overwritten). The followers require a successful
-*Publish* run, so nothing else happens on its own; finish that release by hand
-from the tag —
+Step 4 tags a version npm already has, and `publish.yml` expects that. After
+the guard, `check` and `smoke:pack`, its registry step
+(`scripts/registry-state.ts`) finds the exact version on the registry and skips
+`npm publish` instead of failing on E403 — but only on proof: `npm view` of the
+exact version must answer that version (E404 means "publish"; any other
+registry failure fails the run rather than guessing either way), its `gitHead`
+must be the tagged commit, and the registry tarball must hold the same files
+as the runner's `npm pack` of that commit (byte-identical, or equal file by
+file when only the gzip stream differs — a laptop's zlib need not match the
+runner's). The run then creates the GitHub release and the followers fire as
+for any release; every release after that is a tag push that publishes
+normally. `release-guard` cannot substitute for this step — it compares the
+tag against the five version fields and the changelog and knows nothing about
+what the registry holds.
+
+A skip cannot set a dist-tag — trusted publishing authorizes `npm publish` and
+nothing else — so it only checks one: a warning when the expected tag points
+elsewhere, a failed run when a prerelease holds `latest`. Step 2 publishes
+under `latest`, which is right for a stable first version; a prerelease first
+version needs `--tag next` there.
+
+Fallback: if that run fails at the registry step anyway — the version was
+published from another commit, the tarballs differ, or the registry could not
+be read — nothing past npm has run. Read the failure first (a tarball mismatch
+means the registry holds something this commit did not build); once the
+published version is known good, finish the release by hand from the tag —
 `node build/scripts/release-guard.js --tag vX.Y.Z --notes > notes.md`,
 `gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file notes.md`,
 `gh workflow run publish-mcp.yml --ref vX.Y.Z` and
 `gh workflow run publish-vscode.yml --ref vX.Y.Z` (the last needs the
-`VSCE_PAT` repository secret). Every release after that is a tag push. `release-guard` cannot
-substitute for this — it compares the tag against the five version fields and
-the changelog and knows nothing about what the registry holds.
+`VSCE_PAT` repository secret).
 
 ## Risk register
 

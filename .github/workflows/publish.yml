@@ -70,9 +70,28 @@ jobs:
             exit 1
           fi
           echo "DIST_TAG=$dist_tag" >> "$GITHUB_ENV"
-      - run: npm publish --provenance --access public --tag "$DIST_TAG"
-      # After npm, never before: a GitHub release pointing at a version the
-      # registry does not have is worse than no release at all.
+      # The first version is published by hand (trusted publishing cannot create
+      # a package), so its tag reaches `npm publish` with the version already
+      # on the registry — E403, no GitHub release, no followers. The same goes
+      # for re-running a run whose GitHub release step failed after npm. This
+      # step skips the publish only on proof: `npm view` of the exact version
+      # answers that version, its `gitHead` is this commit, and the registry
+      # tarball holds the same files as this commit's `npm pack`. E404 means
+      # publish; any other registry failure, or a published version that does
+      # not match, fails the run instead of guessing either way. A skip cannot
+      # set the dist-tag (OIDC authorizes `npm publish` only), so it warns when
+      # the tag is elsewhere and fails when a prerelease holds `latest`. Read
+      # from the public registry, no credentials — scripts/registry-state.ts.
+      - name: Skip npm publish if this exact version is already published
+        id: registry
+        run: node build/scripts/registry-state.js
+      # `!= 'true'` rather than `== 'false'`: a missing output publishes, and
+      # the registry then refuses a duplicate — it never skips by accident.
+      - if: ${{ steps.registry.outputs.skip != 'true' }}
+        run: npm publish --provenance --access public --tag "$DIST_TAG"
+      # After npm, never before — published above, or verified on the registry
+      # by the skip step: a GitHub release pointing at a version the registry
+      # does not have is worse than no release at all.
       - name: GitHub release from the changelog section
         env:
           GH_TOKEN: ${{ github.token }}

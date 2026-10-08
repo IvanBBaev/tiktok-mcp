@@ -1079,6 +1079,16 @@ therefore lists it under "checked elsewhere". Its logic is
 plain functions over parsed inputs, so `test/release.test.ts` exercises the
 failure messages directly rather than shelling out to CI.
 
+Also on a tag, just before `npm publish`: `scripts/registry-state.ts` asks
+the registry whether this exact version is already published and, only when
+it is provably this commit's (`gitHead`, verified tarball, same files as a
+local `npm pack`), skips the publish so the release and the followers still
+run. E404 publishes; anything else ambiguous fails. The same shape as the
+guard: `test/registry-state.test.ts` drives the pure pieces — `npm view`
+output parsing (npm 10 object and npm 12 array shapes, E404 vs other
+errors), the tar reader, the tarball comparison and every `decide` branch —
+with no network and no CI.
+
 `npm run smoke:pack` runs on a tag as well — the same script, the last step
 before `npm publish`, ubuntu only because the three-OS spread already ran on
 the commit being tagged. It needs no registry credentials, so it adds no
