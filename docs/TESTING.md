@@ -1149,5 +1149,7 @@ end-to-end pass.
 
 P-15 is an engineering spike (undici resolve-and-pin prototype behind the
 lookup seam), not a sandbox probe; P-16 is optional tuning. Neither blocks
-Phase 2. Sandbox runs also drive the recorded-fixture refresh procedure
+Phase 2. The step-by-step commands for every open probe, in the order
+that spends the sandbox budgets once, are in
+[probes/RUNBOOK.md](probes/RUNBOOK.md). Sandbox runs also drive the recorded-fixture refresh procedure
 (see the harness section).

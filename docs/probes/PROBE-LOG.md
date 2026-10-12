@@ -14,6 +14,8 @@ actually came back.
 The probe definitions live in `docs/reviews/round2/SYNTHESIS.md` § 6; the spec
 references live in `docs/TIKTOK-API.md` Appendix A; the convention this file
 follows is normative in `docs/TESTING.md` § Sandbox probes and the probe log.
+The commands for running each open probe — setup, session order, what to
+capture and where each answer lands — are in [RUNBOOK.md](RUNBOOK.md).
 
 ## Rules
 
