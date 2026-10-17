@@ -14,6 +14,12 @@ plumbing stay in the commit history where they belong.
 
 ### Fixed
 
+- An env-file write could be lost after a restart: temp-file names carry the
+  PID and a per-process counter, and a server that always runs as PID 1 (a
+  container) found the temp file a killed run had left at exactly the name its
+  first write tried. That write — possibly a rotated refresh token — was
+  dropped to memory only. An occupied temp name is now skipped for the next
+  one (up to 8 per write) and left untouched.
 - A token refresh or exchange whose connection failed or timed out after the
   request was sent reported `network_ambiguous` with the publish-init wording
   and told the caller to check the publish journal, although nothing was posted.

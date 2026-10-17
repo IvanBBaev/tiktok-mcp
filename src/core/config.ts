@@ -36,7 +36,15 @@
  *   `withEnvLock` (CONTRACTS.md § core/config, CC-A2/CC-F5).
  */
 
-import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import {
+  chmod,
+  type FileHandle,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+} from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
@@ -668,6 +676,13 @@ function defaultLogger(): Logger {
 /** Distinct temp names without a clock or a random source (both are banned/seamed). */
 let tempCounter = 0;
 
+/**
+ * How many temp names one write tries. The counter restarts with the process,
+ * and a container's server is PID 1 every time, so a temp file a killed run
+ * left behind sits exactly where the next run's first write looks.
+ */
+const TEMP_NAME_ATTEMPTS = 8;
+
 /** Render a value so that parsing it back yields exactly what was passed in. */
 function formatValue(key: string, value: string): string {
   if (/[\r\n]/.test(value)) {
@@ -768,8 +783,7 @@ async function atomicWrite(
   const target = await canonicalPath(path);
   const dir = dirname(target);
   const doRename = opts.rename ?? rename;
-  tempCounter += 1;
-  const temp = join(dir, `.env.tmp-${String(process.pid)}-${String(tempCounter)}`);
+  let temp = '';
 
   try {
     const created = await mkdir(dir, { recursive: true, mode: DIR_MODE });
@@ -778,8 +792,22 @@ async function atomicWrite(
     if (created !== undefined && opts.platform !== 'win32') await chmod(dir, DIR_MODE);
 
     // Exclusive: never follow or reuse whatever already sits at the temp name —
-    // a planted symlink there would otherwise receive the tokens.
-    const handle = await open(temp, 'wx', FILE_MODE);
+    // a planted symlink there would otherwise receive the tokens. An occupied
+    // name is not ours to remove either, so the next one is tried instead.
+    let handle: FileHandle | undefined;
+    for (let attempt = 1; handle === undefined; attempt += 1) {
+      tempCounter += 1;
+      const candidate = join(
+        dir,
+        `.env.tmp-${String(process.pid)}-${String(tempCounter)}`,
+      );
+      try {
+        handle = await open(candidate, 'wx', FILE_MODE);
+        temp = candidate;
+      } catch (err) {
+        if (errnoFor(err) !== 'EEXIST' || attempt === TEMP_NAME_ATTEMPTS) throw err;
+      }
+    }
     try {
       await handle.writeFile(contents, 'utf8');
       await handle.sync();
@@ -791,7 +819,7 @@ async function atomicWrite(
       path,
       code: errnoFor(err),
     });
-    await rm(temp, { force: true }).catch(() => undefined);
+    if (temp !== '') await rm(temp, { force: true }).catch(() => undefined);
     return false;
   }
 
