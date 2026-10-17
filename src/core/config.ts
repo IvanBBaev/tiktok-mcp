@@ -228,8 +228,9 @@ function expandTilde(value: string): string {
 /**
  * Where the env file lives (CONFIGURATION.md § Location, SYNTHESIS § 2.1).
  *
- * `TT_ENV_FILE` verbatim → `$XDG_CONFIG_HOME/tiktok-mcp-ai/.env` (falling back
- * to `~/.config/...`) on POSIX → `%LOCALAPPDATA%\tiktok-mcp-ai\.env` on win32.
+ * `TT_ENV_FILE` (tilde-expanded, then resolved) →
+ * `$XDG_CONFIG_HOME/tiktok-mcp-ai/.env` (falling back to `~/.config/...`) on
+ * POSIX → `%LOCALAPPDATA%\tiktok-mcp-ai\.env` on win32.
  * `%APPDATA%` is deliberately **not** used: roaming profiles replicate to other
  * machines and tokens must not roam.
  *

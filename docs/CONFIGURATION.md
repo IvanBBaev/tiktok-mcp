@@ -25,7 +25,7 @@ keep serving the stale values.)
 
 | Step | POSIX (Linux/macOS) | Windows (win32) |
 |---|---|---|
-| 1. Explicit override | `TT_ENV_FILE` (used verbatim) | `TT_ENV_FILE` (used verbatim) |
+| 1. Explicit override | `TT_ENV_FILE` (`~` expanded, resolved to an absolute path) | `TT_ENV_FILE` (`~` expanded, resolved to an absolute path) |
 | 2. Default | `$XDG_CONFIG_HOME/tiktok-mcp-ai/.env`, falling back to `~/.config/tiktok-mcp-ai/.env` | `%LOCALAPPDATA%\tiktok-mcp-ai\.env` |
 
 The resolved path is both the read source and the write target. The publish

@@ -127,12 +127,13 @@ model can poll `tiktok_get_publish_status` for the terminal state.
   enabled packages.
 - **Egress allowlist**: the process talks only to `open.tiktokapis.com`, the
   media-upload hosts (`open-upload.tiktokapis.com` and the anchored regional
-  `upload.<region>.tiktokapis.com` pattern), and `www.tiktok.com` for the OAuth
-  authorize redirect — matched dot-anchored on the parsed hostname, https/443
-  only, with `redirect: "error"`. Nothing else is reachable. One honest
-  exception: the internal, unsupported `TT_OAUTH_BASE_URL` can move the OAuth
-  origin, and only there — it is honoured solely when it parses as a loopback
-  origin, so it can point the flow at a local stub and at nothing else.
+  `upload.<region>.tiktokapis.com` pattern) — matched dot-anchored on the
+  parsed hostname, https/443 only, with `redirect: "error"`. Nothing else is
+  reachable; `www.tiktok.com` only hosts the OAuth authorize page, which your
+  browser opens — the server never requests it. One honest exception: the
+  internal, unsupported `TT_OAUTH_BASE_URL` can move the OAuth origin, and only
+  there — it is honoured solely when it parses as a loopback origin, so it can
+  point the flow at a local stub and at nothing else.
 - Resilience: per-request timeout, a three-class retry matrix (reads retried
   with backoff and `Retry-After`; publish inits **never** retried; chunk PUTs
   replay-safe by byte range), and a local publish-rate
