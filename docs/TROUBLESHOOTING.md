@@ -270,7 +270,8 @@ slow** — that creates a second post.
 ## Uninstall and data removal
 
 This server keeps no database. Everything it writes lives beside the resolved
-env file — `~/.config/tiktok-mcp-ai/` on macOS/Linux,
+env file — `$XDG_CONFIG_HOME/tiktok-mcp-ai/` (default
+`~/.config/tiktok-mcp-ai/`) on macOS/Linux,
 `%LOCALAPPDATA%\tiktok-mcp-ai\` on Windows, or the directory of `TT_ENV_FILE`
 if you set it. `doctor` prints the exact paths in its `env file` and
 `publish journal` rows.
@@ -302,7 +303,7 @@ Removing everything, in the order that leaves nothing behind:
 3. **Delete the local state.**
 
    ```bash
-   rm -rf ~/.config/tiktok-mcp-ai
+   rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/tiktok-mcp-ai"
    ```
 
    On Windows, delete `%LOCALAPPDATA%\tiktok-mcp-ai`. If you set `TT_ENV_FILE`,

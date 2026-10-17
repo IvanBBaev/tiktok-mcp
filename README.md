@@ -646,9 +646,10 @@ report privately, and what is in scope.
 ## Uninstall
 
 There is no database and nothing outside one directory. Everything this server
-writes lives beside the resolved env file — `~/.config/tiktok-mcp-ai/` on
-macOS/Linux, `%LOCALAPPDATA%\tiktok-mcp-ai\` on Windows, or the directory of
-`TT_ENV_FILE` if you set it:
+writes lives beside the resolved env file — `$XDG_CONFIG_HOME/tiktok-mcp-ai/`
+(default `~/.config/tiktok-mcp-ai/`) on macOS/Linux,
+`%LOCALAPPDATA%\tiktok-mcp-ai\` on Windows, or the directory of `TT_ENV_FILE`
+if you set it:
 
 | File | What it holds |
 | ---- | ------------- |
@@ -664,7 +665,7 @@ To remove it all:
 npx tiktok-mcp-ai login --revoke --profile DEFAULT
 
 # 2. delete the local state (add --purge-journal above to drop the journal in step 1)
-rm -rf ~/.config/tiktok-mcp-ai
+rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/tiktok-mcp-ai"
 
 # 3. remove the package if it was installed globally
 npm uninstall -g tiktok-mcp-ai
