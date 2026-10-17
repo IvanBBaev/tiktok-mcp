@@ -656,6 +656,7 @@ if you set it:
 | `.env` | Client key, client secret, access and refresh tokens, your `TT_*` settings |
 | `journal.ndjson` (+ `journal.ndjson.1`) | Append-only publish attempts: timestamp, profile, `open_id`, tool, title excerpt, `publish_id`, outcome. No media, no tokens |
 | `.env.lock` | The cross-process write lock — transient, or left behind by a crash |
+| `journal.ndjson.lock` | The journal's rotation lock — transient, or left behind by a crash |
 | `.env.pre-schema<N>` | Backup written by a schema migration; it still contains credentials |
 
 To remove it all:
