@@ -14,6 +14,11 @@ plumbing stay in the commit history where they belong.
 
 ### Fixed
 
+- A `login` that landed while the server was starting up — after a client's
+  first `tools/list` but before the credential watch's first poll — was taken
+  as the starting state and never announced, so the client kept the stale
+  `[UNAVAILABLE]` markers until the next change. The watch now starts from the
+  picture taken before the transport serves.
 - A running server kept serving the access token it had cached while that
   token was still fresh, without looking at the env file. After a
   `login --force` in another terminal it could post with the old account's
