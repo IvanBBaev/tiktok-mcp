@@ -20,6 +20,13 @@ on:
   push:
     tags: ['v*']
 
+# One publish per tag at a time: a re-run racing the original would have both
+# reach `npm publish` and `gh release create`, and the loser fails halfway
+# through. Queued, never cancelled — a cancelled publish is a half-release.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write # create the GitHub release from the changelog section
   id-token: write # npm trusted publishing + provenance (OIDC)
