@@ -135,8 +135,8 @@ model can poll `tiktok_get_publish_status` for the terminal state.
   origin, so it can point the flow at a local stub and at nothing else.
 - Resilience: per-request timeout, a three-class retry matrix (reads retried
   with backoff and `Retry-After`; publish inits **never** retried; chunk PUTs
-  replay-safe by byte range), a per-host concurrency semaphore, and a local
-  publish-rate token bucket (6/min per profile, matching TikTok).
+  replay-safe by byte range), and a local publish-rate
+  token bucket (6/min per profile, matching TikTok).
 - MCP **tool annotations** (all four hints on every tool), structured error
   payloads written for the model, and **structured logging on stderr only** —
   stdout stays pure JSON-RPC.

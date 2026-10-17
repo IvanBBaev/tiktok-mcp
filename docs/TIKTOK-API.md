@@ -646,8 +646,8 @@ codes, not 429s:
   (§ 4.8).
 - Reads: short bounded delay instead of rejection; 429 on reads maps to
   backoff + retry. Status polls stay inside the poll budget (§ 4.5).
-- Transport-level policy (per-host concurrency semaphore, `Retry-After`
-  honored and capped, exponential backoff with jitter): ARCHITECTURE.md
+- Transport-level policy (`Retry-After` honored and capped, exponential
+  backoff with jitter; no in-flight request limit): ARCHITECTURE.md
   § retry.
 
 ## 6. Media constraints (enforced client-side before upload)
