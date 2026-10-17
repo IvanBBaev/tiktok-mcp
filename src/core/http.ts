@@ -374,6 +374,23 @@ interface FailureContext {
   readonly method: string;
   readonly clock: Clock;
   readonly timeoutMs: number;
+  /**
+   * A token-endpoint call: it shares the `init` semantics, but what may have
+   * happened unseen is a token rotation, not a post — the publish journal has
+   * nothing to say about it.
+   */
+  readonly oauth?: true;
+}
+
+const PUBLISH_RECONCILE =
+  'Check the publish journal for an intent without an outcome and verify upstream state before creating a new attempt.';
+
+const OAUTH_RECONCILE =
+  'The token endpoint may have rotated the refresh token before the answer was lost. ' +
+  'Try again; if TikTok then answers invalid_grant, run login for this profile.';
+
+function reconcileHint(ctx: FailureContext): string {
+  return ctx.oauth === true ? OAUTH_RECONCILE : PUBLISH_RECONCILE;
 }
 
 /**
@@ -401,8 +418,7 @@ function transportFailure(cause: unknown, ctx: FailureContext): TikTokError {
       message:
         `The connection to TikTok failed during ${ctx.method} ${ctx.shownUrl}. The request may ` +
         `already have been sent, so the outcome is unknown and it is NOT retried automatically.`,
-      remediation:
-        'Check the publish journal for an intent without an outcome and verify upstream state before creating a new attempt.',
+      remediation: reconcileHint(ctx),
       cause,
     });
   }
@@ -423,10 +439,10 @@ function timeoutFailure(ctx: FailureContext): TikTokError {
       kind: 'network',
       code: 'network_ambiguous',
       message:
-        `${ctx.method} ${ctx.shownUrl} timed out after ${ctx.timeoutMs} ms. A publish init that ` +
+        `${ctx.method} ${ctx.shownUrl} timed out after ${ctx.timeoutMs} ms. ` +
+        `${ctx.oauth === true ? 'A token request' : 'A publish init'} that ` +
         `times out may still have been processed, so the outcome is unknown and it is NOT retried.`,
-      remediation:
-        'Check the publish journal for an intent without an outcome and verify upstream state before creating a new attempt.',
+      remediation: reconcileHint(ctx),
     });
   }
   return new TikTokError({
@@ -457,8 +473,7 @@ function gatewayAmbiguousFailure(status: number, ctx: FailureContext): Outcome<n
       message:
         `${ctx.method} ${ctx.shownUrl} answered HTTP ${status} without a TikTok error envelope. ` +
         `A publish init may still have been processed, so the outcome is unknown and it is NOT retried.`,
-      remediation:
-        'Check the publish journal for an intent without an outcome and verify upstream state before creating a new attempt.',
+      remediation: PUBLISH_RECONCILE,
     }),
   };
 }
@@ -485,8 +500,7 @@ function malformedDataFailure(raw: RawResponse, ctx: FailureContext): Outcome<ne
         kind: 'network',
         code: 'network_ambiguous',
         message: `${shape}. A publish init may still have been accepted, so the outcome is unknown and it is NOT retried.`,
-        remediation:
-          'Check the publish journal for an intent without an outcome and verify upstream state before creating a new attempt.',
+        remediation: PUBLISH_RECONCILE,
       }),
     };
   }
@@ -1386,6 +1400,7 @@ export async function oauthRequest<T>(opts: OauthRequestOptions): Promise<T> {
   const ctx: FailureContext & { signal?: AbortSignal } = {
     // OAuth calls share the `init` failure semantics: they are never retried.
     retryClass: 'init',
+    oauth: true,
     shownUrl,
     method: opts.method,
     clock,

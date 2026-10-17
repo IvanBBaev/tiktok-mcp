@@ -12,6 +12,15 @@ plumbing stay in the commit history where they belong.
 
 ## [Unreleased]
 
+### Fixed
+
+- A token refresh or exchange whose connection failed or timed out after the
+  request was sent reported `network_ambiguous` with the publish-init wording
+  and told the caller to check the publish journal, although nothing was posted.
+  It now says the token request's outcome is unknown and that the refresh token
+  may have been rotated: try again, and run `login` if TikTok then answers
+  `invalid_grant`.
+
 ## [0.8.0] - 2026-10-01
 
 The first version published to npm. It also ships everything in the 0.7.0
