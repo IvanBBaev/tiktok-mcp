@@ -15,6 +15,11 @@
  * document — generating it would move an editorial decision into a script.
  * `--write` therefore reports exactly what `--check` reports.
  *
+ * The tool count is restated in more places than `server.json`: the plugin and
+ * marketplace manifests, the extension's marketplace description, the README
+ * badge and the site's meta and lead. Those are hand-written too, so the same
+ * gate holds each of them to the live count ({@link TOOL_COUNT_SOURCES}).
+ *
  * Deliberately NOT checked here, so the gate's silence is not read as more than
  * it is:
  *  - schema validity — `mcp-publisher` validates against the published schema at
@@ -32,13 +37,48 @@
 import { envKeyFor } from '../src/core/config.js';
 import { DEFAULT_PROFILE, knownSettingVars, loadSettings } from '../src/core/settings.js';
 import { allTools } from '../src/tools/index.js';
-import { asRecord, asString, readRepoJson } from './lib/repo.js';
+import { asRecord, asString, readRepoJson, readRepoText } from './lib/repo.js';
 
 const SERVER_JSON = 'server.json';
 const PACKAGE_JSON = 'package.json';
 
 /** A count claim in the description — "11 tools" — that the code can settle. */
 const TOOL_COUNT_CLAIM = /(\d+)\s+tools\b/;
+
+/** A file outside `server.json` that restates the tool count, and how to find it. */
+export interface ToolCountSource {
+  readonly file: string;
+  /** Global; capture group 1 is the claimed count. */
+  readonly claim: RegExp;
+}
+
+/**
+ * Every total-count claim outside `server.json`. The site patterns stop at the
+ * total ("11 tools, 5 packages", "11 tools across 5 packages") so the
+ * per-package "(2 tools)" headings, which the site gate already derives, are
+ * not mistaken for one.
+ */
+export const TOOL_COUNT_SOURCES: readonly ToolCountSource[] = [
+  { file: 'README.md', claim: /badge\/tools-(\d+)-/g },
+  { file: '.claude-plugin/plugin.json', claim: /(\d+)\s+tools\b/g },
+  { file: '.claude-plugin/marketplace.json', claim: /(\d+)\s+tools\b/g },
+  { file: 'extension/package.json', claim: /(\d+)\s+tools\b/g },
+  { file: 'site/index.html', claim: /(\d+) tools(?:,| across)/g },
+];
+
+/** Every count claim in `text` that disagrees with `toolCount`. */
+export function checkToolCountClaims(
+  source: ToolCountSource,
+  text: string,
+  toolCount: number,
+): string[] {
+  return [...text.matchAll(source.claim)]
+    .filter((match) => match[1] !== String(toolCount))
+    .map(
+      (match) =>
+        `${source.file} claims ${String(match[1])} tools, but the server registers ${String(toolCount)}`,
+    );
+}
 
 /** What the running build says, as opposed to what `server.json` claims. */
 export interface LiveFacts {
@@ -208,10 +248,16 @@ export async function syncServerJson(): Promise<boolean> {
     );
     return false;
   }
-  const problems = checkServerJson(server, pkg, liveFacts());
+  const live = liveFacts();
+  const problems = checkServerJson(server, pkg, live);
+  for (const source of TOOL_COUNT_SOURCES) {
+    const text = await readRepoText(source.file).catch(() => undefined);
+    if (text === undefined) problems.push(`${source.file} is unreadable`);
+    else problems.push(...checkToolCountClaims(source, text, live.toolCount));
+  }
   if (problems.length === 0) return true;
   process.stderr.write(
-    `serverjson-sync: ${SERVER_JSON} disagrees with the code it describes — ` +
+    `serverjson-sync: ${SERVER_JSON} (or a file restating its tool count) disagrees with the code it describes — ` +
       `edit it by hand (\`npm run sync:write\` never rewrites it):\n` +
       `${problems.map((problem) => `  x ${problem}`).join('\n')}\n` +
       `  note: schema validity, variable-list completeness and description ` +

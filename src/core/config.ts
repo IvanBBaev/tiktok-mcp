@@ -36,7 +36,15 @@
  *   `withEnvLock` (CONTRACTS.md § core/config, CC-A2/CC-F5).
  */
 
-import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import {
+  chmod,
+  type FileHandle,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+} from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
@@ -220,8 +228,9 @@ function expandTilde(value: string): string {
 /**
  * Where the env file lives (CONFIGURATION.md § Location, SYNTHESIS § 2.1).
  *
- * `TT_ENV_FILE` verbatim → `$XDG_CONFIG_HOME/tiktok-mcp-ai/.env` (falling back
- * to `~/.config/...`) on POSIX → `%LOCALAPPDATA%\tiktok-mcp-ai\.env` on win32.
+ * `TT_ENV_FILE` (tilde-expanded, then resolved) →
+ * `$XDG_CONFIG_HOME/tiktok-mcp-ai/.env` (falling back to `~/.config/...`) on
+ * POSIX → `%LOCALAPPDATA%\tiktok-mcp-ai\.env` on win32.
  * `%APPDATA%` is deliberately **not** used: roaming profiles replicate to other
  * machines and tokens must not roam.
  *
@@ -602,14 +611,19 @@ export function readProfile(
   // secret: a later stack trace or echoed form body must come out masked.
   registerSecret(clientSecret);
 
-  /** CC-H2: persisted times are ISO-8601 UTC; a value that cannot be parsed would become NaN at comparison time. */
+  /**
+   * CC-H2: persisted times are ISO-8601 UTC; a value that cannot be parsed would
+   * become NaN at comparison time. `Date.parse` alone is not the check: it reads
+   * a zone-less `2026-10-17T10:00:00` as local time, and any locale-ish string
+   * it happens to accept, so the shape is matched first.
+   */
   const timestamp = (
     field: 'accessExpiresAt' | 'refreshExpiresAt',
   ): string | undefined => {
     const key = envKeyFor(profile, field);
     const value = lookup(key);
     if (value === undefined) return undefined;
-    if (!Number.isFinite(Date.parse(value))) {
+    if (!ISO_INSTANT.test(value) || !Number.isFinite(Date.parse(value))) {
       throw configError({
         code: 'invalid_timestamp',
         message: `${key}: expected an ISO-8601 UTC timestamp, got ${JSON.stringify(value)}`,
@@ -665,8 +679,19 @@ function defaultLogger(): Logger {
   return fallbackLogger;
 }
 
+/** A full date-time with an explicit zone — what `toISOString` writes, or an offset. */
+const ISO_INSTANT =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
 /** Distinct temp names without a clock or a random source (both are banned/seamed). */
 let tempCounter = 0;
+
+/**
+ * How many temp names one write tries. The counter restarts with the process,
+ * and a container's server is PID 1 every time, so a temp file a killed run
+ * left behind sits exactly where the next run's first write looks.
+ */
+const TEMP_NAME_ATTEMPTS = 8;
 
 /** Render a value so that parsing it back yields exactly what was passed in. */
 function formatValue(key: string, value: string): string {
@@ -768,8 +793,7 @@ async function atomicWrite(
   const target = await canonicalPath(path);
   const dir = dirname(target);
   const doRename = opts.rename ?? rename;
-  tempCounter += 1;
-  const temp = join(dir, `.env.tmp-${String(process.pid)}-${String(tempCounter)}`);
+  let temp = '';
 
   try {
     const created = await mkdir(dir, { recursive: true, mode: DIR_MODE });
@@ -778,8 +802,22 @@ async function atomicWrite(
     if (created !== undefined && opts.platform !== 'win32') await chmod(dir, DIR_MODE);
 
     // Exclusive: never follow or reuse whatever already sits at the temp name —
-    // a planted symlink there would otherwise receive the tokens.
-    const handle = await open(temp, 'wx', FILE_MODE);
+    // a planted symlink there would otherwise receive the tokens. An occupied
+    // name is not ours to remove either, so the next one is tried instead.
+    let handle: FileHandle | undefined;
+    for (let attempt = 1; handle === undefined; attempt += 1) {
+      tempCounter += 1;
+      const candidate = join(
+        dir,
+        `.env.tmp-${String(process.pid)}-${String(tempCounter)}`,
+      );
+      try {
+        handle = await open(candidate, 'wx', FILE_MODE);
+        temp = candidate;
+      } catch (err) {
+        if (errnoFor(err) !== 'EEXIST' || attempt === TEMP_NAME_ATTEMPTS) throw err;
+      }
+    }
     try {
       await handle.writeFile(contents, 'utf8');
       await handle.sync();
@@ -791,7 +829,7 @@ async function atomicWrite(
       path,
       code: errnoFor(err),
     });
-    await rm(temp, { force: true }).catch(() => undefined);
+    if (temp !== '') await rm(temp, { force: true }).catch(() => undefined);
     return false;
   }
 

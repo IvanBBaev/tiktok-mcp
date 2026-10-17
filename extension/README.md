@@ -37,7 +37,8 @@ APIs — the **Display API** (read a creator's profile and videos) and the
 1. Install this extension. The **TikTok** MCP server is registered for Copilot
    Chat (it runs via `npx -y tiktok-mcp-ai`, so Node.js 22+ is required).
 2. Provide your TikTok app credentials in an env file at
-   `~/.config/tiktok-mcp-ai/.env`:
+   `~/.config/tiktok-mcp-ai/.env` on macOS/Linux (`$XDG_CONFIG_HOME` is
+   honored) or `%LOCALAPPDATA%\tiktok-mcp-ai\.env` on Windows:
    ```dotenv
    TT_CLIENT_KEY=your-tiktok-app-client-key
    TT_CLIENT_SECRET=your-tiktok-app-client-secret

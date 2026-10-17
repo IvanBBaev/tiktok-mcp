@@ -656,6 +656,20 @@ test('cc-h2 an expiry that is not a parseable timestamp is rejected on read', ()
   );
   assert.equal(err.code, 'invalid_timestamp');
   assert.match(err.message, /TT_REFRESH_EXPIRES_AT: expected an ISO-8601 UTC timestamp/);
+
+  // Date.parse accepts both, the first as local time — neither names an instant.
+  for (const value of ['2026-03-02T00:00:00', 'Mar 2 2026']) {
+    const zoneless = throws(() =>
+      readProfile('DEFAULT', snapshotOf({ ...base, TT_TOKEN_EXPIRES_AT: value }), {}),
+    );
+    assert.equal(zoneless.code, 'invalid_timestamp', value);
+  }
+  const offset = readProfile(
+    'DEFAULT',
+    snapshotOf({ ...base, TT_TOKEN_EXPIRES_AT: '2026-01-02T02:00:00+02:00' }),
+    {},
+  );
+  assert.equal(offset.accessExpiresAt, '2026-01-02T02:00:00+02:00');
 });
 
 // ---------------------------------------------------------------------------
@@ -1514,29 +1528,48 @@ test(
   },
 );
 
-test('cc-h3 a file already sitting at the temp name degrades the write, never reuses it', async () => {
+/** The next `count` temp names this process will try, learned from one real write. */
+async function nextTempNames(dir: string, count: number): Promise<string[]> {
+  let used = '';
+  await persistProfilePatch(
+    path.join(dir, '.env'),
+    'DEFAULT',
+    { accessToken: 'first' },
+    {
+      rename: async (from, to) => {
+        used = from;
+        await rename(from, to);
+      },
+    },
+  );
+  const match = /^\.env\.tmp-(\d+)-(\d+)$/.exec(path.basename(used));
+  assert.ok(match !== null, `unexpected temp name ${used}`);
+  return Array.from({ length: count }, (_, i) =>
+    path.join(dir, `.env.tmp-${match[1] ?? ''}-${String(Number(match[2]) + 1 + i)}`),
+  );
+}
+
+test('cc-h3 a file already sitting at the temp name is skipped, never reused or removed', async () => {
   await withSandbox(async (dir) => {
     const file = path.join(dir, '.env');
-    // Learn the counter the next temp name will carry from one real write.
-    let used = '';
-    await persistProfilePatch(
-      file,
-      'DEFAULT',
-      { accessToken: 'first' },
-      {
-        rename: async (from, to) => {
-          used = from;
-          await rename(from, to);
-        },
-      },
-    );
-    const match = /^\.env\.tmp-(\d+)-(\d+)$/.exec(path.basename(used));
-    assert.ok(match !== null, `unexpected temp name ${used}`);
-    const next = path.join(
-      dir,
-      `.env.tmp-${match[1] ?? ''}-${String(Number(match[2]) + 1)}`,
-    );
-    await writeFile(next, 'planted');
+    // What a killed run with the same PID (a container's PID 1) leaves behind.
+    const [stale] = await nextTempNames(dir, 1);
+    assert.ok(stale !== undefined);
+    await writeFile(stale, 'planted');
+
+    const result = await persistProfilePatch(file, 'DEFAULT', { accessToken: 'second' });
+
+    assert.deepEqual(result, { persisted: true });
+    assert.match(await readFile(file, 'utf8'), /TT_ACCESS_TOKEN=second/);
+    assert.equal(await readFile(stale, 'utf8'), 'planted');
+  });
+});
+
+test('cc-h3 a write degrades once every temp name it tries is taken', async () => {
+  await withSandbox(async (dir) => {
+    const file = path.join(dir, '.env');
+    const taken = await nextTempNames(dir, 8);
+    for (const name of taken) await writeFile(name, 'planted');
     const { logger, records } = recordingLogger();
 
     const result = await persistProfilePatch(
@@ -1551,6 +1584,41 @@ test('cc-h3 a file already sitting at the temp name degrades the write, never re
     assert.match(records[0]?.msg ?? '', /env file write failed/);
     assert.equal(records[0]?.fields?.['code'], 'EEXIST');
     assert.match(await readFile(file, 'utf8'), /TT_ACCESS_TOKEN=first/);
+    for (const name of taken) assert.equal(await readFile(name, 'utf8'), 'planted');
+  });
+});
+
+test('cc-h3 a temp file whose fsync fails is removed, and the write degrades', async () => {
+  await withSandbox(async (dir) => {
+    const file = path.join(dir, '.env');
+    const realOpen = fsp.open;
+    const spy = mock.method(fsp, 'open', async (...args: Parameters<typeof fsp.open>) => {
+      const handle = await realOpen(...args);
+      if (path.basename(String(args[0])).startsWith('.env.tmp-')) {
+        handle.sync = () =>
+          Promise.reject(Object.assign(new Error('simulated EIO'), { code: 'EIO' }));
+      }
+      return handle;
+    });
+    syncBuiltinESMExports();
+    const { logger, records } = recordingLogger();
+    try {
+      const result = await persistProfilePatch(
+        file,
+        'DEFAULT',
+        { accessToken: 'lost' },
+        { logger },
+      );
+      assert.deepEqual(result, { persisted: false });
+    } finally {
+      spy.mock.restore();
+      syncBuiltinESMExports();
+    }
+    assert.equal(records[0]?.fields?.['code'], 'EIO');
+    assert.deepEqual(
+      (await readdir(dir)).filter((name) => name.startsWith('.env.tmp-')),
+      [],
+    );
   });
 });
 

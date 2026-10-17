@@ -12,6 +12,40 @@ plumbing stay in the commit history where they belong.
 
 ## [Unreleased]
 
+### Fixed
+
+- A `login` that landed while the server was starting up — after a client's
+  first `tools/list` but before the credential watch's first poll — was taken
+  as the starting state and never announced, so the client kept the stale
+  `[UNAVAILABLE]` markers until the next change. The watch now starts from the
+  picture taken before the transport serves.
+- A running server kept serving the access token it had cached while that
+  token was still fresh, without looking at the env file. After a
+  `login --force` in another terminal it could post with the old account's
+  token while a publish plan showed and bound the new account's `open_id`;
+  after a `login --revoke` elsewhere it went on posting as the account the
+  user had logged out of. The credentials are now re-read before every use, as
+  [docs/AUTH.md § 6](docs/AUTH.md) already promised.
+- A stored token expiry without a time zone (`TT_TOKEN_EXPIRES_AT=2026-10-17T10:00:00`,
+  say, hand-edited) was accepted and read as local time, shifting the refresh
+  by the machine's UTC offset; so was any loose date string `Date.parse`
+  happens to understand. Expiries must now be a full ISO-8601 date-time with
+  `Z` or an explicit offset, or the profile fails with `invalid_timestamp` as
+  any unparsable value already did. Values written by `login` and refresh
+  always were.
+- An env-file write could be lost after a restart: temp-file names carry the
+  PID and a per-process counter, and a server that always runs as PID 1 (a
+  container) found the temp file a killed run had left at exactly the name its
+  first write tried. That write — possibly a rotated refresh token — was
+  dropped to memory only. An occupied temp name is now skipped for the next
+  one (up to 8 per write) and left untouched.
+- A token refresh or exchange whose connection failed or timed out after the
+  request was sent reported `network_ambiguous` with the publish-init wording
+  and told the caller to check the publish journal, although nothing was posted.
+  It now says the token request's outcome is unknown and that the refresh token
+  may have been rotated: try again, and run `login` if TikTok then answers
+  `invalid_grant`.
+
 ## [0.8.0] - 2026-10-01
 
 The first version published to npm. It also ships everything in the 0.7.0

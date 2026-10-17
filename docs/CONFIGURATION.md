@@ -25,7 +25,7 @@ keep serving the stale values.)
 
 | Step | POSIX (Linux/macOS) | Windows (win32) |
 |---|---|---|
-| 1. Explicit override | `TT_ENV_FILE` (used verbatim) | `TT_ENV_FILE` (used verbatim) |
+| 1. Explicit override | `TT_ENV_FILE` (`~` expanded, resolved to an absolute path) | `TT_ENV_FILE` (`~` expanded, resolved to an absolute path) |
 | 2. Default | `$XDG_CONFIG_HOME/tiktok-mcp-ai/.env`, falling back to `~/.config/tiktok-mcp-ai/.env` | `%LOCALAPPDATA%\tiktok-mcp-ai\.env` |
 
 The resolved path is both the read source and the write target. The publish
@@ -61,7 +61,8 @@ roaming profiles replicate to other machines, and tokens must not roam.
 - **Atomic:** a temp file in the same directory (written `0600`, fsync'd),
   then `rename` onto the target. The temp file is created exclusively, so
   nothing already sitting at its name — a planted symlink included — is
-  followed or reused.
+  followed, reused or removed; an occupied name (a temp file a killed run left
+  behind, say) is skipped for the next one, up to 8 names per write.
 - **Symlinks are kept:** a symlinked env file (a dotfiles repo, a mounted
   secret) is written through to its target, in the target's directory; the
   link itself is not replaced by a regular file. A dangling link is followed

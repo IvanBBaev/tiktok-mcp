@@ -2015,6 +2015,47 @@ test('oauthRequest reports a non-JSON token response without crashing', async ()
   assert.equal(err.retryable, false);
 });
 
+test('oauthRequest names a token rotation, not the publish journal, when the connection fails', async () => {
+  const clock = mockClock();
+  const play = playFetch([new TypeError('fetch failed')]);
+  const err = ttError(
+    await withFetch(play.fetch, () =>
+      rejection(
+        drive(clock, oauthRequest({ method: 'POST', url: OAUTH_URL, body: {}, clock })),
+      ),
+    ),
+  );
+  assert.equal(err.code, 'network_ambiguous');
+  assert.match(err.remediation ?? '', /rotated the refresh token/);
+  assert.doesNotMatch(err.remediation ?? '', /publish journal/);
+});
+
+test('oauthRequest reports a timeout as an unknown token request, not a publish init', async () => {
+  const clock = mockClock();
+  const play = playFetch(['hang']);
+  const err = ttError(
+    await withFetch(play.fetch, () =>
+      rejection(
+        drive(
+          clock,
+          oauthRequest({
+            method: 'POST',
+            url: OAUTH_URL,
+            body: {},
+            timeoutMs: 3_000,
+            clock,
+          }),
+        ),
+      ),
+    ),
+  );
+  assert.equal(err.code, 'network_ambiguous');
+  assert.match(err.message, /A token request that times out/);
+  assert.doesNotMatch(err.message, /publish init/);
+  assert.match(err.remediation ?? '', /invalid_grant/);
+  assert.equal(clock.pending(), 0);
+});
+
 test('oauthRequest is never retried', async () => {
   const clock = mockClock();
   const play = playFetch([

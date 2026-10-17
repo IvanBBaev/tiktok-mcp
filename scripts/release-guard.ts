@@ -253,7 +253,8 @@ export async function readReleaseInputs(tag: string): Promise<ReleaseInputs> {
   const pkg = (await readRepoJson(PACKAGE_JSON)) ?? {};
   const server = (await readRepoJson(SERVER_JSON)) ?? {};
   const plugin = (await readRepoJson(PLUGIN_JSON)) ?? {};
-  const extension = await readRepoJson(EXTENSION_JSON);
+  // A missing file reads as a missing version and fails, as the others do.
+  const extension = (await readRepoJson(EXTENSION_JSON)) ?? {};
   const packages = Array.isArray(server['packages']) ? server['packages'] : [];
   const versions: VersionSource[] = [
     { label: `${PACKAGE_JSON} version`, version: asString(pkg['version']) },
@@ -270,11 +271,7 @@ export async function readReleaseInputs(tag: string): Promise<ReleaseInputs> {
     // publish-vscode.yml publishes the extension once this tag's npm publish
     // succeeds, so a forgotten bump there ships a marketplace entry describing
     // another release.
-    ...(extension === undefined
-      ? []
-      : [
-          { label: `${EXTENSION_JSON} version`, version: asString(extension['version']) },
-        ]),
+    { label: `${EXTENSION_JSON} version`, version: asString(extension['version']) },
   ];
   const description = asString(server['description']);
   return {

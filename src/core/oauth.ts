@@ -822,25 +822,66 @@ function lockOptions(state: RefreshState): Parameters<typeof withEnvLock>[2] {
 }
 
 /**
- * The whole refresh attempt, from the cold-start read to the locked section.
+ * Line the adopted set up with a fresh read of the file before it is served.
  *
- * It lives behind the single-flight map, so the "maybe the file already holds a
- * usable token" read happens once per burst of callers rather than once per
- * caller.
+ * The file is the source of truth (AUTH.md § 6): a `login --force` run by
+ * another process may have bound it to a different account, and a
+ * `login --revoke` may have cleared it. Serving the adopted token past either
+ * would post as the account the user just replaced, or as one they logged out
+ * of. So the file's set is adopted wholesale whenever it holds one, and a file
+ * with no complete set drops the cache — the locked section then refreshes
+ * from what is left, or reports the login gone.
+ *
+ * The one exception is a file still holding a refresh token this process has
+ * already spent: that is our own pre-rotation copy (a persist that failed, or a
+ * value pinned in the process environment, CC-H3/CC-F2), and the adopted set is
+ * the newer one.
  */
-async function runRefresh(state: RefreshState, cold: boolean): Promise<string> {
-  if (cold) {
-    // Nothing adopted yet: the file (or the process env) may already hold a
-    // token that needs no refresh at all, which is the startup case.
-    const fromDisk = toCachedSet(await readFromDisk(state));
-    if (fromDisk !== undefined) {
-      adopted.set(state.profile, fromDisk);
-      if (
-        state.deps.force !== true &&
-        isFresh(fromDisk, state.clock.now(), state.settings.tokenRefreshSkewS)
-      ) {
-        return fromDisk.accessToken;
-      }
+function reconcileWithDisk(
+  state: RefreshState,
+  fromDisk: ProfileCredentials,
+): TokenSet | undefined {
+  const cached = adopted.get(state.profile);
+  const diskRefresh = fromDisk.refreshToken;
+  if (
+    diskRefresh !== undefined &&
+    spentTokens.get(state.profile)?.has(diskRefresh) === true
+  ) {
+    return cached;
+  }
+  const onDisk = toCachedSet(fromDisk);
+  if (onDisk === undefined) {
+    adopted.delete(state.profile);
+    return undefined;
+  }
+  if (cached !== undefined && cached.accessToken !== onDisk.accessToken) {
+    state.logger.debug('adopted a token another process had already refreshed', {
+      profile: state.profile,
+    });
+  }
+  adopted.set(state.profile, onDisk);
+  return onDisk;
+}
+
+/**
+ * The whole refresh attempt, from the re-read to the locked section.
+ *
+ * It lives behind the single-flight map, so the re-read happens once per burst
+ * of callers rather than once per caller. A forced refresh with a token already
+ * adopted skips it: the caller holds a token TikTok just rejected, and the
+ * locked section's own re-read decides whether a sibling's rotation can stand
+ * in for the refresh (`isUsableFromDisk`), which needs the rejected token still
+ * adopted to compare against.
+ */
+async function runRefresh(state: RefreshState): Promise<string> {
+  if (state.deps.force !== true || !adopted.has(state.profile)) {
+    const current = reconcileWithDisk(state, await readFromDisk(state));
+    if (
+      current !== undefined &&
+      state.deps.force !== true &&
+      isFresh(current, state.clock.now(), state.settings.tokenRefreshSkewS)
+    ) {
+      return current.accessToken;
     }
   }
   try {
@@ -883,15 +924,8 @@ export async function ensureFreshAccessToken(
   // Everything up to `inFlight.set` stays synchronous: an `await` before the
   // map is written would let two concurrent callers both miss it and refresh
   // twice, which is exactly the rotation race single-flight exists to prevent.
-  const cached = adopted.get(name);
-  if (
-    deps.force !== true &&
-    cached !== undefined &&
-    isFresh(cached, clock.now(), settings.tokenRefreshSkewS)
-  ) {
-    return cached.accessToken;
-  }
-
+  // Even a fresh adopted token goes through the attempt: it is only served once
+  // the file has been re-read and still agrees (`reconcileWithDisk`).
   const pending = inFlight.get(name);
   if (pending !== undefined) return await pending;
 
@@ -904,7 +938,7 @@ export async function ensureFreshAccessToken(
     env,
     deps,
   };
-  const attempt: Promise<string> = runRefresh(state, cached === undefined).finally(() => {
+  const attempt: Promise<string> = runRefresh(state).finally(() => {
     // `resetTokenCache` may have dropped this entry and a newer refresh taken
     // the slot; clearing that one would let a third caller rotate in parallel.
     if (inFlight.get(name) === attempt) inFlight.delete(name);

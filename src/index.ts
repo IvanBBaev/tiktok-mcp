@@ -177,6 +177,13 @@ async function startServer(): Promise<void> {
     shutdown('uncaught exception');
   });
 
+  // The picture a client can be shown from the moment the transport serves:
+  // taken before it does, so a `login` that lands between the first
+  // `tools/list` and the credential watch's first poll is announced rather than
+  // seeded as the starting state. `listingProfiles` is what `tools/list`
+  // answers from, unreadable file included.
+  const baseline = await listingProfiles();
+
   if (settings.transport === 'http') {
     const { startHttpTransport } = await import('./mcp/http.js');
     const transport = await startHttpTransport({
@@ -271,6 +278,7 @@ async function startServer(): Promise<void> {
     clock: systemClock,
     logger: log,
     profiles: readProfiles,
+    baseline,
     onChange: async (change) => {
       log.info(
         'credentials changed; telling clients to re-list the tools and resources',
@@ -297,9 +305,8 @@ async function startServer(): Promise<void> {
     },
   });
   stopWatch = () => watch.stop();
-  // Seeds the baseline now rather than one tick from now: a change that lands
-  // between the transport connecting and the first tick would otherwise be
-  // read as the starting state and never announced.
+  // Polls now rather than one tick from now, so a change made while the
+  // transport was coming up is announced straight away.
   await watch.poll();
 }
 

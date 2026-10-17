@@ -371,7 +371,8 @@ export interface PersistOptions {
  *  parent directory is created and the file lands where the chain ends, with
  *  every link in it kept. The
  *  temp file is opened exclusively ('wx') so nothing pre-existing at the temp
- *  name is followed or reused; EPERM/EBUSY/EACCES rename retried ×3
+ *  name is followed, reused or removed — an occupied name is skipped for the
+ *  next, up to 8 per write; EPERM/EBUSY/EACCES rename retried ×3
  *  (50/100/200 ms) then degrade to in-memory + warn (CC-H3). The *read* half of
  *  read-merge-write degrades identically: a document this process cannot read is
  *  one it must not overwrite. Callers MUST hold withEnvLock — this function does

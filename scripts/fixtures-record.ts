@@ -226,7 +226,8 @@ const USAGE = [
   '  --list             print the capture catalog and record nothing',
   '  --only <names>     record only these captures (comma-separated)',
   '  --profile <name>   credential profile to record against',
-  '                     (default: TT_ACTIVE_PROFILE, else DEFAULT)',
+  '                     (default: TT_LOCK_PROFILE, else TT_ACTIVE_PROFILE,',
+  '                     else DEFAULT)',
   '  -h, --help         show this help',
   '',
 ].join('\n');
@@ -592,7 +593,7 @@ interface Recorder {
  * builds the one its api probe uses.
  *
  * Two details are load-bearing. The profile is resolved through the same chain
- * doctor uses (`--profile`, then `TT_PROFILE_LOCK`, then `TT_ACTIVE_PROFILE`,
+ * doctor uses (`--profile`, then `TT_LOCK_PROFILE`, then `TT_ACTIVE_PROFILE`,
  * which `loadSettings` has already defaulted to `DEFAULT`), because a recorder
  * with its own idea of "the default account" would record the wrong one. And
  * `createApiContext` is called **without** a `refresh` override, so the api

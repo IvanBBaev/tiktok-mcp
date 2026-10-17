@@ -27,7 +27,13 @@ import {
   resolveTag,
   type ReleaseInputs,
 } from '../scripts/release-guard.js';
-import { checkServerJson, liveFacts } from '../scripts/serverjson-sync.js';
+import { lifecycleScripts } from '../scripts/gen-pack-manifest.js';
+import {
+  checkServerJson,
+  checkToolCountClaims,
+  liveFacts,
+  TOOL_COUNT_SOURCES,
+} from '../scripts/serverjson-sync.js';
 import { readRepoJson, readRepoText } from '../scripts/lib/repo.js';
 
 // ---------------------------------------------------------------------------
@@ -415,4 +421,60 @@ test('the committed server.json passes its own gate', async () => {
   const pkg = await readRepoJson('package.json');
   assert.ok(server !== undefined && pkg !== undefined);
   assert.deepEqual(checkServerJson(server, pkg, liveFacts()), []);
+});
+
+// ---------------------------------------------------------------------------
+// pack audit
+// ---------------------------------------------------------------------------
+
+test('the pack audit names every lifecycle script a package.json defines', () => {
+  assert.deepEqual(
+    lifecycleScripts({
+      scripts: { build: 'tsc', postinstall: 'node x', prepare: 'husky', prepack: 'y' },
+    }),
+    ['postinstall', 'prepare', 'prepack'],
+  );
+  assert.deepEqual(lifecycleScripts({}), []);
+  assert.deepEqual(lifecycleScripts({ scripts: ['postinstall'] }), []);
+});
+
+test('the committed package.json ships no lifecycle scripts', async () => {
+  assert.deepEqual(lifecycleScripts((await readRepoJson('package.json')) ?? {}), []);
+});
+
+// ---------------------------------------------------------------------------
+// tool-count claims outside server.json
+// ---------------------------------------------------------------------------
+
+function countSource(file: string): (typeof TOOL_COUNT_SOURCES)[number] {
+  const source = TOOL_COUNT_SOURCES.find((candidate) => candidate.file === file);
+  assert.ok(source !== undefined, file);
+  return source;
+}
+
+test('every committed tool-count claim matches the registered tools', async () => {
+  const count = allTools().length;
+  for (const source of TOOL_COUNT_SOURCES) {
+    const text = await readRepoText(source.file);
+    assert.ok([...text.matchAll(source.claim)].length > 0, `${source.file} has no claim`);
+    assert.deepEqual(checkToolCountClaims(source, text, count), [], source.file);
+  }
+});
+
+test('a stale tool-count claim is named with its file', () => {
+  assert.deepEqual(
+    checkToolCountClaims(countSource('README.md'), 'badge/tools-9-blue', 11),
+    ['README.md claims 9 tools, but the server registers 11'],
+  );
+});
+
+test('the site gate reads the total, not the per-package headings', () => {
+  const site = countSource('site/index.html');
+  assert.deepEqual(
+    checkToolCountClaims(site, '<em>(2 tools)</em> 11 tools across', 11),
+    [],
+  );
+  assert.deepEqual(checkToolCountClaims(site, '12 tools, 5 packages', 11), [
+    'site/index.html claims 12 tools, but the server registers 11',
+  ]);
 });

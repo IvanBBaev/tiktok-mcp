@@ -127,16 +127,17 @@ model can poll `tiktok_get_publish_status` for the terminal state.
   enabled packages.
 - **Egress allowlist**: the process talks only to `open.tiktokapis.com`, the
   media-upload hosts (`open-upload.tiktokapis.com` and the anchored regional
-  `upload.<region>.tiktokapis.com` pattern), and `www.tiktok.com` for the OAuth
-  authorize redirect — matched dot-anchored on the parsed hostname, https/443
-  only, with `redirect: "error"`. Nothing else is reachable. One honest
-  exception: the internal, unsupported `TT_OAUTH_BASE_URL` can move the OAuth
-  origin, and only there — it is honoured solely when it parses as a loopback
-  origin, so it can point the flow at a local stub and at nothing else.
+  `upload.<region>.tiktokapis.com` pattern) — matched dot-anchored on the
+  parsed hostname, https/443 only, with `redirect: "error"`. Nothing else is
+  reachable; `www.tiktok.com` only hosts the OAuth authorize page, which your
+  browser opens — the server never requests it. One honest exception: the
+  internal, unsupported `TT_OAUTH_BASE_URL` can move the OAuth origin, and only
+  there — it is honoured solely when it parses as a loopback origin, so it can
+  point the flow at a local stub and at nothing else.
 - Resilience: per-request timeout, a three-class retry matrix (reads retried
   with backoff and `Retry-After`; publish inits **never** retried; chunk PUTs
-  replay-safe by byte range), a per-host concurrency semaphore, and a local
-  publish-rate token bucket (6/min per profile, matching TikTok).
+  replay-safe by byte range), and a local publish-rate
+  token bucket (6/min per profile, matching TikTok).
 - MCP **tool annotations** (all four hints on every tool), structured error
   payloads written for the model, and **structured logging on stderr only** —
   stdout stays pure JSON-RPC.
@@ -350,7 +351,8 @@ material.
 One TikTok app can serve many accounts. The bare token keys
 (`TT_ACCESS_TOKEN`, `TT_REFRESH_TOKEN`, `TT_OPEN_ID`, …) are the `default`
 profile; extra accounts use `TT_PROFILE_<NAME>_*` with the same keys.
-`TT_ACTIVE_PROFILE` selects the default, and every tool accepts an optional
+`TT_ACTIVE_PROFILE` selects the default (`TT_LOCK_PROFILE`, when set, outranks
+it and pins the session to that one profile), and every tool accepts an optional
 `account: "brand"` argument to run one call against another profile — the
 selection is resolved per call and passed down as an explicit parameter, and
 each call builds its own API context, so parallel calls with different accounts
@@ -431,7 +433,8 @@ The published `tiktok-mcp-ai` binary (run it directly, or via
 `npx tiktok-mcp-ai`) has three invocations. All connection settings come from
 environment variables / the env file (see
 [Environment variables](#environment-variables)); the subcommands operate on the
-active profile (`TT_ACTIVE_PROFILE`, or `--profile <name>`).
+active profile (`--profile <name>`, else `TT_LOCK_PROFILE`, else
+`TT_ACTIVE_PROFILE`).
 
 | Command | What it does | Exit codes |
 | ------- | ------------ | ---------- |
@@ -646,15 +649,17 @@ report privately, and what is in scope.
 ## Uninstall
 
 There is no database and nothing outside one directory. Everything this server
-writes lives beside the resolved env file — `~/.config/tiktok-mcp-ai/` on
-macOS/Linux, `%LOCALAPPDATA%\tiktok-mcp-ai\` on Windows, or the directory of
-`TT_ENV_FILE` if you set it:
+writes lives beside the resolved env file — `$XDG_CONFIG_HOME/tiktok-mcp-ai/`
+(default `~/.config/tiktok-mcp-ai/`) on macOS/Linux,
+`%LOCALAPPDATA%\tiktok-mcp-ai\` on Windows, or the directory of `TT_ENV_FILE`
+if you set it:
 
 | File | What it holds |
 | ---- | ------------- |
 | `.env` | Client key, client secret, access and refresh tokens, your `TT_*` settings |
 | `journal.ndjson` (+ `journal.ndjson.1`) | Append-only publish attempts: timestamp, profile, `open_id`, tool, title excerpt, `publish_id`, outcome. No media, no tokens |
 | `.env.lock` | The cross-process write lock — transient, or left behind by a crash |
+| `journal.ndjson.lock` | The journal's rotation lock — transient, or left behind by a crash |
 | `.env.pre-schema<N>` | Backup written by a schema migration; it still contains credentials |
 
 To remove it all:
@@ -664,7 +669,7 @@ To remove it all:
 npx tiktok-mcp-ai login --revoke --profile DEFAULT
 
 # 2. delete the local state (add --purge-journal above to drop the journal in step 1)
-rm -rf ~/.config/tiktok-mcp-ai
+rm -rf "${XDG_CONFIG_HOME:-$HOME/.config}/tiktok-mcp-ai"
 
 # 3. remove the package if it was installed globally
 npm uninstall -g tiktok-mcp-ai
