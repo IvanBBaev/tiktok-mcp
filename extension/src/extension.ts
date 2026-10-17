@@ -5,8 +5,9 @@ import * as vscode from "vscode";
  * Copilot Chat (agent mode) the moment the extension is installed — no manual
  * `.vscode/mcp.json`. The server runs via `npx -y tiktok-mcp-ai`, so it always
  * resolves the published package; the TikTok app credentials are supplied
- * through the env file (`~/.config/tiktok-mcp-ai/.env`, with `TT_CLIENT_KEY`
- * and `TT_CLIENT_SECRET`), and a creator account is authorized at runtime via
+ * through the env file (`~/.config/tiktok-mcp-ai/.env` on POSIX,
+ * `%LOCALAPPDATA%\tiktok-mcp-ai\.env` on Windows, with `TT_CLIENT_KEY` and
+ * `TT_CLIENT_SECRET`), and a creator account is authorized at runtime via
  * `npx tiktok-mcp-ai login` (OAuth 2.0 + PKCE).
  */
 export function activate(context: vscode.ExtensionContext): void {
