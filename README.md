@@ -350,7 +350,8 @@ material.
 One TikTok app can serve many accounts. The bare token keys
 (`TT_ACCESS_TOKEN`, `TT_REFRESH_TOKEN`, `TT_OPEN_ID`, …) are the `default`
 profile; extra accounts use `TT_PROFILE_<NAME>_*` with the same keys.
-`TT_ACTIVE_PROFILE` selects the default, and every tool accepts an optional
+`TT_ACTIVE_PROFILE` selects the default (`TT_LOCK_PROFILE`, when set, outranks
+it and pins the session to that one profile), and every tool accepts an optional
 `account: "brand"` argument to run one call against another profile — the
 selection is resolved per call and passed down as an explicit parameter, and
 each call builds its own API context, so parallel calls with different accounts
@@ -431,7 +432,8 @@ The published `tiktok-mcp-ai` binary (run it directly, or via
 `npx tiktok-mcp-ai`) has three invocations. All connection settings come from
 environment variables / the env file (see
 [Environment variables](#environment-variables)); the subcommands operate on the
-active profile (`TT_ACTIVE_PROFILE`, or `--profile <name>`).
+active profile (`--profile <name>`, else `TT_LOCK_PROFILE`, else
+`TT_ACTIVE_PROFILE`).
 
 | Command | What it does | Exit codes |
 | ------- | ------------ | ---------- |
