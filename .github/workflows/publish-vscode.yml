@@ -9,7 +9,8 @@ name: Publish VS Code Extension
 # job instead of spending a Marketplace version on an extension that cannot
 # start. workflow_dispatch stays for the first publish or a re-run; a dispatch
 # has no Publish run behind it, so it must name a `v*` tag and runs
-# `npm run release:guard` itself before anything reaches the Marketplace.
+# `npm run release:guard` itself, and confirms npm already has the version,
+# before anything reaches the Marketplace.
 # Authentication uses the VSCE_PAT repo secret (Azure DevOps PAT, scope
 # Marketplace > Manage); the token never touches a laptop or the logs.
 on:
@@ -85,6 +86,18 @@ jobs:
             exit 1
           fi
           echo "version=$ext" >> "$GITHUB_OUTPUT"
+      # A workflow_run only fires after npm took the release. A dispatch has no
+      # such proof, and the extension launches `npx -y tiktok-mcp-ai`, so it
+      # must not reach the Marketplace before npm has this exact version.
+      - name: Check npm already has this version
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          if ! npm view "tiktok-mcp-ai@$VERSION" version | grep -qx "$VERSION"; then
+            echo "tiktok-mcp-ai@$VERSION is not on npm; publish it before the extension" >&2
+            exit 1
+          fi
       - run: npm run compile
       # The Marketplace rejects a semver prerelease version, and release-guard
       # lets a `vX.Y.Z-rc.N` tag through to npm's `next` dist-tag; such a tag
