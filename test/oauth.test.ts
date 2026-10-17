@@ -1362,6 +1362,51 @@ test('a token another process wrote while we waited is adopted without a request
   }
 });
 
+test('a token a sibling wrote while the lock was held elsewhere is adopted without a request', async () => {
+  // The re-read before the lock still finds the stale set; the sibling holding
+  // the lock rotates the file and lets go, and the re-read under the lock is
+  // what picks its token up (ARCHITECTURE § 7.3 step 1).
+  const fx = await fixture();
+  try {
+    await fx.write(storedTokens({ TT_TOKEN_EXPIRES_AT: INSIDE_SKEW_EXPIRES_AT }));
+    await mkdir(`${fx.envFile}.lock`);
+    const stub = scriptFetch([]);
+
+    await withFetch(stub, async () => {
+      const token = ensureFreshAccessToken('DEFAULT', {
+        env: fx.env,
+        settings: fx.settings,
+        clock: fx.clock,
+        logger: fx.logger,
+      });
+
+      const giveUpAt = Date.now() + 10_000;
+      while (fx.clock.pending() === 0) {
+        if (Date.now() > giveUpAt) assert.fail('timed out waiting for the lock wait');
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 1);
+        });
+      }
+      await fx.write(
+        storedTokens({
+          TT_ACCESS_TOKEN: 'act.from-sibling',
+          TT_TOKEN_EXPIRES_AT: '2026-01-03T00:00:00.000Z',
+          TT_REFRESH_TOKEN: 'rft.sibling',
+        }),
+      );
+      await rm(`${fx.envFile}.lock`, { recursive: true });
+      await fx.clock.advance(1_000);
+
+      assert.equal(await token, 'act.from-sibling');
+    });
+
+    assert.equal(stub.calls.length, 0, 'a fresh token on disk must cost no request');
+    assert.equal((await fx.read())['TT_REFRESH_TOKEN'], 'rft.sibling');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
 test('the ordinary half of single flight adopts a sibling’s token without a request', async () => {
   const fx = await fixture();
   try {
@@ -1750,6 +1795,63 @@ test('a forced refresh after another process revoked the login fails instead of 
     );
     assert.equal(after.calls.length, 0);
     assert.deepEqual(await fx.read(), REVOKED_ELSEWHERE);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a fresh adopted token is not served after another process revoked the login', async () => {
+  // The fast path, not the forced one: the adopted token is well inside its
+  // lifetime, yet the file says the user logged out (AUTH.md § 6).
+  const fx = await fixture();
+  try {
+    const deps = {
+      env: fx.env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+    };
+    await withFetch(scriptFetch([]), async () => {
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.stored');
+    });
+
+    await fx.write(REVOKED_ELSEWHERE);
+    const stub = scriptFetch([]);
+    await assert.rejects(
+      withFetch(stub, () => ensureFreshAccessToken('DEFAULT', deps)),
+      (err: unknown) => isTikTokError(err) && err.code === 'auth_expired',
+    );
+    assert.equal(stub.calls.length, 0);
+    assert.deepEqual(await fx.read(), REVOKED_ELSEWHERE, 'nothing is written back');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('a fresh adopted token gives way to a login another process ran for another account', async () => {
+  // `login --force` elsewhere bound the profile to account B; serving the
+  // cached token would post as account A under B's open_id.
+  const fx = await fixture();
+  try {
+    const deps = {
+      env: fx.env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+    };
+    const stub = scriptFetch([]);
+    await withFetch(stub, async () => {
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.stored');
+      await fx.write(
+        storedTokens({
+          TT_ACCESS_TOKEN: 'act.account-b',
+          TT_REFRESH_TOKEN: 'rft.account-b',
+          TT_OPEN_ID: 'open-id-b',
+        }),
+      );
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.account-b');
+    });
+    assert.equal(stub.calls.length, 0, 'the new login needs no refresh');
   } finally {
     await fx.cleanup();
   }

@@ -14,6 +14,13 @@ plumbing stay in the commit history where they belong.
 
 ### Fixed
 
+- A running server kept serving the access token it had cached while that
+  token was still fresh, without looking at the env file. After a
+  `login --force` in another terminal it could post with the old account's
+  token while a publish plan showed and bound the new account's `open_id`;
+  after a `login --revoke` elsewhere it went on posting as the account the
+  user had logged out of. The credentials are now re-read before every use, as
+  [docs/AUTH.md § 6](docs/AUTH.md) already promised.
 - A stored token expiry without a time zone (`TT_TOKEN_EXPIRES_AT=2026-10-17T10:00:00`,
   say, hand-edited) was accepted and read as local time, shifting the refresh
   by the machine's UTC offset; so was any loose date string `Date.parse`
