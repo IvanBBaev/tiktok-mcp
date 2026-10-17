@@ -20,9 +20,31 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { firstDifference, readRepoText, REPO_ROOT, syncFile } from './lib/repo.js';
+import {
+  asRecord,
+  firstDifference,
+  readRepoJson,
+  readRepoText,
+  REPO_ROOT,
+  syncFile,
+} from './lib/repo.js';
 
 const MANIFEST = 'pack-manifest.json';
+
+/**
+ * The npm lifecycle scripts the audit refuses. The install hooks run on every
+ * machine that installs the package (`npx tiktok-mcp-ai` included); `prepare`
+ * also runs on a git install; `prepack`/`postpack` would make the dry run
+ * below more than a query over the working tree.
+ */
+const LIFECYCLE_SCRIPTS = [
+  'preinstall',
+  'install',
+  'postinstall',
+  'prepare',
+  'prepack',
+  'postpack',
+] as const;
 
 const execFileAsync = promisify(execFile);
 
@@ -56,11 +78,26 @@ export async function packedFiles(): Promise<readonly string[]> {
   return [...files.map((file) => file.path)].sort();
 }
 
+/** The {@link LIFECYCLE_SCRIPTS} that `pkg` (a parsed package.json) defines. */
+export function lifecycleScripts(pkg: Readonly<Record<string, unknown>>): string[] {
+  const scripts = asRecord(pkg['scripts']) ?? {};
+  return LIFECYCLE_SCRIPTS.filter((name) => Object.hasOwn(scripts, name));
+}
+
 export function renderManifest(files: readonly string[]): string {
   return `${JSON.stringify({ files }, null, 2)}\n`;
 }
 
 export async function syncPackManifest(check: boolean): Promise<boolean> {
+  // Reported in both modes: there is nothing for `sync:write` to regenerate.
+  const scripts = lifecycleScripts((await readRepoJson('package.json')) ?? {});
+  if (scripts.length > 0) {
+    process.stderr.write(
+      `pack-manifest: package.json defines lifecycle scripts the package must not ship: ` +
+        `${scripts.join(', ')}.\n`,
+    );
+    return false;
+  }
   const next = renderManifest(await packedFiles());
   const { drifted } = await syncFile(MANIFEST, next, check);
   if (!drifted) return true;

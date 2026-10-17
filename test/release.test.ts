@@ -27,6 +27,7 @@ import {
   resolveTag,
   type ReleaseInputs,
 } from '../scripts/release-guard.js';
+import { lifecycleScripts } from '../scripts/gen-pack-manifest.js';
 import { checkServerJson, liveFacts } from '../scripts/serverjson-sync.js';
 import { readRepoJson, readRepoText } from '../scripts/lib/repo.js';
 
@@ -415,4 +416,23 @@ test('the committed server.json passes its own gate', async () => {
   const pkg = await readRepoJson('package.json');
   assert.ok(server !== undefined && pkg !== undefined);
   assert.deepEqual(checkServerJson(server, pkg, liveFacts()), []);
+});
+
+// ---------------------------------------------------------------------------
+// pack audit
+// ---------------------------------------------------------------------------
+
+test('the pack audit names every lifecycle script a package.json defines', () => {
+  assert.deepEqual(
+    lifecycleScripts({
+      scripts: { build: 'tsc', postinstall: 'node x', prepare: 'husky', prepack: 'y' },
+    }),
+    ['postinstall', 'prepare', 'prepack'],
+  );
+  assert.deepEqual(lifecycleScripts({}), []);
+  assert.deepEqual(lifecycleScripts({ scripts: ['postinstall'] }), []);
+});
+
+test('the committed package.json ships no lifecycle scripts', async () => {
+  assert.deepEqual(lifecycleScripts((await readRepoJson('package.json')) ?? {}), []);
 });
