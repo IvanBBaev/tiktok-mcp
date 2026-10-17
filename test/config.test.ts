@@ -656,6 +656,20 @@ test('cc-h2 an expiry that is not a parseable timestamp is rejected on read', ()
   );
   assert.equal(err.code, 'invalid_timestamp');
   assert.match(err.message, /TT_REFRESH_EXPIRES_AT: expected an ISO-8601 UTC timestamp/);
+
+  // Date.parse accepts both, the first as local time — neither names an instant.
+  for (const value of ['2026-03-02T00:00:00', 'Mar 2 2026']) {
+    const zoneless = throws(() =>
+      readProfile('DEFAULT', snapshotOf({ ...base, TT_TOKEN_EXPIRES_AT: value }), {}),
+    );
+    assert.equal(zoneless.code, 'invalid_timestamp', value);
+  }
+  const offset = readProfile(
+    'DEFAULT',
+    snapshotOf({ ...base, TT_TOKEN_EXPIRES_AT: '2026-01-02T02:00:00+02:00' }),
+    {},
+  );
+  assert.equal(offset.accessExpiresAt, '2026-01-02T02:00:00+02:00');
 });
 
 // ---------------------------------------------------------------------------

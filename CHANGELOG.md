@@ -14,6 +14,13 @@ plumbing stay in the commit history where they belong.
 
 ### Fixed
 
+- A stored token expiry without a time zone (`TT_TOKEN_EXPIRES_AT=2026-10-17T10:00:00`,
+  say, hand-edited) was accepted and read as local time, shifting the refresh
+  by the machine's UTC offset; so was any loose date string `Date.parse`
+  happens to understand. Expiries must now be a full ISO-8601 date-time with
+  `Z` or an explicit offset, or the profile fails with `invalid_timestamp` as
+  any unparsable value already did. Values written by `login` and refresh
+  always were.
 - An env-file write could be lost after a restart: temp-file names carry the
   PID and a per-process counter, and a server that always runs as PID 1 (a
   container) found the temp file a killed run had left at exactly the name its
