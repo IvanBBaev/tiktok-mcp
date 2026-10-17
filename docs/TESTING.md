@@ -679,6 +679,10 @@ common case of touching one thing.
   *not* check is written into the gate's own failure text: JSON-schema
   validity, whether the variable list is *complete*, the wording of the
   description, and whether a non-credential variable ought to be secret.
+  The same "N tools" claim is held to `allTools().length` wherever else it is
+  hand-written: the README badge, `.claude-plugin/plugin.json`,
+  `.claude-plugin/marketplace.json`, `extension/package.json` and the site's
+  meta descriptions and lead.
 - **Pack audit**: `npm pack --dry-run --json` file list equals the
   committed `pack-manifest.json` fixture; no install scripts in
   `package.json`. Paths only — never sizes or integrity hashes, which change
