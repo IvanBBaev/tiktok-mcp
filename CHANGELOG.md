@@ -45,6 +45,15 @@ plumbing stay in the commit history where they belong.
   It now says the token request's outcome is unknown and that the refresh token
   may have been rotated: try again, and run `login` if TikTok then answers
   `invalid_grant`.
+- A per-profile key written twice in the env file in different cases
+  (`TT_PROFILE_WORK_ACCESS_TOKEN=old`, later `TT_PROFILE_work_ACCESS_TOKEN=new`)
+  was read from the upper-case line wherever it stood, or from the first of two
+  other spellings, with no duplicate warning — while the next write treated the
+  last line as the live one. Case variants are now duplicates of one key: the
+  last occurrence wins and the duplicate warning names it. Separately, the
+  `tools/list` scope picture, `login` and `doctor` let the file's upper-case
+  key win over the same key exported in another case; the process environment
+  now wins there too, as it already did at call time.
 
 ## [0.8.0] - 2026-10-01
 

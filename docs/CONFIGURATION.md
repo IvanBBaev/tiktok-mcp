@@ -96,7 +96,10 @@ roaming profiles replicate to other machines, and tokens must not roam.
 
 Missing file — fine (process env may suffice). Unreadable file — explicit
 error. Malformed line — error naming the line number. Duplicate key — **last
-wins**, with a logged warning. CRLF endings tolerated and preserved.
+wins**, with a logged warning; case variants of one per-profile key
+(`TT_PROFILE_WORK_ACCESS_TOKEN`, `TT_PROFILE_work_ACCESS_TOKEN`) are
+duplicates of each other, reported under the canonical upper-case spelling
+(CC-F4). CRLF endings tolerated and preserved.
 
 ### Numeric validation (CC-F6)
 
@@ -136,9 +139,12 @@ accept `0`.
   Profile names match `[A-Z0-9_]+` and are upper-cased on read; a profile
   literally named `DEFAULT` collides with the implicit default sextet and is
   rejected (CC-F4). A key written in another case (`TT_PROFILE_work_ACCESS_TOKEN`)
-  declares profile `WORK` and its values are read for it; when both spellings
-  are present the exact upper-case one wins, and the process environment still
-  wins over the file. Writes match the same way and always leave the key in
+  declares profile `WORK` and its values are read for it. In the file the
+  spellings are duplicates of one key — the last occurrence wins, with the
+  duplicate warning (§ Parsing); in the process environment, which has no
+  order, the exact upper-case spelling wins. The process environment still
+  wins over the file in any case: an exported `TT_PROFILE_work_ACCESS_TOKEN`
+  shadows the file's `TT_PROFILE_WORK_ACCESS_TOKEN`. Writes match the same way and always leave the key in
   its upper-case spelling, with no case variant of it left behind (§ Writes).
 - `TT_ACTIVE_PROFILE` selects the profile used when a tool call has no
   `account` argument. Startup only checks the name's shape (`[A-Z0-9_]+`);
