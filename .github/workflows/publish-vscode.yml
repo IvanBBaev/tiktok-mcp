@@ -10,7 +10,8 @@ name: Publish VS Code Extension
 # start. workflow_dispatch stays for the first publish or a re-run; a dispatch
 # has no Publish run behind it, so it must name a `v*` tag and runs
 # `npm run release:guard` itself, and confirms npm already has the version,
-# before anything reaches the Marketplace.
+# before anything reaches the Marketplace. A version the Marketplace already
+# has is skipped, so any re-run is safe.
 # Authentication uses the VSCE_PAT repo secret (Azure DevOps PAT, scope
 # Marketplace > Manage); the token never touches a laptop or the logs.
 on:
@@ -102,8 +103,12 @@ jobs:
       # The Marketplace rejects a semver prerelease version, and release-guard
       # lets a `vX.Y.Z-rc.N` tag through to npm's `next` dist-tag; such a tag
       # ships to npm only, instead of failing here after npm already has it.
+      # Marketplace versions are immutable; --skip-duplicate lets the
+      # Marketplace itself confirm this exact version is already there and
+      # succeed without uploading, so a re-run or the G-14 bootstrap dispatch
+      # cannot fail on a release that already shipped.
       - name: Publish to the Marketplace
         if: ${{ !contains(steps.ver.outputs.version, '-') }}
-        run: npx vsce publish --no-dependencies -p "$VSCE_PAT"
+        run: npx vsce publish --no-dependencies --skip-duplicate -p "$VSCE_PAT"
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

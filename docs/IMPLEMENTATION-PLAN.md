@@ -292,7 +292,10 @@ published version is known good, finish the release by hand from the tag —
 `gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file notes.md`,
 `gh workflow run publish-mcp.yml --ref vX.Y.Z` and
 `gh workflow run publish-vscode.yml --ref vX.Y.Z` (the last needs the
-`VSCE_PAT` repository secret).
+`VSCE_PAT` repository secret). Both followers skip a version their target
+already holds — the MCP Registry only when its version lookup answers 200,
+the Marketplace through `vsce publish --skip-duplicate` — so re-dispatching
+one that already succeeded is harmless.
 
 ## Risk register
 

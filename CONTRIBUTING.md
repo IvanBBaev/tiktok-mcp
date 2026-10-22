@@ -198,7 +198,10 @@ runs the follower publishes.
    tag (`vX.Y.Z-rc.N`) goes to npm under the `next` dist-tag only — the VS Code
    Marketplace rejects semver prereleases, so `publish-vscode.yml` skips its
    publish step for such a version.
-5. Verify the published package and the GitHub release notes.
+5. Verify the published package and the GitHub release notes. A follower
+   that failed (MCP Registry or Marketplace) can be re-run, or dispatched
+   with `gh workflow run <file> --ref vX.Y.Z`; each skips a version its
+   target already holds, so a re-run never fails on a duplicate.
 
 Versioning follows [SemVer](https://semver.org):
 
