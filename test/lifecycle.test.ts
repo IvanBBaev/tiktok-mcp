@@ -236,6 +236,31 @@ test('cc-f2: a scope exported in the environment wins over the env file', async 
   }
 });
 
+test('cc-f4: an environment scope in another case still wins over the env file', async () => {
+  const box = await fsSandbox();
+  try {
+    const envFile = path.join(box.dir, '.env');
+    await writeFile(
+      envFile,
+      `${envFileText('video.list')}TT_PROFILE_WORK_SCOPES=video.list\n`,
+      'utf8',
+    );
+    const profiles = await readCredentialProfiles({
+      envFilePath: envFile,
+      env: { TT_PROFILE_work_SCOPES: 'video.publish' },
+    });
+    assert.deepEqual(
+      profiles.map((entry) => [entry.name, [...entry.scopes]]),
+      [
+        ['DEFAULT', ['video.list']],
+        ['WORK', ['video.publish']],
+      ],
+    );
+  } finally {
+    await box.cleanup();
+  }
+});
+
 test('readCredentialProfiles falls back to process.env when none is injected', async () => {
   const box = await fsSandbox();
   try {

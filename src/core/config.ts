@@ -378,9 +378,13 @@ function parseSnapshot(path: string, text: string, mode: number): ExistingEnvFil
     }
 
     const [, prefix, key, rawValue] = match;
+    // CC-F4: a per-profile key is read and written in any case, so its case
+    // variants are one key — a duplicate of each other, filed under the
+    // canonical spelling, the last occurrence winning like any other (CC-F1).
+    const name = PROFILE_KEY.test(key) ? key.toUpperCase() : key;
 
-    if (values.has(key)) duplicates.add(key);
-    values.set(key, unquote(rawValue)); // CC-F1: last wins.
+    if (values.has(name)) duplicates.add(name);
+    values.set(name, unquote(rawValue)); // CC-F1: last wins.
     if (!isKnownKey(key) && key.startsWith('TT_')) unknown.push(key);
 
     lines.push(
@@ -477,6 +481,36 @@ export async function readEnvFile(path: string): Promise<EnvFileSnapshot> {
   }
 
   return parseSnapshot(path, text, mode);
+}
+
+/**
+ * The environment as a reader should see it: the env file first, the process
+ * environment on top.
+ *
+ * Precedence is presence-based (CC-F2): a key that *exists* in the process
+ * environment wins even when its value is empty, because "exported empty" is a
+ * deliberate statement — which is exactly what `Object.assign` does with an own
+ * key whose value is `undefined`. A per-profile key is read in any case
+ * (CC-F4), so an environment `TT_PROFILE_work_ACCESS_TOKEN` shadows the file's
+ * `TT_PROFILE_WORK_ACCESS_TOKEN` as well: copied side by side, the exact
+ * spelling would let the file win over the environment.
+ *
+ * Returns a copy; `process.env` is never mutated.
+ */
+export function overlayEnvFile(
+  env: NodeJS.ProcessEnv,
+  snapshot: EnvFileSnapshot,
+): NodeJS.ProcessEnv {
+  const shadowed = new Set(
+    Object.keys(env)
+      .filter((key) => PROFILE_KEY.test(key))
+      .map((key) => key.toUpperCase()),
+  );
+  const merged: NodeJS.ProcessEnv = {};
+  for (const [key, value] of snapshot.values) {
+    if (!shadowed.has(key.toUpperCase())) merged[key] = value;
+  }
+  return Object.assign(merged, env);
 }
 
 // ---------------------------------------------------------------------------

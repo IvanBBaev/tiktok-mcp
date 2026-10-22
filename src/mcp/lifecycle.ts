@@ -63,7 +63,12 @@
  */
 
 import type { Clock } from '../core/clock.js';
-import { listProfiles, readEnvFile, readProfile } from '../core/config.js';
+import {
+  listProfiles,
+  overlayEnvFile,
+  readEnvFile,
+  readProfile,
+} from '../core/config.js';
 import { isTikTokError } from '../core/errors.js';
 import { canonicalJson } from '../core/json.js';
 import { silentLogger, type Logger } from '../core/log.js';
@@ -181,23 +186,6 @@ export interface CredentialSource {
 }
 
 /**
- * Presence-based overlay (CC-F2): the file supplies the baseline, the process
- * environment wins for every key it *has*, empty value included.
- *
- * A copy of `cli/index.ts`'s `overlayEnvFile` rather than an import of it —
- * `mcp` may not depend on `cli` (ARCHITECTURE.md layering, enforced by
- * ESLint), and eight lines of duplication are cheaper than inverting that.
- */
-function overlayEnv(
-  env: NodeJS.ProcessEnv,
-  values: ReadonlyMap<string, string>,
-): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = {};
-  for (const [key, value] of values) merged[key] = value;
-  return Object.assign(merged, env);
-}
-
-/**
  * The profile picture `tools/list` is built from: every configured profile with
  * the scopes it currently holds.
  *
@@ -212,7 +200,7 @@ export async function readCredentialProfiles(
   source: CredentialSource,
 ): Promise<readonly ProfileInfo[]> {
   const snapshot = await readEnvFile(source.envFilePath);
-  const env = overlayEnv(source.env ?? process.env, snapshot.values);
+  const env = overlayEnvFile(source.env ?? process.env, snapshot);
   return listProfiles(snapshot, env).map((name) => {
     try {
       const stored = readProfile(name, snapshot, env);

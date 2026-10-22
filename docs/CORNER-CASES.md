@@ -267,7 +267,8 @@ there.
 
 - **CC-F1 — env-file parse edge cases.** Missing file (fine — process env may
   suffice), unreadable file (explicit error), malformed line (error naming the
-  line number), duplicate key (**last wins**, warning logged), CRLF endings
+  line number), duplicate key (**last wins**, warning logged; case variants of
+  a per-profile key count as one key, CC-F4), CRLF endings
   (tolerated, preserved on rewrite).
 - **CC-F2 — empty string vs unset.** `TT_X=""` counts as **set** (overrides the
   env file with "empty") — resolution is presence-based; validation then

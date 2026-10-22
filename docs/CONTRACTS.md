@@ -327,6 +327,9 @@ export function resolveEnvFilePath(
 ): string;
 
 /** Comment/CRLF-preserving parse (CC-F1); duplicate key: last wins + warn.
+ *  A per-profile key is filed in `values` under its canonical upper-case
+ *  spelling, so its case variants are duplicates of one key (CC-F4); `lines`
+ *  keep the spelling as written.
  *  Error codes: "env_file_malformed", "env_file_unreadable" (cause = the errno
  *  error), "config_schema_too_new". */
 export function readEnvFile(path: string): Promise<EnvFileSnapshot>;
@@ -349,8 +352,8 @@ export function listProfiles(
 
 /** Read profile after presence-based process-env overlay (CC-F2). A per-profile
  *  key is found in any case, as listProfiles declares it (TT_PROFILE_work_* is
- *  profile WORK): in each source the exact spelling wins, and process env still
- *  wins over the file. Error codes: "unknown_profile" (listing the ones that
+ *  profile WORK): in the env the exact spelling wins (a parsed file has one
+ *  spelling per key), and process env still wins over the file. Error codes: "unknown_profile" (listing the ones that
  *  exist), "missing_credentials", "invalid_timestamp" (CC-H2). */
 export function readProfile(
   name: string, snapshot: EnvFileSnapshot, env?: NodeJS.ProcessEnv,
@@ -2775,7 +2778,9 @@ export interface CliIo {
 }
 export function cliIo(deps: CliDeps): CliIo;
 
-/** env file first, process environment on top (presence-based, CC-F2). */
+/** env file first, process environment on top (presence-based, CC-F2); an env
+ *  per-profile key in any case shadows the file's (CC-F4). Defined in
+ *  core/config.ts and re-exported here — mcp/lifecycle.ts shares it. */
 export function overlayEnvFile(
   env: NodeJS.ProcessEnv, snapshot: EnvFileSnapshot,
 ): NodeJS.ProcessEnv;

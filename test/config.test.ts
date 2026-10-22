@@ -23,6 +23,7 @@ import {
   listProfiles,
   canonicalProfileName,
   normalizeProfileName,
+  overlayEnvFile,
   persistProfilePatch,
   readEnvFile,
   readProfile,
@@ -374,6 +375,48 @@ test('cc-f1 a duplicate key resolves last-wins and is reported as a warning', as
   });
 });
 
+test('cc-f1 case variants of a per-profile key are duplicates, last occurrence wins', async () => {
+  await withSandbox(async (dir) => {
+    const file = path.join(dir, '.env');
+    await writeFile(
+      file,
+      [
+        'TT_CLIENT_KEY=k',
+        'TT_CLIENT_SECRET=s',
+        // A canonical line first and a hand-appended variant after it: the
+        // later line is the live one, exactly as the writer treats it.
+        'TT_PROFILE_WORK_ACCESS_TOKEN=old',
+        'TT_PROFILE_work_ACCESS_TOKEN=new',
+        // Two non-canonical spellings: still the later one, not the first.
+        'TT_PROFILE_alt_OPEN_ID=first',
+        'TT_PROFILE_Alt_Open_Id=second',
+        '',
+      ].join('\n'),
+    );
+    const snapshot = await readEnvFile(file);
+    assert.deepEqual(
+      [...snapshot.values.keys()],
+      [
+        'TT_CLIENT_KEY',
+        'TT_CLIENT_SECRET',
+        'TT_PROFILE_WORK_ACCESS_TOKEN',
+        'TT_PROFILE_ALT_OPEN_ID',
+      ],
+      'a per-profile key is filed under its canonical spelling',
+    );
+    assert.equal(readProfile('WORK', snapshot, {}).accessToken, 'new');
+    assert.equal(readProfile('ALT', snapshot, {}).openId, 'second');
+    assert.deepEqual(snapshot.warnings, [
+      `${file}: duplicate keys, last occurrence wins: TT_PROFILE_ALT_OPEN_ID, TT_PROFILE_WORK_ACCESS_TOKEN`,
+    ]);
+    // The document keeps every line as written: the writer drops the variants.
+    assert.equal(
+      snapshot.lines.find((line) => line.text.startsWith('TT_PROFILE_work_'))?.key,
+      'TT_PROFILE_work_ACCESS_TOKEN',
+    );
+  });
+});
+
 test('cc-f1 an unknown TT_ key warns once and is never dropped', async () => {
   await withSandbox(async (dir) => {
     const file = path.join(dir, '.env');
@@ -598,6 +641,26 @@ test('cc-f4 the exact spelling wins over a differently cased duplicate', () => {
     TT_PROFILE_WORK_ACCESS_TOKEN: 'env-exact',
   };
   assert.equal(readProfile('WORK', snapshot, env).accessToken, 'env-exact');
+});
+
+test('cc-f4 the overlay lets an env case variant of a profile key shadow the file', () => {
+  const snapshot = snapshotOf({
+    TT_CLIENT_KEY: 'k',
+    TT_CLIENT_SECRET: 's',
+    TT_PROFILE_WORK_ACCESS_TOKEN: 'file-access',
+    TT_PROFILE_WORK_OPEN_ID: 'file-open-id',
+  });
+  const env = { TT_PROFILE_work_ACCESS_TOKEN: 'env-access', TT_REDIRECT_PORT: '9000' };
+  const merged = overlayEnvFile(env, snapshot);
+  assert.equal(
+    merged['TT_PROFILE_WORK_ACCESS_TOKEN'],
+    undefined,
+    'the file copy of a key the environment spells differently is not carried over',
+  );
+  const work = readProfile('WORK', snapshot, merged);
+  assert.equal(work.accessToken, 'env-access', 'the overlay agrees with the direct read');
+  assert.equal(work.accessToken, readProfile('WORK', snapshot, env).accessToken);
+  assert.equal(work.openId, 'file-open-id', 'an unshadowed file key still reads');
 });
 
 test('the shared app keys are matched exactly, never case-insensitively', () => {

@@ -25,7 +25,6 @@
 import { readFile } from 'node:fs/promises';
 
 import type { Clock } from '../core/clock.js';
-import type { EnvFileSnapshot } from '../core/config.js';
 import type { Logger } from '../core/log.js';
 import { redactText } from '../core/redact.js';
 
@@ -171,26 +170,12 @@ export function cliIo(deps: CliDeps): CliIo {
 // ---------------------------------------------------------------------------
 
 /**
- * The environment as the settings loader should see it: the env file first,
- * the process environment on top.
- *
  * `loadSettings` reads a flat `NodeJS.ProcessEnv`, but half of the settings it
  * knows about (`TT_REDIRECT_PORT`, `TT_LOGIN_SCOPES`, `TT_TOOL_PACKAGES`, …)
- * normally live in the env file. Precedence is presence-based (CC-F2): a key
- * that *exists* in the process environment wins even when its value is empty,
- * because "exported empty" is a deliberate statement — which is exactly what
- * `Object.assign` does with an own key whose value is `undefined`.
- *
- * Returns a copy; `process.env` is never mutated.
+ * normally live in the env file. The overlay itself lives in `core/config.ts`,
+ * where the `mcp` layer can share it too.
  */
-export function overlayEnvFile(
-  env: NodeJS.ProcessEnv,
-  snapshot: EnvFileSnapshot,
-): NodeJS.ProcessEnv {
-  const merged: NodeJS.ProcessEnv = {};
-  for (const [key, value] of snapshot.values) merged[key] = value;
-  return Object.assign(merged, env);
-}
+export { overlayEnvFile } from '../core/config.js';
 
 // ---------------------------------------------------------------------------
 // dispatch
