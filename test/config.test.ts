@@ -663,6 +663,34 @@ test('cc-f4 the overlay lets an env case variant of a profile key shadow the fil
   assert.equal(work.openId, 'file-open-id', 'an unshadowed file key still reads');
 });
 
+test('the overlay folds every TT_ environment key on win32, as the OS reads it', () => {
+  const snapshot = snapshotOf({
+    TT_CLIENT_KEY: 'file-key',
+    TT_CLIENT_SECRET: 'file-secret',
+    TT_REDIRECT_PORT: '8000',
+  });
+  const env = { tt_client_key: 'env-key', Tt_Redirect_Port: '9000', Path: 'C:\\bin' };
+  const merged = overlayEnvFile(env, snapshot, 'win32');
+  assert.equal(merged['TT_CLIENT_KEY'], 'env-key', 'the environment wins in any case');
+  assert.equal(
+    merged['tt_client_key'],
+    undefined,
+    'only the upper-case spelling is kept',
+  );
+  assert.equal(merged['TT_REDIRECT_PORT'], '9000');
+  assert.equal(
+    merged['TT_CLIENT_SECRET'],
+    'file-secret',
+    'an unshadowed file key still reads',
+  );
+  assert.equal(merged['Path'], 'C:\\bin', 'a non-TT_ key keeps its spelling');
+  assert.equal(readProfile('DEFAULT', snapshot, merged).clientKey, 'env-key');
+
+  const posix = overlayEnvFile(env, snapshot, 'linux');
+  assert.equal(posix['TT_CLIENT_KEY'], 'file-key', 'POSIX keys stay case-sensitive');
+  assert.equal(posix['tt_client_key'], 'env-key');
+});
+
 test('the shared app keys are matched exactly, never case-insensitively', () => {
   const err = throws(() =>
     readProfile('DEFAULT', snapshotOf({ tt_client_key: 'k', TT_CLIENT_SECRET: 's' }), {

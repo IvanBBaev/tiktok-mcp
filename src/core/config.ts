@@ -119,6 +119,9 @@ const PROFILE_KEY = new RegExp(
   'i',
 );
 
+/** Any key this server reads from the environment; win32 matches it in any case. */
+const TT_KEY = /^TT_/i;
+
 /**
  * A successful `PROFILE_KEY.exec`. Group 1 is `[A-Za-z0-9_]+` — mandatory, not
  * optional and not inside an alternation — so a match always carries the profile
@@ -489,28 +492,42 @@ export async function readEnvFile(path: string): Promise<EnvFileSnapshot> {
  *
  * Precedence is presence-based (CC-F2): a key that *exists* in the process
  * environment wins even when its value is empty, because "exported empty" is a
- * deliberate statement — which is exactly what `Object.assign` does with an own
- * key whose value is `undefined`. A per-profile key is read in any case
+ * deliberate statement — so every own environment key is copied, even one
+ * whose value is `undefined`. A per-profile key is read in any case
  * (CC-F4), so an environment `TT_PROFILE_work_ACCESS_TOKEN` shadows the file's
  * `TT_PROFILE_WORK_ACCESS_TOKEN` as well: copied side by side, the exact
  * spelling would let the file win over the environment.
  *
+ * On win32 the environment itself is case-insensitive — `process.env.TT_CLIENT_KEY`
+ * reads a variable set as `tt_client_key` — but the plain object returned here
+ * is not, so every `TT_`-prefixed environment key is copied under its upper-case
+ * spelling and shadows the file in any case, as the OS would.
+ *
  * Returns a copy; `process.env` is never mutated.
+ *
+ * @param platform Injected so the win32 branch is testable on every OS leg.
  */
 export function overlayEnvFile(
   env: NodeJS.ProcessEnv,
   snapshot: EnvFileSnapshot,
+  platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv {
+  const foldAll = platform === 'win32';
+  const folded = (key: string): boolean =>
+    foldAll ? TT_KEY.test(key) : PROFILE_KEY.test(key);
   const shadowed = new Set(
     Object.keys(env)
-      .filter((key) => PROFILE_KEY.test(key))
+      .filter(folded)
       .map((key) => key.toUpperCase()),
   );
   const merged: NodeJS.ProcessEnv = {};
   for (const [key, value] of snapshot.values) {
     if (!shadowed.has(key.toUpperCase())) merged[key] = value;
   }
-  return Object.assign(merged, env);
+  for (const [key, value] of Object.entries(env)) {
+    merged[foldAll && folded(key) ? key.toUpperCase() : key] = value;
+  }
+  return merged;
 }
 
 // ---------------------------------------------------------------------------

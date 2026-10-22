@@ -144,7 +144,10 @@ accept `0`.
   duplicate warning (§ Parsing); in the process environment, which has no
   order, the exact upper-case spelling wins. The process environment still
   wins over the file in any case: an exported `TT_PROFILE_work_ACCESS_TOKEN`
-  shadows the file's `TT_PROFILE_WORK_ACCESS_TOKEN`. Writes match the same way and always leave the key in
+  shadows the file's `TT_PROFILE_WORK_ACCESS_TOKEN`. On Windows, where the
+  environment itself is case-insensitive, that holds for every `TT_` variable:
+  an exported `tt_client_key` is `TT_CLIENT_KEY` and wins over the file's.
+  Writes match the same way and always leave the key in
   its upper-case spelling, with no case variant of it left behind (§ Writes).
 - `TT_ACTIVE_PROFILE` selects the profile used when a tool call has no
   `account` argument. Startup only checks the name's shape (`[A-Z0-9_]+`);

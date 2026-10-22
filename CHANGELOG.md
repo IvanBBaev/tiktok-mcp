@@ -14,6 +14,10 @@ plumbing stay in the commit history where they belong.
 
 ### Fixed
 
+- On Windows, a `TT_` variable exported in another case (`set tt_client_key=…`)
+  lost to the env file's value as soon as an env file existed, although
+  Windows itself reads it as `TT_CLIENT_KEY`. The process environment now wins
+  over the file in any case there, as it does for per-profile keys everywhere.
 - A `login` that landed while the server was starting up — after a client's
   first `tools/list` but before the credential watch's first poll — was taken
   as the starting state and never announced, so the client kept the stale
