@@ -651,7 +651,8 @@ test('cc-f4 the overlay lets an env case variant of a profile key shadow the fil
     TT_PROFILE_WORK_OPEN_ID: 'file-open-id',
   });
   const env = { TT_PROFILE_work_ACCESS_TOKEN: 'env-access', TT_REDIRECT_PORT: '9000' };
-  const merged = overlayEnvFile(env, snapshot);
+  // Pinned off win32, where the overlay folds the key itself (next test).
+  const merged = overlayEnvFile(env, snapshot, 'linux');
   assert.equal(
     merged['TT_PROFILE_WORK_ACCESS_TOKEN'],
     undefined,
