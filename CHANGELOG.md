@@ -12,6 +12,15 @@ plumbing stay in the commit history where they belong.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-23
+
+The first version published to npm, and the first stable one: from here on
+every change to the published surface follows the
+[compatibility and deprecation policy](docs/SECURITY.md#compatibility-and-deprecation-policy),
+so a breaking change needs a major version. It also ships everything in the
+0.8.0 and 0.7.0 entries below, internal milestones that never reached the
+registry.
+
 ### Fixed
 
 - On Windows, a `TT_` variable exported in another case (`set tt_client_key=…`)
@@ -61,9 +70,9 @@ plumbing stay in the commit history where they belong.
 
 ## [0.8.0] - 2026-10-01
 
-The first version published to npm. It also ships everything in the 0.7.0
-entry of [CHANGELOG.md](CHANGELOG.md), an internal milestone that never reached
-the registry. It is pre-1.0, so a minor bump may still break a contract — see
+Internal milestone, never published to npm and never tagged: it landed on `main`
+in commit `b99b4c0`, and 1.0.0 is the first version on the registry. It
+includes everything in the 0.7.0 entry. It was pre-1.0, so a minor bump may still break a contract — see
 [docs/SECURITY.md § Compatibility and deprecation policy](docs/SECURITY.md#compatibility-and-deprecation-policy).
 
 ### Added
@@ -819,7 +828,7 @@ the registry. It is pre-1.0, so a minor bump may still break a contract — see
 ## [0.7.0] - 2026-08-26
 
 Internal milestone, never published to npm and never tagged: it landed on `main`
-in commit `2794dbd`, and 0.8.0 is the first version on the registry. The entries
+in commit `2794dbd`, and 1.0.0 is the first version on the registry. The entries
 below record what that milestone delivered. The version reflects how much of the
 planned surface was built and exercised, not a promise of stability: it is
 pre-1.0, so a minor bump may still break a contract — see
@@ -887,6 +896,7 @@ pre-1.0, so a minor bump may still break a contract — see
   `docs/tool-manifest.json`, a packed-tarball audit, per-area coverage floors,
   and a CI matrix over Node 22/24/26 on Linux, macOS and Windows.
 
-[Unreleased]: https://github.com/IvanBBaev/tiktok-mcp/compare/v0.8.0...HEAD
-[0.8.0]: https://github.com/IvanBBaev/tiktok-mcp/compare/2794dbd...v0.8.0
+[Unreleased]: https://github.com/IvanBBaev/tiktok-mcp/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/IvanBBaev/tiktok-mcp/compare/b99b4c0...v1.0.0
+[0.8.0]: https://github.com/IvanBBaev/tiktok-mcp/compare/2794dbd...b99b4c0
 [0.7.0]: https://github.com/IvanBBaev/tiktok-mcp/commit/2794dbd
