@@ -717,8 +717,11 @@ contracts are designed so a compliant UX is the natural path:
   access only, separate application process. Planned as an optional package —
   see ROADMAP Phase 3. Not scaffolded in v1 (no dark code).
 - **Commercial Content API**, **Business/Marketing API** (ads), **Webhooks**
-  (`portability.*` events), **Comments** (no public comment-management API for
-  normal apps): out of scope; revisit on demand.
+  (`post.publish.*`, `authorization.removed`, `portability.*` events): out of
+  v1 scope; ROADMAP Phase 5 schedules them.
+- **Comments:** the Display API / Login Kit surface this server uses has no
+  comment endpoints. Comment management on owned videos exists only in the
+  Business API (Business accounts, separate app and OAuth) — ROADMAP Phase 5, 2.0.
 
 ## Appendix A — sandbox probe index
 

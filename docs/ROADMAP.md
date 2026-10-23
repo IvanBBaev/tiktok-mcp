@@ -88,8 +88,35 @@ windows × 24, advisory 26) — this phase is release engineering only.
   succeeds; a prerelease tag ships to npm only, since the Marketplace rejects
   semver prereleases. What is still demand-driven is anything beyond that listing.)
 
+## Phase 5 — v1.x / v2 feature track (codeable only)
+Everything here is buildable without TikTok changing its API. Additive work ships
+as 1.x minors under the compatibility policy; 2.0 is reserved for the change that
+reshapes the profile model (a second auth provider).
+- **1.1 — read-side value, hardening:** computed analytics over the video list
+  (engagement rates, top posts, period aggregates, local snapshots for trends —
+  the Display API keeps no history); media pre-flight checks before upload;
+  DNS resolve-and-pin for `PULL_FROM_URL` (P-15); a per-host outbound semaphore.
+- **1.2 — push instead of poll:** a webhook receiver (`TikTok-Signature`
+  HMAC-SHA256 verification, timestamp tolerance, dedupe for at-least-once
+  delivery) for `post.publish.*` and `authorization.removed`; revocation marks
+  the profile and drops its tokens; publish status as subscribable resources.
+  Needs a public HTTPS URL the operator provides — no hosted relay (non-goal
+  below); polling stays the fallback.
+- **1.3 — workflow:** local scheduled publishing (queue + runner on top of
+  plan/apply and the journal — the API has no scheduling), batch / multi-profile
+  publish under one consent, elicitation-based consent with the plan token as
+  fallback.
+- **1.4 (optional, needs approval):** Commercial Content API package (ad
+  library, EU data, client-credentials token).
+- **2.0 (needs approval):** Business Accounts API — comments on owned videos
+  (list/reply/hide), account and video insights, mentions, `comment.update`
+  webhook — behind a second OAuth provider per profile. Spike first: can an
+  individual developer get access at all.
+- Not planned: Research API (academic only), Data Portability API (EEA/UK,
+  low value here), mobile kits (Share Kit, Green Screen Kit).
+
 ## Explicit non-goals
-- No ads/Business API, no comment management (no public API), no scraping or
+- No ads management, no scraping or
   unofficial endpoints, no multi-tenant hosted deployment, no token brokering
   for third parties, no engagement automation (likes/follows) — both unsupported
   by the API and against platform rules.
