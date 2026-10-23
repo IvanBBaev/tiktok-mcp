@@ -208,7 +208,7 @@ binds a redirect shape that is not registered (CC-A8).
 
 | Variable | Default | Description |
 |---|---|---|
-| `TT_TOOL_PACKAGES` | `core` | Comma list of packages (`auth`, `user`, `video`, `publish`, `publish-write`) or a named profile: `core` = all reads (`auth`+`user`+`video`+`publish`), `all` = everything |
+| `TT_TOOL_PACKAGES` | `core` | Comma list of packages (`auth`, `user`, `video`, `publish`, `publish-write`, `analytics`) or a named profile: `core` = all reads (`auth`+`user`+`video`+`publish`+`analytics`), `all` = everything |
 | `TT_PACKAGES_DENY` | — | Packages forced off regardless of the above (deny wins) |
 | `TT_PACKAGES_READONLY` | `0` | `1` = register only tools with `readOnlyHint` (unregisters `publish-write`) |
 | `TT_WRITE_MODE` | `plan` | `plan` \| `apply` \| `deny` — see below |

@@ -69,13 +69,14 @@ export type WriteMode = (typeof WRITE_MODES)[number];
 export const TRANSPORTS = ['stdio', 'http'] as const;
 export type Transport = (typeof TRANSPORTS)[number];
 
-/** The five tool packages (TOOLS.md § 1 — 11 tools / 5 packages). */
+/** The six tool packages (TOOLS.md § 1 — 12 tools / 6 packages). */
 export const TOOL_PACKAGES = [
   'auth',
   'user',
   'video',
   'publish',
   'publish-write',
+  'analytics',
 ] as const;
 export type ToolPackage = (typeof TOOL_PACKAGES)[number];
 
@@ -90,7 +91,7 @@ export type PackageSelector = (typeof PACKAGE_SELECTORS)[number];
 /** `core` = everything except the writes; `all` = every package. */
 const PACKAGE_PROFILES: Readonly<Record<'core' | 'all', readonly ToolPackage[]>> =
   Object.freeze({
-    core: Object.freeze(['auth', 'user', 'video', 'publish'] as const),
+    core: Object.freeze(['auth', 'user', 'video', 'publish', 'analytics'] as const),
     all: TOOL_PACKAGES,
   });
 

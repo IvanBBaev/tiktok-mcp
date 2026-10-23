@@ -119,8 +119,8 @@ export const SECTIONS: readonly Section[] = [
       {
         name: 'TT_TOOL_PACKAGES',
         comment: [
-          'Packages/profile to register: auth,user,video,publish,publish-write — or a',
-          'profile: core (all reads, default) | all (reads + write tools).',
+          'Packages/profile to register: auth,user,video,publish,publish-write,analytics',
+          '— or a profile: core (all reads, default) | all (reads + write tools).',
         ],
         render: 'default',
       },

@@ -924,6 +924,7 @@ test("the truncator's own notes stay inside MAX_HINT_CHARS", () => {
  * closed, not how they get an allow-list entry.
  */
 const ERROR_MESSAGE_HOLES: ReadonlyMap<string, string> = new Map([
+  ['detail', 'a server literal naming the bad argument and its expected form'],
   ['field', "a request field name this server's own input schema declares"],
   ['alternative', 'one of two server literals, chosen by a boolean argument'],
   ['String(chunk)', 'a chunk counter this server kept'],

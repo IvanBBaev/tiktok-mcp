@@ -12,6 +12,16 @@ plumbing stay in the commit history where they belong.
 
 ## [Unreleased]
 
+### Added
+
+- `tiktok_get_video_analytics` in the new `analytics` package (part of the
+  default `core` profile; scope `video.list`): totals, engagement rate, average
+  and median views, top videos by a chosen metric, per-day/week/month
+  aggregates and posting-time breakdowns by weekday and hour, computed locally
+  from the public video list. Optional `since`/`until` window and IANA
+  `timezone`; the walk honours `TT_FETCH_ALL_CAP` and reports when the cap or a
+  stuck cursor cut the sample.
+
 ## [1.0.0] - 2026-10-23
 
 The first version published to npm, and the first stable one: from here on

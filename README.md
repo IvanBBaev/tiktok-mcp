@@ -1,6 +1,6 @@
 # tiktok-mcp-ai — Unofficial TikTok MCP Server
 
-| [![npm version](https://img.shields.io/npm/v/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![npm downloads](https://img.shields.io/npm/dm/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![node](https://img.shields.io/node/v/tiktok-mcp-ai?style=flat-square&logo=node.js&logoColor=white&label=node)](https://nodejs.org) | [![tools](https://img.shields.io/badge/tools-11-blue?style=flat-square)](https://ivanbbaev.github.io/tiktok-mcp/#tools) | [![License: MIT](https://img.shields.io/npm/l/tiktok-mcp-ai?style=flat-square&color=blue&label=license)](LICENSE) |
+| [![npm version](https://img.shields.io/npm/v/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![npm downloads](https://img.shields.io/npm/dm/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![node](https://img.shields.io/node/v/tiktok-mcp-ai?style=flat-square&logo=node.js&logoColor=white&label=node)](https://nodejs.org) | [![tools](https://img.shields.io/badge/tools-12-blue?style=flat-square)](https://ivanbbaev.github.io/tiktok-mcp/#tools) | [![License: MIT](https://img.shields.io/npm/l/tiktok-mcp-ai?style=flat-square&color=blue&label=license)](LICENSE) |
 | :--: | :--: | :--: | :--: | :--: |
 | [![CI](https://img.shields.io/github/actions/workflow/status/IvanBBaev/tiktok-mcp/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/IvanBBaev/tiktok-mcp/actions/workflows/ci.yml) | [![coverage](https://img.shields.io/codecov/c/github/IvanBBaev/tiktok-mcp/main?style=flat-square&logo=codecov&logoColor=white&label=coverage)](https://codecov.io/gh/IvanBBaev/tiktok-mcp) | [![last commit](https://img.shields.io/github/last-commit/IvanBBaev/tiktok-mcp?style=flat-square&logo=github&logoColor=white)](https://github.com/IvanBBaev/tiktok-mcp/commits/main) | [![MCP](https://img.shields.io/badge/MCP-server-orange?style=flat-square)](https://modelcontextprotocol.io) | [![Known Vulnerabilities](https://snyk.io/test/npm/tiktok-mcp-ai/badge.svg)](https://snyk.io/test/npm/tiktok-mcp-ai) |
 
@@ -373,7 +373,7 @@ knobs. See [.env.example](.env.example) for a template and
 | `TT_CLIENT_SECRET` | yes | — | TikTok app client secret. Never logged or returned by any tool. |
 | `TT_MEDIA_ROOT` | no | — (fail-closed) | The only directory `FILE_UPLOAD` tools may read media from; unset ⇒ `source:"file"` is rejected locally. Choose a dedicated media folder, never `$HOME`. |
 | `TT_VERIFIED_URL_PREFIXES` | no | — | Comma-separated `https://` prefixes verified in the developer portal, so the plan phase can catch unverifiable `PULL_FROM_URL` domains early. **Advisory only** — TikTok's portal is the source of truth. |
-| `TT_TOOL_PACKAGES` | no | `core` | Comma-separated list of packages (`auth`, `user`, `video`, `publish`, `publish-write`) or a profile: `core` = all reads, `all` = everything. |
+| `TT_TOOL_PACKAGES` | no | `core` | Comma-separated list of packages (`auth`, `user`, `video`, `publish`, `publish-write`, `analytics`) or a profile: `core` = all reads, `all` = everything. |
 | `TT_PACKAGES_DENY` | no | — | Packages forced off regardless of `TT_TOOL_PACKAGES` (deny wins). |
 | `TT_PACKAGES_READONLY` | no | `0` | `1` registers only read-only tools (unregisters `publish-write`). |
 | `TT_WRITE_MODE` | no | `plan` | `plan` (default — preview then `plan_id`), `apply` (**trusted automation only: no injection resistance**), or `deny` (the `publish-write` package is not registered). |
@@ -412,7 +412,7 @@ independently:
 
 | Control | Effect |
 | ------- | ------ |
-| `TT_TOOL_PACKAGES` | Which packages are registered at all. `core` (default) = the read packages `auth,user,video,publish`; `all` adds `publish-write`. |
+| `TT_TOOL_PACKAGES` | Which packages are registered at all. `core` (default) = the read packages `auth,user,video,publish,analytics`; `all` adds `publish-write`. |
 | `TT_PACKAGES_DENY` | Packages forced off even if enabled above (deny always wins). |
 | `TT_PACKAGES_READONLY=1` / `TT_WRITE_MODE=deny` | Two ways to drop the write tools: `PACKAGES_READONLY` registers only read-only tools; `WRITE_MODE=deny` unregisters the `publish-write` package specifically. |
 
@@ -484,6 +484,7 @@ summarized to their first sentence; the full text an agent sees is in
 | `publish-write` | `tiktok_upload_video_draft` | no | Upload a video to the user's TikTok INBOX as a draft — the user must open the TikTok app notification, edit, and publish it themselves; nothing goes live from this call. |
 | `publish-write` | `tiktok_post_photos` | no | Post a photo carousel DIRECTLY to the user's TikTok profile — it goes live once processing completes. |
 | `publish-write` | `tiktok_upload_photos_draft` | no | Send a photo carousel to the user's TikTok INBOX as a draft — the user finishes and publishes it in the TikTok app; nothing goes live from this call. |
+| `analytics` | `tiktok_get_video_analytics` | yes | Compute engagement analytics over the authenticated user's PUBLIC videos. |
 
 <!-- GENERATED:TOOLS:END -->
 
@@ -506,11 +507,12 @@ Tools are grouped into packages so you can expose only what a given client needs
 (fewer tools keep the model focused). Set `TT_TOOL_PACKAGES` to a comma-separated
 list of profiles or package names:
 
-- `core` (default) — `auth`, `user`, `video`, `publish` (all the read tools,
-  including the read-only publishing context: creator info, publish status, and
-  the journal reader).
+- `core` (default) — `auth`, `user`, `video`, `publish`, `analytics` (all the
+  read tools, including the read-only publishing context: creator info, publish
+  status, and the journal reader, and the computed video analytics).
 - `all` — `core` plus `publish-write` (the four write tools).
-- Individual packages: `auth`, `user`, `video`, `publish`, `publish-write`.
+- Individual packages: `auth`, `user`, `video`, `publish`, `publish-write`,
+  `analytics`.
 
 `TT_PACKAGES_DENY` removes packages even if enabled; `TT_PACKAGES_READONLY=1`
 forces the `publish-write` package off. Packages group by **risk class**, so the

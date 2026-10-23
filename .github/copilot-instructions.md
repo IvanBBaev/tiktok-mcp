@@ -4,7 +4,7 @@ This is a **Model Context Protocol (MCP) server** written in **TypeScript** that
 gives an MCP client a safe, policy-governed tool surface over the official
 [TikTok for Developers](https://developers.tiktok.com) APIs: the **Display API**
 (read a creator's profile and videos) and the **Content Posting API** (publish
-videos and photo carousels). 11 tools in 5 packages, OAuth 2.0 (PKCE) user
+videos and photo carousels). 12 tools in 6 packages, OAuth 2.0 (PKCE) user
 authorization, multi-account profiles and plan-then-execute write safety.
 
 ## Architecture (4 layers — boundaries are ESLint-enforced)

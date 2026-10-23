@@ -7,7 +7,7 @@
  * and of the generated documentation, so tools are appended within a package,
  * never re-sorted.
  *
- * The array is intentionally exhaustive over the five packages even while some
+ * The array is intentionally exhaustive over the six packages even while some
  * are still empty — an empty package is a visible hole in the roadmap, whereas
  * a missing key is indistinguishable from an oversight.
  *
@@ -19,6 +19,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 
 import type { AnyToolSpec, PackageName } from '../mcp/define.js';
 import { describeTool, type ProfileInfo } from '../mcp/server.js';
+import { getVideoAnalyticsTool } from './analytics.js';
 import { getAuthStatusTool } from './auth.js';
 import {
   getCreatorInfoTool,
@@ -58,6 +59,7 @@ export const PACKAGES: readonly ToolPackageSpec[] = Object.freeze([
       uploadPhotosDraftTool,
     ]),
   },
+  { name: 'analytics', tools: Object.freeze([getVideoAnalyticsTool]) },
 ] as const);
 
 /** Every tool of every package, in manifest order. */

@@ -69,6 +69,8 @@
     "build/src/mcp/result.js",
     "build/src/mcp/server.d.ts",
     "build/src/mcp/server.js",
+    "build/src/tools/analytics.d.ts",
+    "build/src/tools/analytics.js",
     "build/src/tools/auth.d.ts",
     "build/src/tools/auth.js",
     "build/src/tools/index.d.ts",

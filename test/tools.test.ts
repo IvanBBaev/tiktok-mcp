@@ -30,10 +30,10 @@ function fixtureTool(name: `tiktok_${string}`): AnyToolSpec {
 // the manifest (TOOLS.md § 1)
 // ---------------------------------------------------------------------------
 
-test('the manifest lists exactly the five documented packages, in order', () => {
+test('the manifest lists exactly the six documented packages, in order', () => {
   assert.deepEqual(
     PACKAGES.map((pkg) => pkg.name),
-    ['auth', 'user', 'video', 'publish', 'publish-write'],
+    ['auth', 'user', 'video', 'publish', 'publish-write', 'analytics'],
   );
 });
 

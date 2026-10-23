@@ -26,7 +26,7 @@
     <meta property="og:image:height" content="630" />
     <meta
       property="og:image:alt"
-      content="tiktok-mcp-ai — drive TikTok from your AI assistant. 11 tools, 5 packages, OAuth 2.0 (PKCE), MIT."
+      content="tiktok-mcp-ai — drive TikTok from your AI assistant. 12 tools, 6 packages, OAuth 2.0 (PKCE), MIT."
     />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="tiktok-mcp-ai — Unofficial TikTok MCP Server" />
@@ -40,7 +40,7 @@
     />
     <meta
       name="twitter:image:alt"
-      content="tiktok-mcp-ai — drive TikTok from your AI assistant. 11 tools, 5 packages, OAuth 2.0 (PKCE), MIT."
+      content="tiktok-mcp-ai — drive TikTok from your AI assistant. 12 tools, 6 packages, OAuth 2.0 (PKCE), MIT."
     />
     <!-- Structured data: software listing + FAQ rich results -->
     <script type="application/ld+json">
@@ -1188,7 +1188,7 @@ TT_TOOL_PACKAGES=core,publish-write</code></pre>
         <section id="tools">
           <h2>Tools reference</h2>
           <p>
-            11 tools across 5 packages. <span class="pill ro">read</span> tools
+            12 tools across 6 packages. <span class="pill ro">read</span> tools
             never mutate your account; <span class="pill wr">write</span> tools
             are gated by plan-then-execute — a call without a
             <code>plan_id</code> previews and posts nothing.
@@ -1345,6 +1345,20 @@ TT_TOOL_PACKAGES=core,publish-write</code></pre>
               <tr><td><code>wait_for_completion</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Default <code>false</code>.</td></tr>
               <tr><td><code>plan_id</code></td><td>string</td><td><span class="opt">optional</span></td><td>Omit to preview; pass a minted id to execute.</td></tr>
               <tr><td><code>force</code></td><td>boolean</td><td><span class="opt">optional</span></td><td>Re-validate and bypass a stale-plan guard.</td></tr>
+            </tbody></table></div>
+          </details>
+
+          <h3 id="pkg-analytics">analytics <span class="pkg-meta">— Engagement figures computed locally from your video list. <em>(1 tool)</em></span></h3>
+          <details class="tool">
+            <summary><code>tiktok_get_video_analytics</code> <span class="pill ro">read</span><span class="tool-sum">Compute engagement analytics over the authenticated user's public videos.</span></summary>
+            <div class="tool-params"><table><thead><tr><th>Parameter</th><th>Type</th><th></th><th>Notes</th></tr></thead><tbody>
+              <tr><td><code>account</code></td><td>string</td><td><span class="opt">optional</span></td><td></td></tr>
+              <tr><td><code>since</code></td><td>string</td><td><span class="opt">optional</span></td><td>ISO-8601 lower bound on the post time.</td></tr>
+              <tr><td><code>until</code></td><td>string</td><td><span class="opt">optional</span></td><td>ISO-8601 upper bound; a bare date includes the whole UTC day.</td></tr>
+              <tr><td><code>period</code></td><td>enum</td><td><span class="opt">optional</span></td><td>one of: <code>day</code> · <code>week</code> · <code>month</code> (default)</td></tr>
+              <tr><td><code>timezone</code></td><td>string</td><td><span class="opt">optional</span></td><td>IANA zone for periods and posting times; default <code>UTC</code>.</td></tr>
+              <tr><td><code>rank_by</code></td><td>enum</td><td><span class="opt">optional</span></td><td>one of: <code>views</code> · <code>likes</code> · <code>comments</code> · <code>shares</code> · <code>engagement_rate</code></td></tr>
+              <tr><td><code>top</code></td><td>number</td><td><span class="opt">optional</span></td><td>0–20 top videos; default 5.</td></tr>
             </tbody></table></div>
           </details>
         </section>
@@ -1887,7 +1901,7 @@ TT_TOOL_PACKAGES=core,publish-write</code></pre>
         });
 
         // Cache the lowercased searchable text per section once (headings +
-        // body text), so typing stays cheap even with all 11 tools on the page.
+        // body text), so typing stays cheap even with all 12 tools on the page.
         var sectionText = new Map();
         sections.forEach(function (sec) {
           sectionText.set(sec, (sec.textContent || "").toLowerCase());

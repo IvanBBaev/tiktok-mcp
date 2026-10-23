@@ -187,7 +187,7 @@ export interface ToolCtx {
 }
 
 export interface ToolSpec<In, Out> {
-  name: `tiktok_${string}`;      // v1.1 surface: 11 tools
+  name: `tiktok_${string}`;      // 12 tools (v1.1 surface + analytics)
   title: string;
   description: string;           // model-facing; includes constraints & failure modes
   package: PackageName;

@@ -1009,7 +1009,7 @@ export interface ToolCtx {
 }
 
 export interface ToolSpec<In, Out> {
-  name: `tiktok_${string}`;      // v1.1 surface: 11 tools (SYNTHESIS § 2.9)
+  name: `tiktok_${string}`;      // 12 tools (SYNTHESIS § 2.9 + analytics, ROADMAP Phase 5)
   title: string;
   description: string;
   package: PackageName;
@@ -1057,7 +1057,7 @@ hand-curated; only its "N tools" claim is compared).
 
 ```ts
 export interface ToolPackageSpec { name: PackageName; tools: readonly AnyToolSpec[] }
-export const PACKAGES: readonly ToolPackageSpec[];   // frozen, all five packages
+export const PACKAGES: readonly ToolPackageSpec[];   // frozen, all six packages
 /** Every tool of every package, in manifest order. */
 export function allTools(packages?: readonly ToolPackageSpec[]): readonly AnyToolSpec[];
 

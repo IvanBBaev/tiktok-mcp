@@ -16,7 +16,7 @@ no manual `.vscode/mcp.json`.
 
 ## What you get
 
-11 tools over the official [TikTok for Developers](https://developers.tiktok.com)
+12 tools over the official [TikTok for Developers](https://developers.tiktok.com)
 APIs — the **Display API** (read a creator's profile and videos) and the
 **Content Posting API** (publish videos and photo carousels), plus:
 

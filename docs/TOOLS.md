@@ -28,7 +28,7 @@ Conventions:
 
 ## 1. Surface at a glance
 
-**11 tools, 5 packages.** (rationale: SYNTHESIS § 2.9)
+**12 tools, 6 packages.** (rationale: SYNTHESIS § 2.9; `analytics` added in 1.1 — ROADMAP Phase 5)
 
 | # | Tool | Package | readOnlyHint | destructiveHint | idempotentHint | openWorldHint | Required scope |
 |---|---|---|---|---|---|---|---|
@@ -43,11 +43,13 @@ Conventions:
 | 9 | `tiktok_upload_video_draft` | publish-write | false | **true** | false | true | `video.upload` |
 | 10 | `tiktok_post_photos` | publish-write | false | **true** | false | true | `video.publish` |
 | 11 | `tiktok_upload_photos_draft` | publish-write | false | **true** | false | true | `video.upload` |
+| 12 | `tiktok_get_video_analytics` | analytics | true | false | true | true | `video.list` |
 
 **Packages.** `auth`, `user`, `video`, `publish` (read-only publishing context:
 creator info, publish status, journal), `publish-write` (the four destructive
-writes). Package profiles: `core` = auth + user + video + publish (no
-writes); `all` = everything. `TT_WRITE_MODE=deny` unregisters
+writes), `analytics` (figures computed locally from the video list; appended
+last so the order of the first five stays frozen). Package profiles: `core` =
+auth + user + video + publish + analytics (no writes); `all` = everything. `TT_WRITE_MODE=deny` unregisters
 `publish-write` and wins over any profile setting (see § 2.6.4 and
 CONFIGURATION.md).
 
@@ -1013,6 +1015,54 @@ Notes:
   No `creator_info` pre-flight (scope reality: draft authorizations lack
   `video.publish`), hence no `privacy_level_unavailable` /
   `branded_content_privacy_conflict`.
+
+### 3.12 `tiktok_get_video_analytics`
+
+- **Package:** `analytics`. **Annotations:** `readOnlyHint: true`,
+  `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true`.
+- **Scopes:** `video.list`.
+- **Description** (normative):
+
+  > Compute engagement analytics over the authenticated user's PUBLIC videos.
+  > Returns totals, engagement rate ((likes + comments + shares) / views),
+  > average and median views, the top videos by a chosen metric,
+  > per-day/week/month aggregates and posting-time breakdowns by weekday and
+  > hour. Read-only; derived from the video list, so private and friends-only
+  > videos are not counted. Counts are as of now — TikTok keeps no history, so
+  > there are no per-period deltas for a single video.
+
+- **Input schema:**
+
+  | Field | Type | Req | Constraints | `.describe()` |
+  |---|---|---|---|---|
+  | `account` | string | no | | (common) |
+  | `since` | string | no | ISO-8601 date or date-time; validated locally | "Only videos posted at or after this instant (ISO-8601 date or date-time; a bare date is midnight UTC). Omit for no lower bound." |
+  | `until` | string | no | ISO-8601; a bare date ends at 23:59:59 UTC; not before `since` | "Only videos posted at or before this instant (ISO-8601; a bare date includes that whole UTC day). Omit for no upper bound." |
+  | `period` | string | no | enum `day` \| `week` \| `month`, default `month`; weeks are ISO 8601 (`2026-W43`) | "Bucket size for the periods aggregates. Default month." |
+  | `timezone` | string | no | IANA zone, default `UTC`; unknown zones fail locally | "IANA time zone for periods and posting times, e.g. Europe/Sofia. Default UTC. Timestamps in the result stay UTC." |
+  | `rank_by` | string | no | enum `views` \| `likes` \| `comments` \| `shares` \| `engagement_rate`, default `views` | "Metric that orders top_videos. Default views." |
+  | `top` | integer | no | 0–20, default 5; out-of-range values are clamped locally and noted (as CC-C5) | "How many top videos to return (0–20)." |
+
+- **Output:** `{ summary: { video_count, views, likes, comments, shares,
+  engagement_rate, avg_views, median_views, first_post?, last_post? },
+  top_videos: [{ id, title?, share_url?, created_at?, views, likes, comments,
+  shares, engagement_rate }], periods: [{ period, video_count, views, likes,
+  comments, shares, engagement_rate }], posting_times: { by_weekday: [...],
+  by_hour: [...] }, meta: { timezone, period, rank_by, since?, until?, scanned,
+  top?, truncation? } }`. `engagement_rate` is `(likes + comments + shares) /
+  views` rounded to four decimals, `null` when there are no views. Period labels
+  and posting-time slots are in `timezone`; every timestamp is UTC (Conventions).
+  Posting-time rows with no videos are omitted.
+- **Walk:** `video/list` newest first with only the counted fields, ending at the
+  end of the list, at the first video older than `since`, or at
+  `TT_FETCH_ALL_CAP` videos read (`meta.scanned`). A cap that cuts the window
+  reports `truncation.reason: "item_cap"` and a `note`: the figures then cover
+  the newest part of the window only. A non-advancing cursor reports
+  `cursor_stuck` (as § 3.3). Neither carries a `resume_cursor` — an aggregate
+  cannot be resumed.
+- **Errors:** shared catalog; `invalid_params` for an unparseable `since` /
+  `until`, `since` later than `until`, or an unknown `timezone` — all before any
+  network.
 
 ---
 

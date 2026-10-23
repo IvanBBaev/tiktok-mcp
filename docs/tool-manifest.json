@@ -716,6 +716,71 @@
         "idempotentHint": false,
         "openWorldHint": true
       }
+    },
+    {
+      "package": "analytics",
+      "scopes": [
+        "video.list"
+      ],
+      "name": "tiktok_get_video_analytics",
+      "title": "Compute TikTok video analytics",
+      "description": "Compute engagement analytics over the authenticated user's PUBLIC videos. Returns totals, engagement rate ((likes + comments + shares) / views), average and median views, the top videos by a chosen metric, per-day/week/month aggregates and posting-time breakdowns by weekday and hour. Read-only; derived from the video list, so private and friends-only videos are not counted. Counts are as of now — TikTok keeps no history, so there are no per-period deltas for a single video.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok.",
+            "type": "string",
+            "minLength": 1
+          },
+          "since": {
+            "description": "Only videos posted at or after this instant (ISO-8601 date or date-time; a bare date is midnight UTC). Omit for no lower bound.",
+            "type": "string"
+          },
+          "until": {
+            "description": "Only videos posted at or before this instant (ISO-8601; a bare date includes that whole UTC day). Omit for no upper bound.",
+            "type": "string"
+          },
+          "period": {
+            "description": "Bucket size for the periods aggregates. Default month.",
+            "type": "string",
+            "enum": [
+              "day",
+              "week",
+              "month"
+            ]
+          },
+          "timezone": {
+            "description": "IANA time zone for periods and posting times, e.g. Europe/Sofia. Default UTC. Timestamps in the result stay UTC.",
+            "type": "string"
+          },
+          "rank_by": {
+            "description": "Metric that orders top_videos. Default views.",
+            "type": "string",
+            "enum": [
+              "views",
+              "likes",
+              "comments",
+              "shares",
+              "engagement_rate"
+            ]
+          },
+          "top": {
+            "description": "How many top videos to return (0–20).",
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Compute TikTok video analytics",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
     }
   ]
 }

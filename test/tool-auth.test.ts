@@ -115,6 +115,7 @@ test('a fully granted profile reports every package as ok and needs no hint', as
       video: 'ok',
       publish: 'ok',
       'publish-write': 'ok',
+      analytics: 'ok',
     });
     assert.equal(result.hints, undefined);
     assert.equal(row?.probe, undefined);
@@ -138,6 +139,7 @@ test('a partial grant is reported per package, naming the first missing scope', 
         video: 'missing_scope:video.list',
         publish: 'missing_scope:video.publish',
         'publish-write': 'missing_scope:video.publish',
+        analytics: 'missing_scope:video.list',
       });
       // CC-A7: a partial grant is normal, so the call still succeeds.
       assert.equal(result.ok, true);
