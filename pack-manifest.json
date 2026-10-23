@@ -5,6 +5,8 @@
     "bin/tiktok-mcp-ai.cjs",
     "build/src/api/context.d.ts",
     "build/src/api/context.js",
+    "build/src/api/media.d.ts",
+    "build/src/api/media.js",
     "build/src/api/publish.d.ts",
     "build/src/api/publish.js",
     "build/src/api/upload.d.ts",

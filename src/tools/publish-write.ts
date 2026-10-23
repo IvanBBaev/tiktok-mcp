@@ -72,6 +72,7 @@ import {
   dispatchWrite,
   draftInboxHint,
   localRefusal,
+  mediaPreflight,
   mintPlan,
   resolveOpenId,
   runPlanGuards,
@@ -309,6 +310,19 @@ async function resolveSource(
       file: { media, plan },
     },
   };
+}
+
+/**
+ * The preview-only media pre-flight. A URL source has no local bytes to read;
+ * TikTok fetches them itself, so there is nothing to probe.
+ */
+function previewMedia(
+  source: ResolvedSource,
+  maxDurationSec?: number,
+): Promise<Awaited<ReturnType<typeof mediaPreflight>>> {
+  return source.intent === 'FILE_UPLOAD'
+    ? mediaPreflight(source.file.media.path, maxDurationSec)
+    : Promise.resolve({});
 }
 
 /**
@@ -563,6 +577,7 @@ async function previewPost(
 
   const openId = await resolveOpenId(ctx);
   const restricted = auditRestrictionsActive(creator);
+  const media = await previewMedia(source.value, creator.maxVideoPostDurationSec);
   const shared = {
     account: accountBlock(api.profile, openId, creator.nickname),
     action: ACTION,
@@ -572,6 +587,7 @@ async function previewPost(
       args.brand_content_toggle === true,
       args.brand_organic_toggle === true,
     ),
+    ...(media.check !== undefined && { media_check: media.check }),
     meta: {
       rate_bucket: peekPublishBucket(
         api.profile,
@@ -586,6 +602,7 @@ async function previewPost(
   if (args.privacy_level === undefined) {
     const hints: Hint[] = [choosePrivacyHint(TOOL_NAME, creator.privacyLevelOptions)];
     if (restricted) hints.push(auditRestrictionsNote());
+    if (media.hint !== undefined) hints.push(media.hint);
     return {
       ok: true,
       data: {
@@ -617,6 +634,7 @@ async function previewPost(
 
   const hints: Hint[] = [plan.hint];
   if (restricted) hints.push(auditRestrictionsNote());
+  if (media.hint !== undefined) hints.push(media.hint);
 
   return {
     ok: true,
@@ -827,6 +845,8 @@ async function previewDraft(
     openId,
     source.value.fileIdentity,
   );
+  // No creator_info on a draft (§ 3.9), so the platform maximum stands in.
+  const media = await previewMedia(source.value);
 
   return {
     ok: true,
@@ -837,6 +857,7 @@ async function previewDraft(
       account: accountBlock(api.profile, openId),
       action: DRAFT_ACTION,
       payload: { source: source.value.block },
+      ...(media.check !== undefined && { media_check: media.check }),
       meta: {
         rate_bucket: peekPublishBucket(
           api.profile,
@@ -845,7 +866,7 @@ async function previewDraft(
         ),
       },
     },
-    hints: [plan.hint],
+    hints: media.hint === undefined ? [plan.hint] : [plan.hint, media.hint],
   };
 }
 

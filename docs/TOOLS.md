@@ -836,6 +836,17 @@ Notes:
   a `FAILED` publish status with TikTok's own reason, not as a local error —
   refusing a file by extension here would reject valid uploads on nothing more
   than a filename.
+- **Media pre-flight (advisory).** A `source: "file"` preview also carries
+  `media_check: { container, codec?, width?, height?, fps?, duration_sec?,
+  issues }`, read from the container header and the `moov` box. `issues` lists
+  every limit the file breaks, in the order `container`, `codec`,
+  `resolution` (a side outside 360–4096 px), `frame_rate` (outside 23–60 FPS),
+  `duration` (over the creator's `max_video_post_duration_sec`, else 600 s).
+  A non-empty list adds one `note` hint ("Media pre-flight: … re-encode
+  first."). The check never refuses, is not part of the plan digest and is
+  not repeated at apply time; a file the probe cannot read has no
+  `media_check`, and URL sources are never probed. Present on `plan` and
+  `plan_incomplete` alike.
 - **Preview output** (`mode: "plan"`): `{ mode, plan_id, expires_at, account:
   { profile, nickname, open_id_masked }, action: "DIRECT_POST video",
   payload: { post_info: { ...exact fields to be sent... }, source }, derived:
@@ -910,6 +921,8 @@ Notes:
   `wait_for_completion` observed a terminal `FAILED`: that draft never reached
   the inbox, so there is nothing to open and no `user_action` is given (the
   `fail_reason`/`fail_recovery` pair of § 3.8 carries the outcome instead).
+  A file preview carries the § 3.8 `media_check` (and its `note` hint),
+  judged against the 600 s platform maximum since there is no `creator_info`.
 - **Errors:** shared catalog; `pending_share_cap` is the signature error
   here. No `privacy_level_unavailable` / `branded_content_privacy_conflict`
   (the fields do not exist on this tool).

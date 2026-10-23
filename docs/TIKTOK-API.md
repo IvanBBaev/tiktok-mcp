@@ -663,10 +663,13 @@ codes, not 429s:
   exactly TikTok's unit, so plain `.length` checks are correct; do not count
   code points): video `title` ≤ 2 200; photo `title` ≤ 90; photo `description`
   ≤ 4 000.
-- The server does not probe media content (CC-D9): container/codec/FPS/
-  resolution problems surface asynchronously as `FAILED` + `fail_reason`
-  (§ 4.5); tool descriptions state the accepted formats so the model can
-  pre-check by extension.
+- Local video files get an advisory pre-flight at preview (CC-D9): the
+  server reads the container header and `moov` box and reports container
+  (MP4/MOV/WebM), codec (H.264/H.265/VP8/VP9), resolution (360–4096 px per
+  side), frame rate (23–60 FPS) and duration (the creator's
+  `max_video_post_duration_sec`, else 600 s). It never refuses — TikTok
+  remains the authority, and problems still surface asynchronously as
+  `FAILED` + `fail_reason` (§ 4.5). URL sources are not probed.
 
 ## 7. Unaudited-client restrictions (the audit gate)
 

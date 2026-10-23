@@ -21,6 +21,12 @@ plumbing stay in the commit history where they belong.
   from the public video list. Optional `since`/`until` window and IANA
   `timezone`; the walk honours `TT_FETCH_ALL_CAP` and reports when the cap or a
   stuck cursor cut the sample.
+- Advisory media pre-flight for local video files: the preview of
+  `tiktok_post_video` and `tiktok_upload_video_draft` with `source: "file"`
+  reads the container header and `moov` box and reports `media_check`
+  (container, codec, resolution, frame rate, duration and the limits broken),
+  with a `note` hint when TikTok would likely reject the file. It never
+  refuses and is not repeated at apply time.
 
 ## [1.0.0] - 2026-10-23
 

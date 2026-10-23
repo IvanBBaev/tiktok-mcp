@@ -211,10 +211,15 @@ there.
   (realpath after symlink resolution, prefix check on the resolved path);
   traversal, symlinks escaping the root, directories, and device files are
   rejected. Relative paths resolve against `TT_MEDIA_ROOT`, not CWD.
-- **CC-D9 — wrong container/codec.** The server does not probe media; format
-  errors surface asynchronously as `FAILED` + `fail_reason` from status/fetch.
-  Tool descriptions state the accepted formats so the model can pre-check by
-  extension.
+- **CC-D9 — wrong container/codec.** The video preview of a local file runs an
+  advisory pre-flight (`api/media.ts`): it reads the container header and the
+  `moov` box and reports container, codec, resolution, frame rate and duration
+  as `media_check`, with a `note` hint naming every limit the file breaks. It
+  never refuses, is not part of the plan digest and is not repeated at apply
+  time — TikTok stays the authority, and format errors still surface
+  asynchronously as `FAILED` + `fail_reason` from status/fetch. A file the
+  probe cannot read yields no `media_check` at all, never an error. URL sources
+  are not probed (fetching them would be a second download).
 - **CC-D10 — PULL_FROM_URL constraints.** `https:` only, no credentials-in-URL,
   and the domain-verification requirement stated up front; the
   `url_ownership_unverified` error maps to a remediation explaining portal

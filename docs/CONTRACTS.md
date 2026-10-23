@@ -996,6 +996,33 @@ export function uploadFile(ctx: ApiContext, opts: {
 export type FileIdentity = Pick<MediaFile, 'size' | 'mtimeMs' | 'dev' | 'ino'>;
 ```
 
+```ts
+// api/media.ts — the advisory media pre-flight (CC-D9). Pure reads, no network.
+export type MediaContainer = 'mp4' | 'mov' | 'webm' | 'unknown';
+export type MediaIssue = 'container' | 'codec' | 'resolution' | 'frame_rate' | 'duration';
+export interface MediaProbe {
+  container: MediaContainer;
+  codec?: string;            // sample-entry fourcc, non-printables as '?'
+  width?: number; height?: number;   // tkhd of the first video track
+  fps?: number;              // samples / media duration (stts + mdhd)
+  durationSec?: number;      // mvhd, else the video track's mdhd
+}
+export const MEDIA_LIMITS: { minSidePx: 360; maxSidePx: 4096; minFps: 23;
+                             maxFps: 60; maxDurationSec: 600 };
+export const ACCEPTED_CODECS: readonly string[];   // avc1 avc3 hvc1 hev1 vp08 vp09
+export const MAX_MOOV_BYTES: number;               // 64 MiB; a larger moov is not read
+
+/** Sniffs the container (EBML ⇒ webm; ftyp brand `qt  ` or a bare QuickTime
+ *  top-level box ⇒ mov; other ftyp ⇒ mp4) and, for ISO-BMFF, walks at most 64
+ *  top-level boxes for `moov`. Resolves `undefined` when the file cannot be
+ *  opened or read — the probe never throws. WebM is not parsed further. */
+export function probeMediaFile(path: string): Promise<MediaProbe | undefined>;
+/** Parses a `moov` payload; malformed input keeps whatever was read before it. */
+export function inspectMovie(moov: Uint8Array): Omit<MediaProbe, 'container'>;
+/** Issues in the fixed order of `MediaIssue`; an absent field is not an issue. */
+export function checkMedia(probe: MediaProbe, maxDurationSec?: number): MediaIssue[];
+```
+
 ## mcp/define.ts (tools-as-data)
 
 ```ts
@@ -2331,6 +2358,7 @@ export interface WritePreview {
   creator: CreatorBlock;
   audit_restrictions_active: boolean;
   consent_line: string;
+  media_check?: MediaCheck;      // local video files only (CC-D9); advisory
   meta: { rate_bucket: RateBucketSnapshot };
 }
 
@@ -2349,8 +2377,25 @@ export interface DraftPreview {
   account: AccountBlock;
   action: string;
   payload: { post_info?: Record<string, unknown>; source: SourceBlock };
+  media_check?: MediaCheck;      // local video files only, against the platform max
   meta: { rate_bucket: RateBucketSnapshot };
 }
+
+/** The advisory media pre-flight (CC-D9) as the preview shows it. Never
+ *  digested, never re-checked at apply, never a refusal. */
+export interface MediaCheck {
+  container: MediaContainer;
+  codec?: string; width?: number; height?: number; fps?: number;
+  duration_sec?: number;
+  issues: readonly MediaIssue[];
+}
+/** Probes `path` and checks it; `{}` when the probe cannot read the file. The
+ *  hint is `mediaPreflightNote(issues)` when there are any. */
+export function mediaPreflight(path: string, maxDurationSec?: number):
+  Promise<{ check?: MediaCheck; hint?: Hint }>;
+/** One `note` naming every issue (≤ MAX_HINT_CHARS with all five); no file-
+ *  derived values in the text — they live in `data.media_check`. */
+export function mediaPreflightNote(issues: readonly MediaIssue[]): Hint;
 
 /** FILE_UPLOAD ⇒ "PROCESSING_UPLOAD", PULL_FROM_URL ⇒ "PROCESSING_DOWNLOAD":
  *  a pull has not moved the bytes yet, an upload has. */
@@ -3058,6 +3103,16 @@ export function startTokenStub(opts?: TokenStubOptions): Promise<TokenStub>;
                                         // .baseUrl, .served, .refreshCount, .serial,
                                         // .unexpected, .close()
 
+// mp4.ts — ISO-BMFF box builders for the media pre-flight tests.
+export function box(type: string, ...children: Uint8Array[]): Uint8Array;
+export function fullBox(type: string, version: number, ...body: Uint8Array[]): Uint8Array;
+export interface MovieOpts { /* version, movieScale, movieDuration, handler, width,
+  height, codec, mediaScale, mediaDuration, samples, withMvhd, withStts, withStbl */ }
+export function moov(opts?: MovieOpts): Uint8Array;  // default 10 s, 30 fps, 1080×1920 avc1
+export function payload(movie: Uint8Array): Uint8Array;  // the box minus its header
+export function mp4File(opts?: MovieOpts): Uint8Array;   // ftyp + mdat + moov
+export const FTYP_MP4: Uint8Array, FTYP_QT: Uint8Array, MDAT: Uint8Array;
+
 // multi-process.ts + lock-child.ts — the one real race (CC-F5/A2).
 export function runContendingChildren(opts: {
   readonly childModule: string | URL;   // compiled worker, default-exports (ctx) => unknown
@@ -3239,3 +3294,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-09-26 | Round 13 fixes. **`mcp/server`**: `StdioSession.drain` gains the additive `signal?: AbortSignal` — it resolves at once when the signal is already aborted and as soon as it aborts mid-drain; `src/index.ts` passes one that stdin EOF aborts. From the first `drain` call on, a new JSON-RPC request is answered `-32000` `Service Unavailable: the server is shutting down` instead of started (the HTTP transport's `503`). `trackStdioCalls` counts requests per id, so a reused id still in flight keeps the drain open until its last answer; a `notifications/cancelled` settles every request under its id. **`mcp/http`**: `openSession` reserves a slot before the handle and `connect` are awaited, so concurrent `initialize` requests cannot together exceed `maxSessions`. **`core/env-lock`**: `canonicalPath` follows a dangling symlink chain hop by hop to its end (up to 40 links), so every link in the chain shares one lock and none is replaced by a regular file; a loop returns the path as given. **`core/http`**: a `429` whose body is empty, not JSON, or JSON that is not an object is `rate_limited` with the wait hint (CC-B8), not `upstream_error`. **`core/oauth`**: a refresh that settles after `resetTokenCache` removes its in-flight entry only if it is still its own. No other exported signature changes. | integrator (round 13) |
 | 2026-10-01 | `api/upload`: `uploadFile` re-stats the pinned file once more when TikTok completes the upload (`201`, or a `416` resync to the end of the file); a size/mtime change there throws `network_ambiguous` ("modified during the upload"), not `upload_interrupted`, because the completed upload may be posted — the rewrite of the completing chunk was the one no pre-chunk check could see. No signature changes | integrator (round 14) |
 | 2026-10-22 | `core/config`: `overlayEnvFile` gains the additive `platform?: NodeJS.Platform` (default `process.platform`). On win32 every `TT_`-prefixed environment key is copied under its upper-case spelling and shadows the file's key in any case, because the OS environment is case-insensitive there and the returned plain object is not. No other signature changes | integrator |
+| 2026-10-24 | Added `api/media.ts` (`probeMediaFile`, `inspectMovie`, `checkMedia`, `MEDIA_LIMITS`, `ACCEPTED_CODECS`, `MAX_MOOV_BYTES`) and, in `tools/publish-common`, `MediaCheck`, `mediaPreflight` and `mediaPreflightNote`; `WritePreview` and `DraftPreview` gain the optional `media_check` — additive. The pre-flight is advisory (ROADMAP Phase 5, CC-D9): a local video file is probed at preview only, the result is not digested and not re-checked at apply, and a file TikTok would reject still gets a plan with one `note` hint, because TikTok remains the authority and a local refusal would invent a catalog code. § Extended harness gains `mp4.ts` | owner (Phase 5) |

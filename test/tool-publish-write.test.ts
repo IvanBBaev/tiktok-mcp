@@ -76,6 +76,8 @@ import {
 } from '../src/mcp/result.js';
 import {
   checkMediaUrl,
+  mediaPreflight,
+  mediaPreflightNote,
   type AppliedData,
   type DraftPreview,
   type SourceBlock,
@@ -88,6 +90,7 @@ import {
   type UploadDraftData,
 } from '../src/tools/publish-write.js';
 import { failRecovery } from '../src/tools/publish.js';
+import { mp4File, type MovieOpts } from './harness/mp4.js';
 import {
   BASELINE_SCOPES,
   fsSandbox,
@@ -2768,6 +2771,146 @@ test('a file preview publishes the resolved path and the chunk plan (CC-D2, § 3
     assert.deepEqual(paths(stub), [CREATOR_PATH]);
     assert.equal(stub.puts.length, 0);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Media pre-flight (ROADMAP Phase 5, api/media.ts) — preview only
+// ---------------------------------------------------------------------------
+
+/** A synthesised MP4 inside the media root; 10 s, 30 fps, 1080×1920 H.264 by default. */
+async function writeMp4(
+  dir: string,
+  name: string,
+  opts: MovieOpts = {},
+): Promise<string> {
+  const path = join(mediaRootOf(dir), name);
+  await writeFile(path, mp4File(opts));
+  return path;
+}
+
+function mediaNotes(result: ToolResult<unknown>): Hint[] {
+  return hintsOf(result).filter((hint) => hint.text.startsWith('Media pre-flight:'));
+}
+
+test('a conforming file preview reports its media check and adds no hint', async () => {
+  await withCtx({}, async (ctx, dir) => {
+    const path = await writeMp4(dir, 'clip.mp4');
+    const result = await withFetch(fakeApi(), async () => run(ctx, fileArgs(path)));
+
+    assert.deepEqual(previewOf(result).media_check, {
+      container: 'mp4',
+      codec: 'avc1',
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      duration_sec: 10,
+      issues: [],
+    });
+    assert.deepEqual(mediaNotes(result), []);
+  });
+});
+
+test('a file TikTok would reject still previews, with a note naming each limit', async () => {
+  await withCtx({}, async (ctx, dir) => {
+    const path = await writeMedia(dir, 'clip.mp4', MEDIA_BYTES);
+    const result = await withFetch(fakeApi(), async () => run(ctx, fileArgs(path)));
+
+    const preview = previewOf(result);
+    assert.equal(preview.mode, 'plan');
+    assert.deepEqual(preview.media_check, {
+      container: 'unknown',
+      issues: ['container'],
+    });
+    const [note, ...rest] = mediaNotes(result);
+    assert.equal(rest.length, 0);
+    assert.equal(note?.type, 'note');
+    assert.match(note?.text ?? '', /container is not MP4, MOV or WebM/);
+  });
+});
+
+test("the creator's max_video_post_duration_sec is the duration limit", async () => {
+  await withCtx({}, async (ctx, dir) => {
+    const path = await writeMp4(dir, 'long.mp4', { movieDuration: 61_000 });
+    const stub = fakeApi({
+      creator: () => creatorResponse({ max_video_post_duration_sec: 60 }),
+    });
+    const result = await withFetch(stub, async () => run(ctx, fileArgs(path)));
+
+    assert.deepEqual(previewOf(result).media_check?.issues, ['duration']);
+    assert.match(
+      mediaNotes(result)[0]?.text ?? '',
+      /longer than the allowed post duration/,
+    );
+  });
+});
+
+test('plan_incomplete carries the media check too', async () => {
+  await withCtx({}, async (ctx, dir) => {
+    const path = await writeMp4(dir, 'small.mp4', { width: 320, height: 240 });
+    const result = await withFetch(fakeApi(), async () =>
+      run(ctx, fileArgs(path, { privacy_level: undefined })),
+    );
+
+    const preview = previewOf(result);
+    assert.equal(preview.mode, 'plan_incomplete');
+    assert.deepEqual(preview.media_check?.issues, ['resolution']);
+    assert.equal(mediaNotes(result).length, 1);
+  });
+});
+
+test('a url preview has nothing local to probe', async () => {
+  await withCtx({}, async (ctx) => {
+    const result = await withFetch(fakeApi(), async () => run(ctx, previewArgs()));
+    assert.equal(previewOf(result).media_check, undefined);
+    assert.deepEqual(mediaNotes(result), []);
+  });
+});
+
+test('a draft preview is checked against the platform maximum duration', async () => {
+  await withCtx({}, async (ctx, dir) => {
+    const ok = await writeMp4(dir, 'ok.mp4');
+    const long = await writeMp4(dir, 'long.mp4', { movieDuration: 601_000 });
+    const [okResult, longResult] = await withFetch(fakeApi(), async () => [
+      await runDraft(
+        ctx,
+        draftArgs({ source: 'file', video_url: undefined, file_path: ok }),
+      ),
+      await runDraft(
+        ctx,
+        draftArgs({ source: 'file', video_url: undefined, file_path: long }),
+      ),
+    ]);
+
+    assert.deepEqual(draftPreviewOf(okResult).media_check?.issues, []);
+    assert.equal(hintsOf(okResult).length, 1);
+    assert.deepEqual(draftPreviewOf(longResult).media_check?.issues, ['duration']);
+    assert.equal(mediaNotes(longResult).length, 1);
+    assert.equal(draftPreviewOf(await runUrlDraft(ctx)).media_check, undefined);
+  });
+});
+
+async function runUrlDraft(ctx: ToolCtx): Promise<ToolResult<UploadDraftData>> {
+  return withFetch(fakeApi(), async () => runDraft(ctx, draftArgs()));
+}
+
+test('the media note fits the hint cap with every issue at once', () => {
+  const note = mediaPreflightNote([
+    'container',
+    'codec',
+    'resolution',
+    'frame_rate',
+    'duration',
+  ]);
+  assert.ok(note.text.length <= MAX_HINT_CHARS, `${String(note.text.length)} chars`);
+});
+
+test('an unreadable file yields no media check at all', async () => {
+  const sandbox = await fsSandbox();
+  try {
+    assert.deepEqual(await mediaPreflight(join(sandbox.dir, 'gone.mp4')), {});
+  } finally {
+    await sandbox.cleanup();
+  }
 });
 
 test('a file preview mints a plan an otherwise identical url post cannot spend (§ 2.6.2)', async () => {

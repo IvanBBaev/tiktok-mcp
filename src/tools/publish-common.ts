@@ -30,6 +30,12 @@
 
 import { maskOpenId, readCredentialSnapshot } from '../api/context.js';
 import {
+  checkMedia,
+  probeMediaFile,
+  type MediaContainer,
+  type MediaIssue,
+} from '../api/media.js';
+import {
   PRIVACY_LEVELS,
   PUBLISH_STATUSES,
   type CreatorInfo,
@@ -162,6 +168,8 @@ export interface WritePreview {
   creator: CreatorBlock;
   audit_restrictions_active: boolean;
   consent_line: string;
+  /** Only for a `source: "file"` preview whose header could be read. */
+  media_check?: MediaCheck;
   meta: { rate_bucket: RateBucketSnapshot };
 }
 
@@ -180,7 +188,72 @@ export interface DraftPreview {
   account: AccountBlock;
   action: string;
   payload: { post_info?: Record<string, unknown>; source: SourceBlock };
+  /** Only for a `source: "file"` preview whose header could be read. */
+  media_check?: MediaCheck;
   meta: { rate_bucket: RateBucketSnapshot };
+}
+
+/**
+ * What the media pre-flight read from a local file's header (ROADMAP Phase 5,
+ * `api/media.ts`). Advisory: it is reported next to the plan, never digested,
+ * never re-checked at apply time and never a reason to refuse — TikTok remains
+ * the judge, and a field the probe could not read is simply absent.
+ */
+export interface MediaCheck {
+  container: MediaContainer;
+  codec?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  duration_sec?: number;
+  /** The documented limits the file breaks; empty when none was found. */
+  issues: readonly MediaIssue[];
+}
+
+/** One fixed phrase per issue, so no file-derived text reaches a hint. */
+const MEDIA_ISSUE_PHRASES: Readonly<Record<MediaIssue, string>> = Object.freeze({
+  container: 'container is not MP4, MOV or WebM',
+  codec: 'codec is not H.264, H.265, VP8 or VP9',
+  resolution: 'a side is outside 360-4096 px',
+  frame_rate: 'frame rate is outside 23-60 FPS',
+  duration: 'longer than the allowed post duration',
+});
+
+/**
+ * Probe a resolved local file for the preview. `maxDurationSec` is the
+ * creator's limit where `creator_info` was read; a draft passes nothing and
+ * gets the platform maximum. A file that cannot be read yields no check at all.
+ */
+export async function mediaPreflight(
+  path: string,
+  maxDurationSec?: number,
+): Promise<{ check?: MediaCheck; hint?: Hint }> {
+  const probe = await probeMediaFile(path);
+  if (probe === undefined) return {};
+  const issues = checkMedia(probe, maxDurationSec);
+  const check: MediaCheck = {
+    container: probe.container,
+    ...(probe.codec !== undefined && { codec: probe.codec }),
+    ...(probe.width !== undefined && { width: probe.width, height: probe.height }),
+    ...(probe.fps !== undefined && { fps: probe.fps }),
+    ...(probe.durationSec !== undefined && { duration_sec: probe.durationSec }),
+    issues,
+  };
+  return issues.length === 0 ? { check } : { check, hint: mediaPreflightNote(issues) };
+}
+
+/**
+ * The pre-flight found limits TikTok documents as rejections. A `note`, not a
+ * refusal: the plan is still valid, and the probe can be wrong about an exotic
+ * file — but the model should tell the user before spending the upload.
+ */
+export function mediaPreflightNote(issues: readonly MediaIssue[]): Hint {
+  return {
+    type: 'note',
+    text:
+      `Media pre-flight: ${issues.map((issue) => MEDIA_ISSUE_PHRASES[issue]).join('; ')} ` +
+      '(see data.media_check). TikTok will likely reject it after upload; re-encode first.',
+  };
 }
 
 /**
