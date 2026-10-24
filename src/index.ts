@@ -149,6 +149,9 @@ async function startServer(): Promise<void> {
   // live sessions, and a notification racing a closing transport is the one
   // avoidable "Not connected" in an otherwise clean shutdown.
   let stopWatch: () => Promise<void> = () => Promise.resolve();
+  // The webhook receiver starts before the watch; until then a revocation it
+  // applies is picked up by the watch's first poll instead.
+  let pollCredentials: () => Promise<void> = () => Promise.resolve();
   let closing = false;
   const shutdown = (reason: string): void => {
     if (closing) return;
@@ -186,8 +189,11 @@ async function startServer(): Promise<void> {
 
   if (settings.transport === 'http') {
     const { startHttpTransport } = await import('./mcp/http.js');
-    const { webhookRouteFor } = await import('./mcp/webhook.js');
-    const webhook = webhookRouteFor(settings, log, systemClock);
+    const { revocationListener, webhookRouteFor } = await import('./mcp/webhook.js');
+    // `authorization.removed` clears the profile's tokens; the credential
+    // watch then tells every session, polled now rather than on its next tick.
+    const onEvent = revocationListener({ log, onRevoked: () => pollCredentials() });
+    const webhook = webhookRouteFor(settings, log, systemClock, onEvent);
     const transport = await startHttpTransport({
       settings,
       log,
@@ -309,6 +315,9 @@ async function startServer(): Promise<void> {
     },
   });
   stopWatch = () => watch.stop();
+  pollCredentials = async () => {
+    await watch.poll();
+  };
   // Polls now rather than one tick from now, so a change made while the
   // transport was coming up is announced straight away.
   await watch.poll();

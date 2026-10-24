@@ -49,6 +49,7 @@ import {
 } from '../core/config.js';
 import { TikTokError } from '../core/errors.js';
 import type { Logger } from '../core/log.js';
+import { forgetRevokedProfile, type ForgetOutcome } from '../core/oauth.js';
 import { redactText } from '../core/redact.js';
 import type { Settings } from '../core/settings.js';
 
@@ -249,8 +250,11 @@ export interface WebhookReceiverOptions {
   log: Logger;
   /** `TT_WEBHOOK_TOLERANCE_S`. */
   toleranceS: number;
-  /** Called once per newly recorded event, after it is on disk. */
-  onEvent?: (record: WebhookRecord) => void;
+  /**
+   * Called once per newly recorded event, after it is on disk. Not awaited:
+   * TikTok gets its answer without waiting for whatever the event sets off.
+   */
+  onEvent?: (record: WebhookRecord) => void | Promise<void>;
   /** A test seam; defaults to {@link WEBHOOK_LOG_MAX_BYTES}. */
   maxBytes?: number;
 }
@@ -347,7 +351,7 @@ export function createWebhookReceiver(opts: WebhookReceiverOptions): WebhookRece
       ...(profile === undefined ? {} : { profile }),
       ...(publishId === undefined ? {} : { publish_id: publishId }),
     });
-    opts.onEvent?.(record);
+    void opts.onEvent?.(record);
     return 200;
   };
 }
@@ -366,7 +370,7 @@ export function webhookRouteFor(
   settings: Settings,
   log: Logger,
   clock: Clock,
-  onEvent?: (record: WebhookRecord) => void,
+  onEvent?: (record: WebhookRecord) => void | Promise<void>,
 ): WebhookRoute | undefined {
   if (settings.webhookPath === undefined) return undefined;
   const envFile = settings.envFile ?? resolveEnvFilePath(process.env);
@@ -380,5 +384,68 @@ export function webhookRouteFor(
       toleranceS: settings.webhookToleranceS,
       ...(onEvent === undefined ? {} : { onEvent }),
     }),
+  };
+}
+
+// revocation ------------------------------------------------------------
+
+/** The event TikTok sends when the user removes this app's access. */
+export const AUTHORIZATION_REMOVED = 'authorization.removed';
+
+export interface RevocationListenerOptions {
+  log: Logger;
+  /** The local clear; {@link forgetRevokedProfile} unless a test swaps it. */
+  forget?: (profile: string, openId: string) => Promise<ForgetOutcome>;
+  /**
+   * Called after a profile's tokens were cleared, so clients hear about it at
+   * once rather than on the credential watch's next poll.
+   */
+  onRevoked?: (profile: string) => Promise<void>;
+}
+
+/**
+ * The `onEvent` hook that acts on `authorization.removed`: the named profile's
+ * tokens are cleared locally (no upstream call — the grant is already gone),
+ * then `onRevoked` runs. Every other event, and one from an `open_id` no
+ * profile held, is ignored. The returned promise never rejects; a failure is
+ * logged, since the event itself is already safely on disk.
+ */
+export function revocationListener(
+  opts: RevocationListenerOptions,
+): (record: WebhookRecord) => Promise<void> {
+  const log = opts.log.child({ component: 'webhook' });
+  const forget =
+    opts.forget ??
+    ((profile: string, openId: string) =>
+      forgetRevokedProfile(profile, openId, { logger: log }));
+  return async (record) => {
+    if (record.event !== AUTHORIZATION_REMOVED || record.profile === undefined) return;
+    const profile = record.profile;
+    try {
+      const outcome = await forget(profile, record.user_openid);
+      if (outcome === 'unwritable') {
+        log.error(
+          'TikTok reported the access removed, but the tokens could not be cleared from the env file; remove them by hand',
+          { profile },
+        );
+        return;
+      }
+      if (outcome !== 'cleared') {
+        log.info('TikTok reported the access removed; nothing to clear', {
+          profile,
+          outcome,
+        });
+        return;
+      }
+      log.warn('TikTok reported the access removed; the tokens were cleared', {
+        profile,
+      });
+      await opts.onRevoked?.(profile);
+    } catch (cause) {
+      log.error('the access removal could not be applied', {
+        profile,
+        reason: redactText(String(cause)),
+      });
+    }
   };
 }

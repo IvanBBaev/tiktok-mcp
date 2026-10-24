@@ -242,6 +242,19 @@ brick one of them. Hence:
    `login --revoke` and is rejected on its own; without it, no revoke path
    touches the journal.
 
+### 4.2 Revocation from TikTok (`authorization.removed`)
+
+A user can remove the app's access from TikTok's own settings. With the
+webhook receiver on (`TT_WEBHOOK_PATH`, TIKTOK-API.md § 10), TikTok reports
+it as `authorization.removed`, and the server clears the matching profile's
+token fields under the env-file lock, as step 2 above does — without step 1,
+because the grant is already gone upstream. The clear applies only while the
+profile still holds the event's `open_id`, the journal is kept, and the
+credential watch tells every session to re-list tools and resources. A clear
+that cannot be written is logged as an error naming the profile; delete its
+token keys by hand or run `login --revoke`. Without the receiver the
+revocation surfaces on the next call as a rejected token.
+
 ### 4.1 OAuth wire shape (CC-A12)
 
 The token and revoke endpoints speak **flat OAuth-style JSON** (`error`,

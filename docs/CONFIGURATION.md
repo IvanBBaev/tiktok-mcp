@@ -410,6 +410,11 @@ loopback bind, either have the proxy rewrite `Host` to `127.0.0.1`, or bind past
 loopback with `TT_HTTP_INSECURE=1` and list the public name in
 `TT_HTTP_ALLOWED_HOSTS`. See SECURITY.md § Webhook receiver.
 
+An `authorization.removed` event — the user removed the app in TikTok's
+settings — clears the matching profile's tokens from the env file straight
+away and tells connected clients to re-list tools; the journal is kept, and a
+fresh `login` brings the profile back (AUTH.md § 4.2).
+
 ### Internal / test-only
 
 These are **not** part of the supported configuration surface: they exist so the

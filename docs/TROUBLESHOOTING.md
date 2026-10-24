@@ -282,6 +282,13 @@ until then. When a delivery is refused, the server logs why (component `webhook`
 | `503` | No app credentials are configured yet, or the server is shutting down | Run `login` first; TikTok retries |
 | `500` | `webhooks.ndjson` cannot be appended to | Check the directory and file permissions beside the env file |
 
+A profile whose tokens vanished while the server ran most likely received
+`authorization.removed`: the user removed the app in TikTok's settings, and
+the server cleared that profile (logged as a warning, component `webhook`; the
+event is in `tiktok_list_webhook_events`). Run `login` for it again. If the log
+says the tokens could not be cleared, delete the profile's token keys by hand
+or run `login --revoke`.
+
 ## Uninstall and data removal
 
 This server keeps no database. Everything it writes lives beside the resolved

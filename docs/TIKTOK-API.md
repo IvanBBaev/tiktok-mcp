@@ -753,6 +753,11 @@ developer portal (one URL for all events). This server receives them on
   carries `publish_id` (plus `post_id` once public, `reason` on failure);
   `authorization.removed` carries a `reason` code. An unnamed event is still
   logged.
+- **Revocation:** `authorization.removed` for an `open_id` a profile holds
+  clears that profile's tokens from the env file at once — nothing is sent
+  upstream, since the grant is already gone — and clients are told to re-list
+  tools and resources. A profile re-logged into another account in the
+  meantime is left alone; the publish journal is kept (AUTH.md § 4.2).
 
 ## Appendix A — sandbox probe index
 

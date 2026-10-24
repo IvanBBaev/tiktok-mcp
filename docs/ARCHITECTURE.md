@@ -181,8 +181,12 @@ await connectTransport(server);
   body, decodes the event, drops a redelivery by body digest (the last 1024 in
   memory, the log on disk), and appends the record to `webhooks.ndjson` before
   answering `200` — so an event TikTok saw acknowledged is on disk. An
-  `onEvent` callback fires once per new record after the write (the seam later
-  consumers such as revocation hook into). `tiktok_list_webhook_events` reads
+  `onEvent` callback fires once per new record after the write, not awaited.
+  `src/index.ts` passes `revocationListener`: on `authorization.removed` from a
+  known profile it clears that profile's tokens locally (`forgetRevokedProfile`
+  — no upstream call, and only while the profile still holds the event's
+  `open_id`), then polls the credential watch so every session gets
+  `list_changed` at once. `tiktok_list_webhook_events` reads
   the log back; it is a closed-world tool like the publish journal.
 
 ## 4. Tool definition pattern (`src/mcp/define.ts`)

@@ -24,6 +24,11 @@ plumbing stay in the commit history where they belong.
   (`publish` package; filter by event, `publish_id` or account). Register the
   path's public HTTPS URL as the app's callback URL in the TikTok developer
   portal; see CONFIGURATION.md § Transport and SECURITY.md § Webhook receiver.
+- **Revocation from TikTok.** With the webhook receiver on, an
+  `authorization.removed` event clears that profile's tokens locally at once
+  (nothing is sent upstream; the journal is kept), and connected clients are
+  told to re-list tools and resources. A profile logged into another account
+  since is left alone. See AUTH.md § 4.2.
 - **Per-host concurrency cap (`TT_MAX_CONCURRENT`, default 4).** In-flight HTTP
   attempts to one host are now bounded by a FIFO semaphore, so concurrent
   sessions on the HTTP transport cannot open an unbounded number of upstream

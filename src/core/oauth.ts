@@ -1071,3 +1071,65 @@ export async function revokeToken(
   );
   return { profile: name, envFilePath, upstream, cleared };
 }
+
+/**
+ * What `forgetRevokedProfile` did. `cleared`: the tokens were on disk and are
+ * gone. `absent`: there was nothing to clear. `other-account`: the profile now
+ * holds another TikTok account's login, which the revocation does not concern.
+ * `unwritable`: the env file could not be rewritten, so the keys are still on
+ * disk.
+ */
+export type ForgetOutcome = 'cleared' | 'absent' | 'other-account' | 'unwritable';
+
+/**
+ * Clear `profile`'s tokens locally because TikTok reported that the user
+ * removed this app's access (`authorization.removed`, TIKTOK-API.md § 10).
+ *
+ * Unlike {@link revokeToken} nothing is sent upstream: the grant is already
+ * gone at TikTok, and the token would only be refused. The clear happens only
+ * while the profile still holds the login of `openId`, the account the event
+ * names; a profile re-logged into another account in the meantime keeps it.
+ * The publish journal is untouched, as on every revoke.
+ */
+export async function forgetRevokedProfile(
+  profile: string,
+  openId: string,
+  deps: RevokeDeps = {},
+): Promise<ForgetOutcome> {
+  const name = normalizeProfileName(profile);
+  const env = deps.env ?? process.env;
+  const settings = deps.settings ?? loadSettings(env);
+  const clock = deps.clock ?? systemClock;
+  const logger = deps.logger ?? createLogger({ level: settings.logLevel, clock });
+  const envFilePath = resolveEnvFilePath(env);
+
+  return await withEnvLock(
+    envFilePath,
+    async (): Promise<ForgetOutcome> => {
+      const current = readProfile(name, await readEnvFile(envFilePath), env);
+      if (current.openId !== undefined && current.openId !== openId) {
+        return 'other-account';
+      }
+      // Dropped even when the file holds nothing: an adopted set would keep
+      // serving the dead token until it expired.
+      adopted.delete(name);
+      spentTokens.delete(name);
+      if (current.accessToken === undefined && current.refreshToken === undefined) {
+        return 'absent';
+      }
+      const { persisted } = await persistProfilePatch(envFilePath, name, CLEARED, {
+        clock,
+        logger,
+        ...(deps.rename === undefined ? {} : { rename: deps.rename }),
+      });
+      return persisted ? 'cleared' : 'unwritable';
+    },
+    {
+      waitMs: settings.envLockWaitMs,
+      staleMs: settings.envLockStaleMs,
+      heartbeatMs: settings.envLockHeartbeatMs,
+      clock,
+      logger,
+    },
+  );
+}

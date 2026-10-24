@@ -10,10 +10,12 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 
 import type { Logger } from '../src/core/log.js';
+import type { ForgetOutcome } from '../src/core/oauth.js';
 import { loadSettings } from '../src/core/settings.js';
 import { TikTokError } from '../src/core/errors.js';
 import { registerSecret } from '../src/core/redact.js';
 import {
+  AUTHORIZATION_REMOVED,
   RECENT_DIGESTS,
   WEBHOOK_LOG_MAX_BYTES,
   appendWebhookRecord,
@@ -21,6 +23,7 @@ import {
   readWebhookIdentity,
   readWebhookLog,
   resolveWebhookLogPath,
+  revocationListener,
   webhookRouteFor,
   type WebhookIdentity,
   type WebhookReceiverOptions,
@@ -324,7 +327,9 @@ async function receiver(over: Partial<WebhookReceiverOptions> = {}): Promise<{
     clock: mockClock(),
     log,
     toleranceS: 300,
-    onEvent: (r) => events.push(r),
+    onEvent: (r) => {
+      events.push(r);
+    },
     ...over,
   });
   return { receive, log, path, events, cleanup };
@@ -512,9 +517,9 @@ test('webhookRouteFor: serves the path and reads the env file per request', asyn
       TT_WEBHOOK_PATH: '/tiktok/events',
     });
     const events: WebhookRecord[] = [];
-    const route = webhookRouteFor(settings, recordingLogger(), mockClock(), (r) =>
-      events.push(r),
-    );
+    const route = webhookRouteFor(settings, recordingLogger(), mockClock(), (r) => {
+      events.push(r);
+    });
     assert.ok(route !== undefined);
     assert.equal(route.path, '/tiktok/events');
     assert.equal(await route.receive(signed(eventBody())), 200);
@@ -533,4 +538,109 @@ test('webhookRouteFor: falls back to the default env file location', () => {
   delete (settings as { envFile?: string }).envFile;
   const route = webhookRouteFor(settings, recordingLogger(), mockClock());
   assert.equal(route?.path, '/hook');
+});
+
+// revocation ------------------------------------------------------------
+
+function revoked(over: Partial<WebhookRecord> = {}): WebhookRecord {
+  return record({
+    event: AUTHORIZATION_REMOVED,
+    user_openid: 'open-brand',
+    profile: 'BRAND',
+    ...over,
+  });
+}
+
+function listener(outcome: ForgetOutcome | Error) {
+  const log = recordingLogger();
+  const forgets: [string, string][] = [];
+  const announced: string[] = [];
+  const onEvent = revocationListener({
+    log,
+    forget: (profile, openId) => {
+      forgets.push([profile, openId]);
+      return outcome instanceof Error
+        ? Promise.reject(outcome)
+        : Promise.resolve(outcome);
+    },
+    onRevoked: (profile) => {
+      announced.push(profile);
+      return Promise.resolve();
+    },
+  });
+  return { log, forgets, announced, onEvent };
+}
+
+test('revocation: authorization.removed clears the profile, then announces it', async () => {
+  const { log, forgets, announced, onEvent } = listener('cleared');
+  await onEvent(revoked());
+  assert.deepEqual(forgets, [['BRAND', 'open-brand']]);
+  assert.deepEqual(announced, ['BRAND']);
+  assert.equal(log.lines[0]?.level, 'warn');
+  assert.equal(log.lines[0]?.fields['profile'], 'BRAND');
+});
+
+test('revocation: other events, and an open_id no profile held, are ignored', async () => {
+  const { forgets, onEvent } = listener('cleared');
+  await onEvent(record({ profile: 'BRAND' }));
+  const stranger = revoked();
+  delete (stranger as { profile?: string }).profile;
+  await onEvent(stranger);
+  assert.deepEqual(forgets, []);
+});
+
+test('revocation: nothing to clear is logged and not announced', async () => {
+  for (const outcome of ['absent', 'other-account'] as const) {
+    const { log, announced, onEvent } = listener(outcome);
+    await onEvent(revoked());
+    assert.deepEqual(announced, []);
+    assert.equal(log.lines[0]?.level, 'info');
+    assert.equal(log.lines[0]?.fields['outcome'], outcome);
+  }
+});
+
+test('revocation: an unwritable env file is an error to fix by hand', async () => {
+  const { log, announced, onEvent } = listener('unwritable');
+  await onEvent(revoked());
+  assert.deepEqual(announced, []);
+  assert.equal(log.lines[0]?.level, 'error');
+  assert.match(log.lines[0]?.msg ?? '', /remove them by hand/u);
+});
+
+test('revocation: a failure is logged, redacted, and never rejects', async () => {
+  registerSecret('secret-in-error-0123');
+  const { log, announced, onEvent } = listener(new Error('boom secret-in-error-0123'));
+  await onEvent(revoked());
+  assert.deepEqual(announced, []);
+  assert.equal(log.lines[0]?.level, 'error');
+  assert.doesNotMatch(String(log.lines[0]?.fields['reason']), /secret-in-error-0123/u);
+});
+
+test('revocation: by default the env file the process names is cleared', async () => {
+  const { dir, cleanup } = await sandbox();
+  const previous = process.env['TT_ENV_FILE'];
+  try {
+    const envFile = join(dir, '.tiktok-mcp.env');
+    await writeFile(
+      envFile,
+      [
+        'TT_CLIENT_KEY=test-client-key',
+        'TT_CLIENT_SECRET=test-client-secret',
+        'TT_PROFILE_BRAND_ACCESS_TOKEN=act.brand',
+        'TT_PROFILE_BRAND_OPEN_ID=open-brand',
+        '',
+      ].join('\n'),
+      { mode: 0o600 },
+    );
+    process.env['TT_ENV_FILE'] = envFile;
+    // No `onRevoked`: the credential watch's next poll would announce it.
+    await revocationListener({ log: recordingLogger() })(revoked());
+    const after = await readFile(envFile, 'utf8');
+    assert.doesNotMatch(after, /act\.brand/u);
+    assert.match(after, /TT_CLIENT_KEY=test-client-key/u);
+  } finally {
+    if (previous === undefined) delete process.env['TT_ENV_FILE'];
+    else process.env['TT_ENV_FILE'] = previous;
+    await cleanup();
+  }
 });

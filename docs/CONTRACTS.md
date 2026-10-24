@@ -659,6 +659,13 @@ export interface RevokeOutcome {
 }
 export function revokeToken(profile: string, deps?: RevokeDeps): Promise<RevokeOutcome>;
 
+/** `authorization.removed` (TIKTOK-API.md § 10): clears the token fields locally,
+ *  nothing upstream, and only while the profile still holds `openId`. Drops
+ *  the adopted set and spent-token memo too. The journal is untouched. */
+export type ForgetOutcome = 'cleared' | 'absent' | 'other-account' | 'unwritable';
+export function forgetRevokedProfile(profile: string, openId: string,
+  deps?: RevokeDeps): Promise<ForgetOutcome>;
+
 /** Drops the in-process credential cache (adopted set + spent-token memo).
  *  Test seam: module state is per-process by design. */
 export function resetTokenCache(): void;
@@ -1736,7 +1743,7 @@ export function readWebhookIdentity(envFile: string,
 export interface WebhookReceiverOptions {
   identity: () => Promise<WebhookIdentity | undefined>;  // read per request
   logPath: string; clock: Clock; log: Logger; toleranceS: number;
-  onEvent?: (record: WebhookRecord) => void;  // once per new record, after disk
+  onEvent?: (record: WebhookRecord) => void | Promise<void>;  // once per new record, after disk; not awaited
   maxBytes?: number;
 }
 export interface WebhookDelivery { signature: string | undefined; rawBody: Buffer }
@@ -1747,7 +1754,18 @@ export function createWebhookReceiver(opts: WebhookReceiverOptions): WebhookRece
 
 export interface WebhookRoute { path: string; receive: WebhookReceiver }
 export function webhookRouteFor(settings: Settings, log: Logger, clock: Clock,
-  onEvent?: (record: WebhookRecord) => void): WebhookRoute | undefined;
+  onEvent?: (record: WebhookRecord) => void | Promise<void>): WebhookRoute | undefined;
+
+export const AUTHORIZATION_REMOVED = 'authorization.removed';
+export interface RevocationListenerOptions {
+  log: Logger;
+  forget?: (profile: string, openId: string) => Promise<ForgetOutcome>;  // default forgetRevokedProfile
+  onRevoked?: (profile: string) => Promise<void>;  // after a `cleared` outcome only
+}
+/** The `onEvent` for `authorization.removed` from a known profile; ignores every
+ *  other record. The returned promise never rejects — failures are logged. */
+export function revocationListener(opts: RevocationListenerOptions):
+  (record: WebhookRecord) => Promise<void>;
 ```
 
 ## mcp/plan-store.ts
@@ -3398,3 +3416,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-24 | Added `api/media.ts` (`probeMediaFile`, `inspectMovie`, `checkMedia`, `MEDIA_LIMITS`, `ACCEPTED_CODECS`, `MAX_MOOV_BYTES`) and, in `tools/publish-common`, `MediaCheck`, `mediaPreflight` and `mediaPreflightNote`; `WritePreview` and `DraftPreview` gain the optional `media_check` — additive. The pre-flight is advisory (ROADMAP Phase 5, CC-D9): a local video file is probed at preview only, the result is not digested and not re-checked at apply, and a file TikTok would reject still gets a plan with one `note` hint, because TikTok remains the authority and a local refusal would invent a catalog code. § Extended harness gains `mp4.ts` | owner (Phase 5) |
 | 2026-10-24 | `core/http`, `core/settings`: per-host concurrency (ARCHITECTURE § 6 item 4). `TtRequestOptions` and `PutChunkOptions` gain the additive `maxConcurrent?`; `OauthRequestOptions` now also omits it; new export `hostSlotsInUse()`. `Settings.maxConcurrent` / `TT_MAX_CONCURRENT` (default 4, `1`–`64`) return — this reverses the 2026-09-01 removal, now that the semaphore exists and the field is read: `api/context` passes it to every `ttRequest`, `api/upload` to every `putChunk`. A slot covers one attempt (released before a retry backoff), queueing is FIFO per hostname and outside the per-attempt timeout, an abort while queued rejects with the signal's reason, and `oauthRequest` and the `login` CLI's call stay unbounded so a token refresh can never deadlock behind the slots it unblocks. The `cc-f1` removed-variable tests in `test/config.test.ts` now use a fictional `TT_RETIRED_KNOB` | integrator |
 | 2026-10-24 | `core/settings`: additive `Settings.webhookPath?` (`TT_WEBHOOK_PATH`, `/` plus 1–127 URL-safe characters, not `/mcp`, rejected unless `TT_TRANSPORT=http`) and `Settings.webhookToleranceS` (`TT_WEBHOOK_TOLERANCE_S`, default 300, `30`–`3600`). New modules `api/webhook` (signature verification, event decoding) and `mcp/webhook` (event log `webhooks.ndjson`, identity, receiver, `webhookRouteFor`). `mcp/http`: additive `HttpTransportOptions.webhook?` — the exact path is bearer-exempt, POST only, 64 KiB cap. New tool `tiktok_list_webhook_events` (`publish` package, closed-world, TOOLS.md § 3.8); TOOLS.md §§ 3.8–3.12 renumber to 3.9–3.13, and `mcp/server`'s `ACCOUNT_IS_FILTER` includes the new tool. No existing signature changed | integrator |
+| 2026-10-24 | `core/oauth`: additive `forgetRevokedProfile` and `ForgetOutcome` — the local-only clear behind `authorization.removed`. `mcp/webhook`: `onEvent` may return a promise (still not awaited), plus `AUTHORIZATION_REMOVED`, `RevocationListenerOptions` and `revocationListener`, which `src/index.ts` passes to `webhookRouteFor` | integrator |

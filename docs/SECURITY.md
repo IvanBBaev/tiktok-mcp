@@ -460,6 +460,10 @@ that answers without the bearer token, so it is held to a narrower contract:
   the event content — never a token or the signature. The secret is re-read
   from the env file on each delivery, so a rotated secret applies without a
   restart.
+- **The only thing an event changes is a removal.** `authorization.removed`
+  clears the named profile's tokens (AUTH.md § 4.2); no event can add,
+  widen or post anything. A forged one cannot pass the signature, and a
+  genuine one only drops a grant TikTok already withdrew.
 
 ### Least-privilege scopes
 

@@ -35,6 +35,7 @@ import {
   buildAuthUrl,
   ensureFreshAccessToken,
   exchangeCode,
+  forgetRevokedProfile,
   pkceChallenge,
   resetTokenCache,
   revokeToken,
@@ -2264,6 +2265,99 @@ test('a retry that fails for another reason surfaces that reason, not auth_expir
       },
     );
     assert.equal(bodies.length, 2);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// forgetRevokedProfile (TIKTOK-API.md § 10 — authorization.removed)
+// ---------------------------------------------------------------------------
+
+const TOKEN_KEYS = [
+  'TT_ACCESS_TOKEN',
+  'TT_TOKEN_EXPIRES_AT',
+  'TT_REFRESH_TOKEN',
+  'TT_REFRESH_EXPIRES_AT',
+  'TT_OPEN_ID',
+  'TT_SCOPES',
+] as const;
+
+test('forget clears the sextet locally, sends nothing and drops the adopted token', async () => {
+  const fx = await fixture();
+  try {
+    await fx.write({ ...storedTokens(), UNRELATED_KEY: 'left-alone' });
+    const deps = {
+      env: fx.env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+    };
+    // An empty script: an upstream call would throw ScriptFetchExhaustedError.
+    const stub = scriptFetch([]);
+    await withFetch(stub, async () => {
+      assert.equal(await ensureFreshAccessToken('DEFAULT', deps), 'act.stored');
+      assert.equal(
+        await forgetRevokedProfile('DEFAULT', 'open-id-stored', deps),
+        'cleared',
+      );
+      // The adopted copy went with the file: nothing serves the dead token.
+      await assert.rejects(ensureFreshAccessToken('DEFAULT', deps));
+    });
+    assert.equal(stub.calls.length, 0);
+    const stored = await fx.read();
+    for (const key of TOKEN_KEYS) assert.equal(stored[key], '', key);
+    assert.equal(stored['UNRELATED_KEY'], 'left-alone');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('forget leaves a profile now logged into another account alone', async () => {
+  const fx = await fixture();
+  try {
+    const outcome = await forgetRevokedProfile('DEFAULT', 'open-id-other', {
+      env: fx.env,
+      logger: fx.logger,
+    });
+    assert.equal(outcome, 'other-account');
+    assert.equal((await fx.read())['TT_ACCESS_TOKEN'], 'act.stored');
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('forget on a profile with no tokens left is absent, not an error', async () => {
+  const fx = await fixture();
+  try {
+    await fx.write({ UNRELATED_KEY: 'x' });
+    assert.equal(
+      await forgetRevokedProfile('DEFAULT', 'open-id-stored', { env: fx.env }),
+      'absent',
+    );
+    await fx.write({ TT_REFRESH_TOKEN: 'rft.only' });
+    assert.equal(
+      await forgetRevokedProfile('DEFAULT', 'open-id-stored', { env: fx.env }),
+      'cleared',
+    );
+  } finally {
+    await fx.cleanup();
+  }
+});
+
+test('forget whose rewrite fails reports unwritable and the token stays on disk', async () => {
+  const fx = await fixture();
+  try {
+    const outcome = await forgetRevokedProfile('DEFAULT', 'open-id-stored', {
+      env: fx.env,
+      settings: fx.settings,
+      clock: fx.clock,
+      logger: fx.logger,
+      rename: (): Promise<void> =>
+        Promise.reject(Object.assign(new Error('no space left'), { code: 'ENOSPC' })),
+    });
+    assert.equal(outcome, 'unwritable');
+    assert.equal((await fx.read())['TT_ACCESS_TOKEN'], 'act.stored');
   } finally {
     await fx.cleanup();
   }
