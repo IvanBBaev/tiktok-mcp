@@ -29,6 +29,13 @@ plumbing stay in the commit history where they belong.
   (nothing is sent upstream; the journal is kept), and connected clients are
   told to re-list tools and resources. A profile logged into another account
   since is left alone. See AUTH.md § 4.2.
+- **Publish-status subscriptions.** Clients can now `resources/subscribe` to
+  `tiktok://publish/{publish_id}/status` and get
+  `notifications/resources/updated` when the attempt moves — at once from a
+  webhook event when the receiver is on, otherwise from a 15 s poll that stops
+  as soon as the status is terminal. Other resources are subscribable but are
+  never polled, so subscribing spends no rate limit on them. See TOOLS.md
+  § 7.4.
 - **Per-host concurrency cap (`TT_MAX_CONCURRENT`, default 4).** In-flight HTTP
   attempts to one host are now bounded by a FIFO semaphore, so concurrent
   sessions on the HTTP transport cannot open an unbounded number of upstream

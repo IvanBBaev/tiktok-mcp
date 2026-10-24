@@ -40,6 +40,7 @@ src/
     prompts.ts      #   PromptSpec contract: definePrompt / describePrompt / getPrompt (§ 5.1)
     resources.ts    #   ResourceSpec contract: a read tool at a tiktok:// URI (§ 5.1)
     completions.ts  #   CompletionSource + complete(): the completion/complete sources (§ 5.1)
+    subscriptions.ts #  per-session resources/subscribe hub: poll watched specs, push updates (§ 5.1)
     lifecycle.ts    #   credential watch → scope markers + tools/ + resources/list_changed
   tools/            # Layer 3 — declarative ToolSpec files
     index.ts        #   PACKAGES manifest-in-code — the ONE tool-surface source (§ 5)
@@ -186,8 +187,11 @@ await connectTransport(server);
   known profile it clears that profile's tokens locally (`forgetRevokedProfile`
   — no upstream call, and only while the profile still holds the event's
   `open_id`), then polls the credential watch so every session gets
-  `list_changed` at once. `tiktok_list_webhook_events` reads
-  the log back; it is a closed-world tool like the publish journal.
+  `list_changed` at once. A record with a `publish_id` is also forwarded to
+  every live session as `notifyResourcesUpdated(isPublishStatusOf(…))`, so a
+  client subscribed to that status resource hears of it at once.
+  `tiktok_list_webhook_events` reads the log back; it is a closed-world tool
+  like the publish journal.
 
 ## 4. Tool definition pattern (`src/mcp/define.ts`)
 
@@ -327,6 +331,19 @@ adds surface of its own:
   resource is exactly as available as its tool. A completion ref is matched
   against those same enabled lists, so a disabled package's prompt or resource
   is unknown there too.
+- **Subscriptions** (`src/mcp/subscriptions.ts`, TOOLS.md § 7.4). Each
+  `createServer` builds one hub — a subscription is a promise to one session,
+  and the HTTP transport builds one `Server` per session — and closes it in
+  `server.onclose`. `resources/subscribe` matches the URI exactly like a read,
+  so the hub never holds a URI that cannot be read. Polling is opt-in per spec
+  through `ResourceSpec.watch` (only the publish status declares one): a silent
+  baseline at subscribe time, then one shared loop on the injected `Clock`
+  that re-reads through the same `callTool` pipeline, compares envelopes minus
+  the `volatile` keys, and stops for a URI once `settled` holds or a read fails
+  non-retryably. The loop runs only while something is polled, so an idle or
+  finished subscription costs no timer and no request. Pushes arrive through
+  `McpServerHandle.notifyResourcesUpdated` and drop the baseline, so a webhook
+  and the next poll never announce the same change twice.
 
 ## 6. HTTP client (`src/core/http.ts`)
 

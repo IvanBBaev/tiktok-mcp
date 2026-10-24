@@ -96,6 +96,22 @@ export interface ResourceSpec {
    * of every template from the profiles ({@link resourceCompletion}).
    */
   readonly completions?: Readonly<Record<string, CompletionSource>>;
+
+  /**
+   * Makes a subscription to this resource polled (`mcp/subscriptions`):
+   * re-read on an interval until `settled`, notifying when the answer moves.
+   * Omitted, a subscription is notified only by a pushed event — the right
+   * default for any read that spends the user's rate limit on every call.
+   */
+  readonly watch?: ResourceWatch;
+}
+
+/** How a subscribed resource is polled (see {@link ResourceSpec.watch}). */
+export interface ResourceWatch {
+  /** Top-level `data` fields that change on every read, e.g. `checked_at`. */
+  readonly volatile?: readonly string[];
+  /** True once no later read can return anything different. */
+  readonly settled: (data: unknown) => boolean;
 }
 
 /** What `resources/read` resolved a requested path to. */
@@ -190,6 +206,7 @@ export function defineResource(spec: ResourceSpec): ResourceSpec {
 
   Object.freeze(spec.args);
   if (spec.completions !== undefined) Object.freeze(spec.completions);
+  if (spec.watch !== undefined) Object.freeze(spec.watch);
   return Object.freeze(spec);
 }
 

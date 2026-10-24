@@ -1443,6 +1443,11 @@ export interface ServerOptions {
   prompts?: readonly PromptSpec[];
   resources?: readonly ResourceSpec[];
   runtime: ServerRuntime;
+  /** Polls subscribed resources that declare a `watch` (TOOLS.md § 7.4).
+   *  Absent ⇒ nothing is polled; pushes still reach subscribers. */
+  clock?: Clock;
+  /** Poll period; default DEFAULT_SUBSCRIPTION_POLL_MS (mcp/subscriptions). */
+  subscriptionPollMs?: number;
 }
 
 export interface McpServerHandle {
@@ -1453,6 +1458,10 @@ export interface McpServerHandle {
    *  Descriptions are recomputed per list request, so there is nothing to
    *  refresh here. */
   notifyListChanged(): Promise<void>;
+  /** Send `resources/updated` for every URI this session subscribed to whose
+   *  match the predicate accepts (TOOLS.md § 7.4). Resolves the number sent;
+   *  never rejects. */
+  notifyResourcesUpdated(predicate: (match: ResourceMatch) => boolean): Promise<number>;
 }
 
 export function createServer(opts: ServerOptions): McpServerHandle;
@@ -1531,10 +1540,15 @@ Call-pipeline rules that are contract, not implementation detail:
   parsed.uri)` — concrete equality first, then the templates, both in manifest
   order — then `callTool(match.spec.tool, resourceArgs(match, parsed), runtime,
   { signal })` followed by `resourceContents` — no second pipeline. A path no
-  spec matches is `Unknown resource`. Capabilities are `{ tools: { listChanged:
-  true }, prompts: {}, resources: { listChanged: true }, completions: {},
-  logging: {} }` — `completions` because the SDK refuses a
-  `completion/complete` handler without it.
+  spec matches is `Unknown resource`. `resources/subscribe` parses and matches
+  the URI exactly as a read does (same `Unknown resource` error) and hands it
+  to the session's `mcp/subscriptions` hub, whose `read` is that same
+  `callTool` and whose `send` is `server.sendResourceUpdated`;
+  `resources/unsubscribe` always answers `{}`; `server.onclose` closes the hub.
+  Capabilities are `{ tools: { listChanged: true }, prompts: {}, resources: {
+  listChanged: true, subscribe: true }, completions: {}, logging: {} }` —
+  `completions` because the SDK refuses a `completion/complete` handler
+  without it.
 
 ## mcp/http.ts
 
@@ -2311,6 +2325,17 @@ export interface ResourceSpec {
    *  resource; only names the URI carries. Absent ⇒ a parameter completes
    *  to nothing. Never sent by describeResource / describeResourceTemplate. */
   readonly completions?: Readonly<Record<string, CompletionSource>>;
+  /** Present ⇒ a subscription to this resource is polled (mcp/subscriptions,
+   *  TOOLS.md § 7.4) until `settled` says no later read can differ. Absent ⇒
+   *  it is notified only by a push. Frozen by defineResource. */
+  readonly watch?: ResourceWatch;
+}
+
+export interface ResourceWatch {
+  /** Top-level `data` keys a poll ignores when comparing envelopes. */
+  readonly volatile?: readonly string[];
+  /** True once the answer is final; polling that URI stops. */
+  readonly settled: (data: unknown) => boolean;
 }
 
 /** What `resources/read` resolved a requested path to. */
@@ -2412,6 +2437,48 @@ export function resourceContents(
   settings: Settings,
 ): ReadResourceResult;
 ```
+
+## mcp/subscriptions.ts
+
+The per-session state behind `resources/subscribe`, `resources/unsubscribe` and
+`notifications/resources/updated` (TOOLS.md § 7.4). Framework-free: reading and
+sending are injected, so `mcp/server` stays the only SDK-facing module.
+
+```ts
+export const DEFAULT_SUBSCRIPTION_POLL_MS = 15_000;
+
+export interface SubscriptionHubOptions {
+  read: (match: ResourceMatch, parsed: ParsedResourceUri) => Promise<ToolResult<unknown>>;
+  send: (uri: string) => Promise<void>;
+  clock?: Clock;            // absent ⇒ nothing is polled
+  intervalMs?: number;      // default DEFAULT_SUBSCRIPTION_POLL_MS
+  logger?: Logger;
+}
+
+export interface SubscriptionHub {
+  subscribe(uri: string, match: ResourceMatch, parsed: ParsedResourceUri): void; // re-subscribe is a no-op
+  unsubscribe(uri: string): void;                                                // unknown uri is fine
+  notify(predicate: (match: ResourceMatch) => boolean): Promise<number>;         // never rejects
+  subscribed(): readonly string[];                                               // subscription order
+  close(): Promise<void>;                                                        // idempotent
+}
+
+export function createSubscriptionHub(opts: SubscriptionHubOptions): SubscriptionHub;
+```
+
+- A subscription is **polled** when the hub has a clock, the spec has a
+  `watch`, and it has not settled. Subscribing reads a silent baseline at once;
+  one loop then sleeps `intervalMs` and re-reads every polled entry in turn.
+  The loop exists only while something is polled.
+- A read is compared by `canonicalJson({ ok, data minus watch.volatile, error:
+  error.code })`; a difference from a previous baseline sends. The entry
+  settles on `watch.settled(data)` or a failure with `retryable: false`.
+- `notify` sends to each accepted entry and drops its baseline, so the next
+  poll re-seeds silently.
+- A read that throws, or a `send` that rejects, is logged as a warning; nothing
+  rejects. A read answered after its entry was unsubscribed or the hub closed
+  is dropped. `close` aborts the sleep, forgets every entry and awaits the loop
+  and any read in flight, so nothing is sent after it resolves.
 
 ## tools/publish-common.ts
 
@@ -2885,6 +2952,14 @@ export const publishStatusResource: ResourceSpec;  // tiktok://publish/{publish_
 
 /** Frozen, in that order — the template last; every uri and name unique. */
 export const RESOURCES: readonly ResourceSpec[];
+
+/** True when `data.status` is a terminal publish status — the status
+ *  resource's `watch.settled`; its `watch.volatile` is `['checked_at']`. */
+export function settledPublishStatus(data: unknown): boolean;
+
+/** True when `match` is the status resource for `publishId` — the predicate
+ *  `src/index.ts` hands `notifyResourcesUpdated` for a webhook event. */
+export function isPublishStatusOf(match: ResourceMatch, publishId: string): boolean;
 ```
 
 ## cli/index.ts (dispatch + process seams)
@@ -3417,3 +3492,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-24 | `core/http`, `core/settings`: per-host concurrency (ARCHITECTURE § 6 item 4). `TtRequestOptions` and `PutChunkOptions` gain the additive `maxConcurrent?`; `OauthRequestOptions` now also omits it; new export `hostSlotsInUse()`. `Settings.maxConcurrent` / `TT_MAX_CONCURRENT` (default 4, `1`–`64`) return — this reverses the 2026-09-01 removal, now that the semaphore exists and the field is read: `api/context` passes it to every `ttRequest`, `api/upload` to every `putChunk`. A slot covers one attempt (released before a retry backoff), queueing is FIFO per hostname and outside the per-attempt timeout, an abort while queued rejects with the signal's reason, and `oauthRequest` and the `login` CLI's call stay unbounded so a token refresh can never deadlock behind the slots it unblocks. The `cc-f1` removed-variable tests in `test/config.test.ts` now use a fictional `TT_RETIRED_KNOB` | integrator |
 | 2026-10-24 | `core/settings`: additive `Settings.webhookPath?` (`TT_WEBHOOK_PATH`, `/` plus 1–127 URL-safe characters, not `/mcp`, rejected unless `TT_TRANSPORT=http`) and `Settings.webhookToleranceS` (`TT_WEBHOOK_TOLERANCE_S`, default 300, `30`–`3600`). New modules `api/webhook` (signature verification, event decoding) and `mcp/webhook` (event log `webhooks.ndjson`, identity, receiver, `webhookRouteFor`). `mcp/http`: additive `HttpTransportOptions.webhook?` — the exact path is bearer-exempt, POST only, 64 KiB cap. New tool `tiktok_list_webhook_events` (`publish` package, closed-world, TOOLS.md § 3.8); TOOLS.md §§ 3.8–3.12 renumber to 3.9–3.13, and `mcp/server`'s `ACCOUNT_IS_FILTER` includes the new tool. No existing signature changed | integrator |
 | 2026-10-24 | `core/oauth`: additive `forgetRevokedProfile` and `ForgetOutcome` — the local-only clear behind `authorization.removed`. `mcp/webhook`: `onEvent` may return a promise (still not awaited), plus `AUTHORIZATION_REMOVED`, `RevocationListenerOptions` and `revocationListener`, which `src/index.ts` passes to `webhookRouteFor` | integrator |
+| 2026-10-24 | Resource subscriptions (TOOLS.md § 7.4). New module `mcp/subscriptions` (`createSubscriptionHub`, `DEFAULT_SUBSCRIPTION_POLL_MS`). `mcp/resources`: additive `ResourceSpec.watch?` and `ResourceWatch`. `mcp/server`: additive `ServerOptions.clock?` / `subscriptionPollMs?` and `McpServerHandle.notifyResourcesUpdated`; the `resources` capability gains `subscribe: true`. `tools/resources`: the status resource declares a `watch`; new exports `settledPublishStatus`, `isPublishStatusOf`. `src/index.ts` passes `systemClock` and forwards a webhook event with a `publish_id` to every session | integrator |

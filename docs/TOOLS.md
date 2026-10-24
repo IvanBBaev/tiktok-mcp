@@ -1336,7 +1336,8 @@ enabled, a resource when the tool it mirrors is — so `TT_TOOL_PACKAGES`, `TT_P
 below are normative; the rendered prompt text and the resource descriptions are
 implementation, pinned by tests rather than restated here. A third utility,
 **argument completion** (§ 7.3), offers values for the arguments of both from
-local data alone — it adds no surface either.
+local data alone — it adds no surface either; **resource subscriptions**
+(§ 7.4) tell a client when a resource it watches has moved.
 
 An unknown prompt name, an unknown resource URI, an invalid prompt argument and
 a completion ref that names none of them (§ 7.3) are **protocol errors**
@@ -1447,7 +1448,8 @@ Argument rules (CC-G1's stance, applied at the protocol layer because
 
 ### 7.2 Resources
 
-Capability: `resources: { listChanged: true }`.
+Capability: `resources: { listChanged: true, subscribe: true }` (subscriptions:
+§ 7.4).
 
 | URI | Name | Mirrors | Package |
 |---|---|---|---|
@@ -1492,7 +1494,8 @@ are contract:
   it as for any id TikTok does not know.
 - **Polling.** A read of `tiktok://publish/{publish_id}/status` is one status
   request (TikTok allows 30 per minute, § 3.6); a client that wants to follow
-  processing reads again, or calls the tool with `wait_for_completion` left on.
+  processing reads again, subscribes to the URI (§ 7.4), or calls the tool
+  with `wait_for_completion` left on.
 - **Read result.** One `contents` entry: `uri` echoes the request verbatim
   (query included), `mimeType: "application/json"`, `text` is the § 2.1
   envelope exactly as `tools/call` would mirror it in its text block —
@@ -1579,6 +1582,42 @@ Rules:
   `prompts/list` describes an argument by `name`, `description` and `required`
   only, and `resources/templates/list` is unchanged. A client learns what
   completes by asking.
+
+### 7.4 Resource subscriptions
+
+`resources/subscribe` takes any URI `resources/read` accepts — a concrete URI
+or a template URI with its parameter filled in
+(`tiktok://publish/v_abc/status`), query included — and answers `{}`. While the
+subscription lasts, the server sends `notifications/resources/updated` with
+that URI, exactly as subscribed, when the resource has moved; the client then
+reads it. `resources/unsubscribe` answers `{}` for any URI, subscribed or not.
+
+- **Per session.** A subscription belongs to the MCP session that made it and
+  ends with it. Subscribing twice to one URI is one subscription; two spellings
+  of a URI (`?account=work` and none) are two.
+- **Unknown URI.** The § 7.2 rule: a URI `resources/read` would refuse ⇒
+  `-32602 Unknown resource: <uri as sent>`, so a subscription can never watch
+  something that cannot be read.
+- **Pushed.** Over HTTP with `TT_WEBHOOK_PATH` set (§ 3.8), a webhook event that
+  carries a `publish_id` notifies every session subscribed to
+  `tiktok://publish/{that id}/status` (any account spelling) at once.
+- **Polled.** `tiktok://publish/{publish_id}/status` is also re-read every 15 s
+  while subscribed, so subscriptions work without a webhook. The first read is
+  taken at subscribe time as a silent baseline; a later read notifies when its
+  envelope differs — `ok`, `data` and the error code, ignoring `checked_at`.
+  Polling that URI stops once its status is terminal (`PUBLISH_COMPLETE`,
+  `SEND_TO_USER_INBOX`, `FAILED`) or a read fails with `retryable: false`; a
+  retryable failure keeps polling, and the same failure twice is not a change.
+  A pushed notification resets the baseline, so the next poll does not
+  announce the same change again. Each poll is one status request and counts
+  against TikTok's 30 per minute (§ 3.6).
+- **Not polled.** Every other resource is subscribable but notified only by a
+  push — none exists for them today. Re-reading `tiktok://videos/recent` or
+  `tiktok://user/info` on a timer would spend the user's rate limit on a guess;
+  `notifications/resources/list_changed` (§ 7.2) still covers availability.
+- **Degrades.** A poll that throws or a notification that cannot be delivered
+  is logged as a warning on stderr; nothing is retried faster and the
+  subscription stays. The client can always read the URI itself.
 
 ---
 

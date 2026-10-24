@@ -26,7 +26,12 @@
  * from it except the bootstrap.
  */
 
-import { defineResource, type ResourceSpec } from '../mcp/resources.js';
+import { isTerminalStatus } from '../api/publish.js';
+import {
+  defineResource,
+  type ResourceMatch,
+  type ResourceSpec,
+} from '../mcp/resources.js';
 import { getAuthStatusTool } from './auth.js';
 import {
   getCreatorInfoTool,
@@ -150,6 +155,11 @@ export const publishJournalResource = defineResource({
  * (TikTok limit 30 requests/min). A template — listed by
  * `resources/templates/list` only — because without a publish_id there is
  * nothing to read.
+ *
+ * Subscribable without polling by hand: the server re-reads a subscribed URI
+ * until the status is terminal and sends `notifications/resources/updated`
+ * when it moves (`checked_at` alone is not a move), and a `post.publish.*`
+ * webhook event for the same publish_id notifies at once.
  */
 export const publishStatusResource = defineResource({
   uri: 'tiktok://publish/{publish_id}/status',
@@ -167,7 +177,23 @@ export const publishStatusResource = defineResource({
   // A client filling in the template is offered the ids the journal recorded,
   // newest first — the ones a read here could say anything about.
   completions: { publish_id: { kind: 'publish_ids' } },
+  watch: { volatile: ['checked_at'], settled: settledPublishStatus },
 });
+
+/** A publish status no later read can change — `isTerminalStatus` of the data. */
+export function settledPublishStatus(data: unknown): boolean {
+  if (typeof data !== 'object' || data === null) return false;
+  const status = (data as { status?: unknown }).status;
+  return typeof status === 'string' && isTerminalStatus(status);
+}
+
+/**
+ * True when `match` is the publish-status resource of `publishId` — how the
+ * composition root routes a webhook event to the subscriptions it concerns.
+ */
+export function isPublishStatusOf(match: ResourceMatch, publishId: string): boolean {
+  return match.spec === publishStatusResource && match.params['publish_id'] === publishId;
+}
 
 /** Every resource, in `resources/list` order; the template comes last. */
 export const RESOURCES: readonly ResourceSpec[] = Object.freeze([

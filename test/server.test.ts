@@ -7,10 +7,14 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import {
+  ErrorCode,
+  McpError,
+  ResourceUpdatedNotificationSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
-import { systemClock } from '../src/core/clock.js';
+import { systemClock, type Clock } from '../src/core/clock.js';
 import { TikTokError } from '../src/core/errors.js';
 import { createLogger, type Logger } from '../src/core/log.js';
 import { loadSettings, TOOL_PACKAGES, type Settings } from '../src/core/settings.js';
@@ -41,11 +45,12 @@ import {
   toCallToolResult,
   unavailableMarker,
   type ProfileInfo,
+  type McpServerHandle,
   type ServerRuntime,
   type ToolPackageLike,
 } from '../src/mcp/server.js';
 import { deferred, flush } from './harness/deferred.js';
-import { baselineEnv, fsSandbox } from './helpers.js';
+import { baselineEnv, fsSandbox, mockClock } from './helpers.js';
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -1022,8 +1027,10 @@ async function connectedClient(
     prompts?: readonly PromptSpec[];
     resources?: readonly ResourceSpec[];
     runtime?: ServerRuntime;
+    clock?: Clock;
+    subscriptionPollMs?: number;
   } = {},
-): Promise<{ client: Client; close: () => Promise<void> }> {
+): Promise<{ client: Client; handle: McpServerHandle; close: () => Promise<void> }> {
   const runtime = opts.runtime ?? runtimeOf();
   const handle = createServer({
     name: 'tiktok-mcp-ai',
@@ -1031,6 +1038,10 @@ async function connectedClient(
     packages: opts.packages ?? packagesOf(echoTool()),
     ...(opts.prompts === undefined ? {} : { prompts: opts.prompts }),
     ...(opts.resources === undefined ? {} : { resources: opts.resources }),
+    ...(opts.clock === undefined ? {} : { clock: opts.clock }),
+    ...(opts.subscriptionPollMs === undefined
+      ? {}
+      : { subscriptionPollMs: opts.subscriptionPollMs }),
     runtime,
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -1041,6 +1052,7 @@ async function connectedClient(
   ]);
   return {
     client,
+    handle,
     close: async (): Promise<void> => {
       await client.close();
       await handle.server.close();
@@ -1392,13 +1404,13 @@ function envelopeOf(
   return JSON.parse(content.text) as ReturnType<typeof envelopeOf>;
 }
 
-test('the server advertises prompts, resources, completions and the list_changed flags', async () => {
+test('the server advertises prompts, resources (with subscriptions), completions and the list_changed flags', async () => {
   const { client, close } = await connectedClient();
   try {
     const capabilities = client.getServerCapabilities();
     assert.deepEqual(capabilities?.tools, { listChanged: true });
     assert.deepEqual(capabilities?.prompts, {});
-    assert.deepEqual(capabilities?.resources, { listChanged: true });
+    assert.deepEqual(capabilities?.resources, { listChanged: true, subscribe: true });
     assert.deepEqual(capabilities?.completions, {});
     assert.deepEqual(capabilities?.logging, {});
   } finally {
@@ -1930,7 +1942,7 @@ test('a server built without prompts or resources answers empty lists', async ()
 });
 
 // ---------------------------------------------------------------------------
-// completion/complete (TOOLS.md § 7.3)
+// completion/complete (TOOLS.md § 7.4)
 // ---------------------------------------------------------------------------
 
 /** The three-profile runtime the completion tests read `account` from. */
@@ -2872,4 +2884,144 @@ test('a stdio drain ends when its signal aborts: already on entry, or on stdin E
     'EOF ends the drain, not the calls',
   );
   assert.equal(exitCode, 0, 'the drain worker did not exit cleanly');
+});
+
+// ---------------------------------------------------------------------------
+// resource subscriptions (TOOLS.md § 7.4)
+// ---------------------------------------------------------------------------
+
+/** Collects the URIs of `notifications/resources/updated` the client receives. */
+function updatesOf(client: Client): string[] {
+  const uris: string[] = [];
+  client.setNotificationHandler(ResourceUpdatedNotificationSchema, (notification) => {
+    uris.push(notification.params.uri);
+  });
+  return uris;
+}
+
+const STATUS_RUNTIME = (): ServerRuntime =>
+  runtimeOf({ profiles: [{ name: 'DEFAULT', scopes: ['video.upload'] }] });
+
+test('resources/subscribe accepts a template uri and a push reaches the subscriber', async () => {
+  const status = statusResource();
+  const { client, handle, close } = await connectedClient({
+    packages: packagesOf(echoTool(), status.tool),
+    resources: [status],
+    runtime: STATUS_RUNTIME(),
+  });
+  try {
+    const updates = updatesOf(client);
+    const uri = 'tiktok://publish/v_1/status';
+    assert.deepEqual(await client.subscribeResource({ uri }), {});
+
+    // The predicate sees the matched spec and its path parameters.
+    const seen: string[] = [];
+    const notified = await handle.notifyResourcesUpdated((match) => {
+      seen.push(`${match.spec.name}:${match.params['publish_id']}`);
+      return match.params['publish_id'] === 'v_1';
+    });
+    assert.equal(notified, 1);
+    assert.deepEqual(seen, ['tiktok_publish_status:v_1']);
+    await flush();
+    assert.deepEqual(updates, [uri]);
+
+    // Another publish_id is not this subscription.
+    assert.equal(
+      await handle.notifyResourcesUpdated(
+        (match) => match.params['publish_id'] === 'v_2',
+      ),
+      0,
+    );
+
+    assert.deepEqual(await client.unsubscribeResource({ uri }), {});
+    assert.equal(await handle.notifyResourcesUpdated(() => true), 0);
+    await flush();
+    assert.deepEqual(updates, [uri]);
+  } finally {
+    await close();
+  }
+});
+
+test('resources/subscribe of an unknown uri is invalid params', async () => {
+  const { client, close } = await connectedClient({ resources: [videosResource()] });
+  try {
+    await assert.rejects(
+      client.subscribeResource({ uri: 'tiktok://nope' }),
+      protocolError(ErrorCode.InvalidParams, /Unknown resource: tiktok:\/\/nope/),
+    );
+    // Unsubscribing from anything is fine.
+    assert.deepEqual(await client.unsubscribeResource({ uri: 'tiktok://nope' }), {});
+  } finally {
+    await close();
+  }
+});
+
+test('a watched resource is polled while subscribed and notifies when its answer moves', async () => {
+  const statuses = ['PROCESSING_UPLOAD', 'PROCESSING_UPLOAD', 'PUBLISH_COMPLETE'];
+  let reads = 0;
+  const status = statusResource({
+    tool: anyOfTool({
+      input: toolInput({
+        publish_id: z.string().min(1),
+        wait_for_completion: z.boolean().optional(),
+      }),
+      handler: () => {
+        const answer = statuses[Math.min(reads, statuses.length - 1)];
+        reads += 1;
+        return Promise.resolve<ToolResult<unknown>>({
+          ok: true,
+          data: { status: answer, checked_at: String(reads) },
+        });
+      },
+    }),
+    watch: {
+      volatile: ['checked_at'],
+      settled: (data) => (data as { status?: string }).status === 'PUBLISH_COMPLETE',
+    },
+  });
+  const clock = mockClock();
+  const { client, close } = await connectedClient({
+    packages: packagesOf(echoTool(), status.tool),
+    resources: [status],
+    runtime: STATUS_RUNTIME(),
+    clock,
+    subscriptionPollMs: 1_000,
+  });
+  try {
+    const updates = updatesOf(client);
+    const uri = 'tiktok://publish/v_1/status';
+    await client.subscribeResource({ uri });
+    await flush(5);
+    assert.equal(reads, 1, 'the baseline is read at subscribe time');
+
+    await clock.advance(1_000);
+    await flush(5);
+    assert.deepEqual(updates, [], 'only the volatile field moved');
+
+    await clock.advance(1_000);
+    await flush(5);
+    assert.deepEqual(updates, [uri]);
+    assert.equal(clock.pending(), 0, 'a terminal status stops the polling');
+  } finally {
+    await close();
+  }
+});
+
+test('closing the session stops its subscription polling', async () => {
+  const status = statusResource({
+    watch: { settled: () => false },
+  });
+  const clock = mockClock();
+  const { client, close } = await connectedClient({
+    packages: packagesOf(echoTool(), status.tool),
+    resources: [status],
+    runtime: STATUS_RUNTIME(),
+    clock,
+  });
+  await client.subscribeResource({ uri: 'tiktok://publish/v_1/status' });
+  await flush(5);
+  assert.equal(clock.pending(), 1);
+  await close();
+  await flush(5);
+  assert.equal(clock.pending(), 0);
 });

@@ -58,6 +58,8 @@ import {
   ListToolsRequestSchema,
   McpError,
   ReadResourceRequestSchema,
+  SubscribeRequestSchema,
+  UnsubscribeRequestSchema,
   isJSONRPCErrorResponse,
   isJSONRPCNotification,
   isJSONRPCRequest,
@@ -104,8 +106,11 @@ import {
   resourceArgs,
   resourceCompletion,
   resourceContents,
+  type ParsedResourceUri,
+  type ResourceMatch,
   type ResourceSpec,
 } from './resources.js';
+import { createSubscriptionHub } from './subscriptions.js';
 import {
   RESULT_JSON_SCHEMA,
   truncateResult,
@@ -468,6 +473,14 @@ export interface ServerOptions {
   /** The resource manifest (TOOLS.md § 7.2); none when omitted. */
   resources?: readonly ResourceSpec[];
   runtime: ServerRuntime;
+  /**
+   * Polls subscribed resources that declare a `watch` (TOOLS.md § 7.4).
+   * Omitted, a subscription is notified only through
+   * {@link McpServerHandle.notifyResourcesUpdated}.
+   */
+  clock?: Clock;
+  /** Poll period for watched subscriptions; `mcp/subscriptions`' default when omitted. */
+  subscriptionPollMs?: number;
 }
 
 export interface McpServerHandle {
@@ -479,6 +492,13 @@ export interface McpServerHandle {
    * description exactly as to its tool's, so the same change stales both lists.
    */
   notifyListChanged(): Promise<void>;
+  /**
+   * Send `notifications/resources/updated` for every URI this session
+   * subscribed to that the predicate accepts — how a webhook event reaches
+   * the client following a publish. Resolves the number notified; never
+   * rejects.
+   */
+  notifyResourcesUpdated(predicate: (match: ResourceMatch) => boolean): Promise<number>;
 }
 
 /**
@@ -489,7 +509,9 @@ export interface McpServerHandle {
  * without them the notifications emitted when credentials change are dead
  * letters (§ 6.3). `prompts` is declared without `listChanged` because the
  * prompt list depends on the package selection alone, which is fixed for the
- * life of the process. `completions` is declared because the SDK refuses a
+ * life of the process. `resources.subscribe` is declared because a publish
+ * status is worth following: the session's subscription hub re-reads it until
+ * it settles and forwards webhook pushes (`mcp/subscriptions`). `completions` is declared because the SDK refuses a
  * `completion/complete` handler without it. `logging` is declared because
  * the server forwards nothing to stdout — every diagnostic goes to stderr or
  * to the client as a log message.
@@ -502,7 +524,7 @@ export function createServer(opts: ServerOptions): McpServerHandle {
       capabilities: {
         tools: { listChanged: true },
         prompts: {},
-        resources: { listChanged: true },
+        resources: { listChanged: true, subscribe: true },
         completions: {},
         logging: {},
       },
@@ -601,6 +623,40 @@ export function createServer(opts: ServerOptions): McpServerHandle {
     return resourceContents(raw, result, runtime.settings);
   });
 
+  const hub = createSubscriptionHub({
+    read: (match: ResourceMatch, parsed: ParsedResourceUri) =>
+      callTool(match.spec.tool, resourceArgs(match, parsed), runtime),
+    send: (uri) => server.sendResourceUpdated({ uri }),
+    ...(opts.clock === undefined ? {} : { clock: opts.clock }),
+    ...(opts.subscriptionPollMs === undefined
+      ? {}
+      : { intervalMs: opts.subscriptionPollMs }),
+    logger: runtime.log,
+  });
+  // The session ends with its transport; so do its subscriptions and polls.
+  server.onclose = (): void => {
+    void hub.close();
+  };
+
+  // A subscription is to a URI `resources/read` would serve, so it resolves
+  // the same way and an unknown one is the same protocol error.
+  server.setRequestHandler(SubscribeRequestSchema, (request) => {
+    const raw = request.params.uri;
+    const parsed = parseResourceUri(raw);
+    const match =
+      parsed === undefined ? undefined : matchResource(enabledResourceSpecs, parsed.uri);
+    if (parsed === undefined || match === undefined) {
+      throw new McpError(ErrorCode.InvalidParams, `Unknown resource: ${raw}`);
+    }
+    hub.subscribe(raw, match, parsed);
+    return {};
+  });
+
+  server.setRequestHandler(UnsubscribeRequestSchema, (request) => {
+    hub.unsubscribe(request.params.uri);
+    return {};
+  });
+
   server.setRequestHandler(CompleteRequestSchema, async (request) => {
     const { ref, argument, context } = request.params;
     let source: CompletionSource | undefined;
@@ -645,6 +701,7 @@ export function createServer(opts: ServerOptions): McpServerHandle {
       const failed = sent.find((outcome) => outcome.status === 'rejected');
       if (failed !== undefined) throw failed.reason;
     },
+    notifyResourcesUpdated: (predicate) => hub.notify(predicate),
   };
 }
 

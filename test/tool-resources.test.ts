@@ -16,9 +16,11 @@ import {
   RESOURCES,
   authStatusResource,
   creatorInfoResource,
+  isPublishStatusOf,
   publishJournalResource,
   publishStatusResource,
   recentVideosResource,
+  settledPublishStatus,
   userInfoResource,
 } from '../src/tools/resources.js';
 
@@ -247,4 +249,43 @@ test('every path parameter of every resource declares a completion source', () =
       );
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// subscriptions (TOOLS.md § 7.4)
+// ---------------------------------------------------------------------------
+
+test('only the publish status declares a watch, with checked_at volatile', () => {
+  assert.deepEqual(
+    RESOURCES.filter((spec) => spec.watch !== undefined),
+    [publishStatusResource],
+  );
+  assert.deepEqual(publishStatusResource.watch?.volatile, ['checked_at']);
+  assert.ok(Object.isFrozen(publishStatusResource.watch));
+});
+
+test('a publish status is settled once its status is terminal', () => {
+  for (const status of ['PUBLISH_COMPLETE', 'SEND_TO_USER_INBOX', 'FAILED']) {
+    assert.equal(settledPublishStatus({ status }), true, status);
+  }
+  for (const data of [
+    { status: 'PROCESSING_UPLOAD' },
+    { status: 'PROCESSING_DOWNLOAD' },
+    { status: 42 },
+    {},
+    null,
+    'PUBLISH_COMPLETE',
+  ]) {
+    assert.equal(settledPublishStatus(data), false, JSON.stringify(data));
+  }
+});
+
+test('isPublishStatusOf matches the publish status of one publish_id only', () => {
+  const of = (spec: ResourceSpec, publishId: string) => ({
+    spec,
+    params: { publish_id: publishId },
+  });
+  assert.equal(isPublishStatusOf(of(publishStatusResource, 'v_1'), 'v_1'), true);
+  assert.equal(isPublishStatusOf(of(publishStatusResource, 'v_2'), 'v_1'), false);
+  assert.equal(isPublishStatusOf(of(recentVideosResource, 'v_1'), 'v_1'), false);
 });

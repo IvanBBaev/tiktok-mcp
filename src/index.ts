@@ -60,7 +60,7 @@ async function startServer(): Promise<void> {
   const { createServer, connectStdio } = await import('./mcp/server.js');
   const { PACKAGES } = await import('./tools/index.js');
   const { PROMPTS } = await import('./tools/prompts.js');
-  const { RESOURCES } = await import('./tools/resources.js');
+  const { RESOURCES, isPublishStatusOf } = await import('./tools/resources.js');
   const { createApiContext } = await import('./api/context.js');
 
   const version = await packageVersion();
@@ -115,6 +115,8 @@ async function startServer(): Promise<void> {
       packages: PACKAGES,
       prompts: PROMPTS,
       resources: RESOURCES,
+      // Polls a subscribed publish status until it settles (TOOLS.md § 7.4).
+      clock: systemClock,
       runtime: {
         settings,
         log,
@@ -192,8 +194,26 @@ async function startServer(): Promise<void> {
     const { revocationListener, webhookRouteFor } = await import('./mcp/webhook.js');
     // `authorization.removed` clears the profile's tokens; the credential
     // watch then tells every session, polled now rather than on its next tick.
-    const onEvent = revocationListener({ log, onRevoked: () => pollCredentials() });
-    const webhook = webhookRouteFor(settings, log, systemClock, onEvent);
+    const onRevocation = revocationListener({
+      log,
+      onRevoked: () => pollCredentials(),
+    });
+    // An event about a publish (`post.publish.*`) tells every session that
+    // subscribed to that attempt's status, without waiting for its next poll.
+    const onEvent = async (record: { publish_id?: string }): Promise<void> => {
+      const publishId = record.publish_id;
+      if (publishId !== undefined) {
+        await Promise.all(
+          [...handles].map((handle) =>
+            handle.notifyResourcesUpdated((match) => isPublishStatusOf(match, publishId)),
+          ),
+        );
+      }
+    };
+    const webhook = webhookRouteFor(settings, log, systemClock, async (record) => {
+      await onEvent(record);
+      await onRevocation(record);
+    });
     const transport = await startHttpTransport({
       settings,
       log,

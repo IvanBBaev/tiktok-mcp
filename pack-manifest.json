@@ -73,6 +73,8 @@
     "build/src/mcp/result.js",
     "build/src/mcp/server.d.ts",
     "build/src/mcp/server.js",
+    "build/src/mcp/subscriptions.d.ts",
+    "build/src/mcp/subscriptions.js",
     "build/src/mcp/webhook.d.ts",
     "build/src/mcp/webhook.js",
     "build/src/tools/analytics.d.ts",
