@@ -827,6 +827,7 @@ async function putChunkWithRetries(
         contentLength: opts.chunk.size,
         timeoutMs: ctx.settings.uploadTimeoutMs,
         chunkRetries: 0,
+        maxConcurrent: ctx.settings.maxConcurrent,
         clock: ctx.clock,
         logger: ctx.log,
         random: opts.random,

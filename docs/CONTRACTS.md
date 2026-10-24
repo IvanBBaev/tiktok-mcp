@@ -226,6 +226,7 @@ export interface Settings {
   envLockWaitMs: number;       // default 30_000
   journalMaxBytes: number;     // TT_JOURNAL_MAX_BYTES, default 5_242_880
   chunkRetries: number;        // TT_CHUNK_RETRIES, default 3
+  maxConcurrent: number;       // TT_MAX_CONCURRENT, default 4 (1..64)
   mediaRoot?: string;          // TT_MEDIA_ROOT (fail-closed for FILE_UPLOAD)
   redirectPort?: number;       // TT_REDIRECT_PORT (optional pin, CC-A8)
   // …one field per remaining TT_ var; keep in lockstep with CONFIGURATION.md
@@ -499,11 +500,16 @@ export interface TtRequestOptions {
   budgetMs?: number;              // whole call incl. backoff, default timeoutMs * maxAttempts
   logger?: Logger;                // default: silent — core has no global sink
   random?: () => number;          // jitter seam, default Math.random
+  maxConcurrent?: number;         // per-host in-flight attempt cap; absent = unbounded
 }
 
 /** Options oauthRequest accepts. OAuth is never retried, so there is no class
- *  to pass; named because it is part of two public signatures. */
-export type OauthRequestOptions = Omit<TtRequestOptions, "retryClass">;
+ *  to pass, and it never takes a host slot (no refresh can wait behind the
+ *  requests it unblocks); named because it is part of two public signatures. */
+export type OauthRequestOptions = Omit<TtRequestOptions, "retryClass" | "maxConcurrent">;
+
+/** Slots currently held per hostname (test seam for the per-host semaphore). */
+export function hostSlotsInUse(): Record<string, number>;
 
 /** {data,error} envelope decoder; error.code !== "ok" ⇒ TikTokError kind:"api"
  *  (CC-B1); non-JSON tolerated (CC-B2) — for the init class it is
@@ -542,6 +548,7 @@ export interface PutChunkOptions {
   logger?: Logger;
   random?: () => number;
   contentLength?: number;         // required for a stream body (TIKTOK-API § 4.6)
+  maxConcurrent?: number;         // per-host in-flight attempt cap; absent = unbounded
 }
 
 /** No Authorization header ever (upload_token in URL is the credential and a
@@ -3295,3 +3302,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-01 | `api/upload`: `uploadFile` re-stats the pinned file once more when TikTok completes the upload (`201`, or a `416` resync to the end of the file); a size/mtime change there throws `network_ambiguous` ("modified during the upload"), not `upload_interrupted`, because the completed upload may be posted — the rewrite of the completing chunk was the one no pre-chunk check could see. No signature changes | integrator (round 14) |
 | 2026-10-22 | `core/config`: `overlayEnvFile` gains the additive `platform?: NodeJS.Platform` (default `process.platform`). On win32 every `TT_`-prefixed environment key is copied under its upper-case spelling and shadows the file's key in any case, because the OS environment is case-insensitive there and the returned plain object is not. No other signature changes | integrator |
 | 2026-10-24 | Added `api/media.ts` (`probeMediaFile`, `inspectMovie`, `checkMedia`, `MEDIA_LIMITS`, `ACCEPTED_CODECS`, `MAX_MOOV_BYTES`) and, in `tools/publish-common`, `MediaCheck`, `mediaPreflight` and `mediaPreflightNote`; `WritePreview` and `DraftPreview` gain the optional `media_check` — additive. The pre-flight is advisory (ROADMAP Phase 5, CC-D9): a local video file is probed at preview only, the result is not digested and not re-checked at apply, and a file TikTok would reject still gets a plan with one `note` hint, because TikTok remains the authority and a local refusal would invent a catalog code. § Extended harness gains `mp4.ts` | owner (Phase 5) |
+| 2026-10-24 | `core/http`, `core/settings`: per-host concurrency (ARCHITECTURE § 6 item 4). `TtRequestOptions` and `PutChunkOptions` gain the additive `maxConcurrent?`; `OauthRequestOptions` now also omits it; new export `hostSlotsInUse()`. `Settings.maxConcurrent` / `TT_MAX_CONCURRENT` (default 4, `1`–`64`) return — this reverses the 2026-09-01 removal, now that the semaphore exists and the field is read: `api/context` passes it to every `ttRequest`, `api/upload` to every `putChunk`. A slot covers one attempt (released before a retry backoff), queueing is FIFO per hostname and outside the per-attempt timeout, an abort while queued rejects with the signal's reason, and `oauthRequest` and the `login` CLI's call stay unbounded so a token refresh can never deadlock behind the slots it unblocks. The `cc-f1` removed-variable tests in `test/config.test.ts` now use a fictional `TT_RETIRED_KNOB` | integrator |

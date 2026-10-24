@@ -222,6 +222,7 @@ export async function apiRequest<T>(
       // `TT_MAX_RETRIES` is a retry cap (CONFIGURATION.md), like
       // `TT_CHUNK_RETRIES`: one attempt plus up to that many retries.
       maxAttempts: 1 + ctx.settings.maxRetries,
+      maxConcurrent: ctx.settings.maxConcurrent,
       ...(opts.body === undefined ? {} : { body: opts.body }),
       ...(opts.signal === undefined ? {} : { signal: opts.signal }),
     });

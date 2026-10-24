@@ -164,10 +164,18 @@ export interface TtRequestOptions {
   logger?: Logger;
   /** Jitter source; defaults to `Math.random`. Tests inject a seeded stream. */
   random?: () => number;
+  /**
+   * Per-host cap on in-flight attempts (`TT_MAX_CONCURRENT`, ARCHITECTURE § 6
+   * item 4). Absent ⇒ unbounded. See {@link acquireHostSlot}.
+   */
+  maxConcurrent?: number;
 }
 
 /** Options `oauthRequest` accepts: no retry class — OAuth is never retried. */
-export type OauthRequestOptions = Omit<TtRequestOptions, 'retryClass'> & {
+export type OauthRequestOptions = Omit<
+  TtRequestOptions,
+  'retryClass' | 'maxConcurrent'
+> & {
   /**
    * Accept a **loopback** origin instead of the pinned API host.
    *
@@ -226,6 +234,8 @@ export interface PutChunkOptions {
    * `ReadableStream` the caller must supply it or the request goes out chunked.
    */
   contentLength?: number;
+  /** Per-host cap on in-flight attempts, as on {@link TtRequestOptions}. */
+  maxConcurrent?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -920,6 +930,78 @@ function waitForAttempt(opts: {
 // transport
 // ---------------------------------------------------------------------------
 
+/**
+ * Per-host concurrency (ARCHITECTURE § 6 item 4). One entry per hostname with
+ * an attempt in flight or queued; it is deleted once both drop to zero, so the
+ * map holds nothing between calls.
+ */
+interface HostSlots {
+  active: number;
+  readonly waiters: (() => void)[];
+}
+
+const hostSlots = new Map<string, HostSlots>();
+
+/**
+ * Take one of `max` slots for `host`, waiting FIFO when all are taken; resolves
+ * to the release function. A slot covers one *attempt* — never a whole call
+ * with its backoff waits, and never a token refresh (`oauthRequest` takes no
+ * slot) — so a request holding a slot never waits on another request, and a
+ * full host cannot deadlock the refresh it needs. A caller abort while queued
+ * rejects with the signal's reason and gives up the place in the queue. A
+ * released slot is handed straight to the next waiter, so a newcomer cannot
+ * overtake the queue.
+ */
+async function acquireHostSlot(
+  host: string,
+  max: number,
+  signal: AbortSignal | undefined,
+): Promise<() => void> {
+  let slots = hostSlots.get(host);
+  if (slots === undefined) {
+    slots = { active: 0, waiters: [] };
+    hostSlots.set(host, slots);
+  }
+  const entry = slots;
+  const release = (): void => {
+    const next = entry.waiters.shift();
+    if (next !== undefined) {
+      next();
+      return;
+    }
+    entry.active -= 1;
+    if (entry.active === 0) hostSlots.delete(host);
+  };
+  if (entry.active < max) {
+    entry.active += 1;
+    return release;
+  }
+  if (signal?.aborted === true) throw signal.reason;
+  // Resolves with the signal that cancelled the wait, or undefined once granted.
+  const abortedBy = await new Promise<AbortSignal | undefined>((resolve) => {
+    let detach = (): void => {};
+    const grant = (): void => {
+      detach();
+      resolve(undefined);
+    };
+    entry.waiters.push(grant);
+    if (signal === undefined) return;
+    const onAbort = (): void => {
+      entry.waiters.splice(entry.waiters.indexOf(grant), 1);
+      resolve(signal);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    detach = () => signal.removeEventListener('abort', onAbort);
+  });
+  if (abortedBy !== undefined) throw abortedBy.reason;
+  return release;
+}
+
+/** In-flight attempts per host, for tests: `{}` when nothing is in flight. */
+export function hostSlotsInUse(): Record<string, number> {
+  return Object.fromEntries([...hostSlots].map(([host, s]) => [host, s.active]));
+}
+
 interface RawResponse {
   readonly status: number;
   readonly headers: Headers;
@@ -953,6 +1035,22 @@ interface RequestSpec {
  * waiter is always cancelled before returning, so no timer outlives the call.
  */
 async function performRequest(
+  target: URL,
+  spec: RequestSpec,
+  ctx: FailureContext & { signal?: AbortSignal; maxConcurrent?: number },
+): Promise<RawResponse> {
+  if (ctx.maxConcurrent === undefined) return await sendOnce(target, spec, ctx);
+  // The queue wait is outside the attempt's timeout window: a slot not yet
+  // granted is not a slow server.
+  const release = await acquireHostSlot(target.hostname, ctx.maxConcurrent, ctx.signal);
+  try {
+    return await sendOnce(target, spec, ctx);
+  } finally {
+    release();
+  }
+}
+
+async function sendOnce(
   target: URL,
   spec: RequestSpec,
   ctx: FailureContext & { signal?: AbortSignal },
@@ -1295,13 +1393,14 @@ export async function ttRequest<T>(opts: TtRequestOptions): Promise<T> {
   if (opts.body !== undefined)
     headers['content-type'] = 'application/json; charset=UTF-8';
 
-  const ctx: FailureContext & { signal?: AbortSignal } = {
+  const ctx: FailureContext & { signal?: AbortSignal; maxConcurrent?: number } = {
     retryClass: opts.retryClass,
     shownUrl,
     method: opts.method,
     clock,
     timeoutMs,
     ...(opts.signal === undefined ? {} : { signal: opts.signal }),
+    ...(opts.maxConcurrent === undefined ? {} : { maxConcurrent: opts.maxConcurrent }),
   };
 
   return withRetries<T>(
@@ -1538,13 +1637,14 @@ export async function putChunk(opts: PutChunkOptions): Promise<ChunkPutResult> {
     ...(replayable ? {} : { duplex: 'half' as const }),
   };
 
-  const ctx: FailureContext & { signal?: AbortSignal } = {
+  const ctx: FailureContext & { signal?: AbortSignal; maxConcurrent?: number } = {
     retryClass: 'chunk',
     shownUrl,
     method: 'PUT',
     clock,
     timeoutMs,
     ...(opts.signal === undefined ? {} : { signal: opts.signal }),
+    ...(opts.maxConcurrent === undefined ? {} : { maxConcurrent: opts.maxConcurrent }),
   };
 
   return withRetries<ChunkPutResult>(

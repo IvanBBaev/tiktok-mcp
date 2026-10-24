@@ -14,6 +14,13 @@ plumbing stay in the commit history where they belong.
 
 ### Added
 
+- **Per-host concurrency cap (`TT_MAX_CONCURRENT`, default 4).** In-flight HTTP
+  attempts to one host are now bounded by a FIFO semaphore, so concurrent
+  sessions on the HTTP transport cannot open an unbounded number of upstream
+  connections. A slot is held for a single attempt (never across a retry
+  backoff), token refreshes take none, and a cancelled call leaves the queue at
+  once. The name is the one an earlier release removed as an unused knob; this
+  time it governs something.
 - `tiktok_get_video_analytics` in the new `analytics` package (part of the
   default `core` profile; scope `video.list`): totals, engagement rate, average
   and median views, top videos by a chosen metric, per-day/week/month

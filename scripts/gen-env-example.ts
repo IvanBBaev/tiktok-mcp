@@ -276,6 +276,11 @@ export const SECTIONS: readonly Section[] = [
         render: 'default',
       },
       {
+        name: 'TT_MAX_CONCURRENT',
+        comment: ['Per-host cap on in-flight HTTP attempts (token refreshes excluded).'],
+        render: 'default',
+      },
+      {
         name: 'TT_PUBLISH_RPM',
         comment: ['Local token bucket for publish inits, per profile.'],
         render: 'default',

@@ -356,15 +356,19 @@ non-envelope 206/201 responses).
    through `oauthRequest`, are never auto-retried, and draw on none of the
    data-path buckets in (5); `invalid_grant` recovery is the § 7 lock-guarded
    re-read path.
-4. **Concurrency**: nothing bounds in-flight requests, deliberately. No request
-   path fans out — chunk PUTs run sequentially and no code path awaits requests
-   in parallel — but under the HTTP transport two sessions can still have calls
-   in flight at once, so the concurrency is reachable rather than impossible.
-   What protects the upstream is the per-profile token bucket in (5), not a
-   connection limit. The per-host semaphore this item once specified was never
-   built; `TT_MAX_CONCURRENT` named it, governed nothing, and was removed on
-   2026-09-01 (CONTRACTS.md § Change log) rather than left as a knob an
-   operator could believe in.
+4. **Concurrency**: in-flight attempts are capped per hostname
+   (`TT_MAX_CONCURRENT`, default 4) by a FIFO semaphore in `core/http`. Under
+   the HTTP transport several sessions can have calls in flight at once; the
+   cap keeps them from opening an unbounded number of connections to one
+   upstream host. A slot covers **one attempt**: it is released before a
+   retry backoff and re-acquired for the next attempt, so a sleeping retry
+   holds nothing. Token-endpoint calls (`oauthRequest`) take no slot, which
+   rules out the deadlock where every slot waits on a refresh that itself
+   needs a slot. Time spent queued is outside the per-attempt timeout; an
+   aborted call leaves the queue immediately. Upload chunk PUTs go to the
+   upload host and so do not queue behind API reads. The cap bounds
+   connections, not rate — the per-profile token buckets in (5) still protect
+   the quota.
 5. **Local rate limiting** (SYNTHESIS § 2.12): publish inits draw from a local
    token bucket, 6/min per profile with continuous refill (1 token / 10 s). An
    empty bucket **rejects locally** with `local_rate_limited` + `retry_after_s` +

@@ -37,6 +37,7 @@ import * as fc from 'fast-check';
 import { isTikTokError, type TikTokError } from '../src/core/errors.js';
 import {
   assertAllowedUrl,
+  hostSlotsInUse,
   oauthRequest,
   putChunk,
   ttRequest,
@@ -44,7 +45,7 @@ import {
   type PutChunkOptions,
 } from '../src/core/http.js';
 import type { Logger } from '../src/core/log.js';
-import { flush } from './harness/deferred.js';
+import { deferred, flush, type Deferred } from './harness/deferred.js';
 import {
   BASELINE_NOW_MS,
   mockClock,
@@ -3085,4 +3086,155 @@ test('oauthRequest and putChunk refuse an already-aborted caller signal', async 
   );
   assert.equal(chunkErr, chunkReason);
   assert.equal(chunkPlay.calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// per-host concurrency (TT_MAX_CONCURRENT, ARCHITECTURE § 6 item 4)
+// ---------------------------------------------------------------------------
+
+/** A fetch whose every answer is a gate the test opens; records hosts in order. */
+function gatedFetch(): {
+  fetch: FetchStub;
+  gates: Deferred<Response>[];
+  hosts: string[];
+} {
+  const gates: Deferred<Response>[] = [];
+  const hosts: string[] = [];
+  const fetch: FetchStub = (input) => {
+    hosts.push(new URL(String(input)).hostname);
+    const gate = deferred<Response>();
+    gates.push(gate);
+    return gate.promise;
+  };
+  return { fetch, gates, hosts };
+}
+
+function limitedRead(maxConcurrent: number, signal?: AbortSignal): Promise<unknown> {
+  return ttRequest({
+    method: 'GET',
+    url: API_URL,
+    retryClass: 'read',
+    bearer: 'fake-access-token-a1b2c3',
+    clock: mockClock(),
+    maxConcurrent,
+    ...(signal === undefined ? {} : { signal }),
+  });
+}
+
+test('maxConcurrent holds attempts beyond the cap until a slot frees, in FIFO order', async () => {
+  const play = gatedFetch();
+  await withFetch(play.fetch, async () => {
+    const calls = [0, 1, 2].map((i) =>
+      ttRequest<{ n: number }>({
+        method: 'GET',
+        url: `${API_URL}?n=${String(i)}`,
+        retryClass: 'read',
+        bearer: 'fake-access-token-a1b2c3',
+        clock: mockClock(),
+        maxConcurrent: 2,
+      }),
+    );
+    await flush(4);
+    assert.equal(play.gates.length, 2, 'the third attempt must wait for a slot');
+    assert.deepEqual(hostSlotsInUse(), { 'open.tiktokapis.com': 2 });
+
+    play.gates[0]?.resolve(ttEnvelope({ n: 0 }));
+    assert.deepEqual(await calls[0], { n: 0 });
+    await flush(4);
+    assert.equal(play.gates.length, 3, 'the freed slot goes to the queued attempt');
+
+    play.gates[1]?.resolve(ttEnvelope({ n: 1 }));
+    play.gates[2]?.resolve(ttEnvelope({ n: 2 }));
+    assert.deepEqual(await Promise.all(calls), [{ n: 0 }, { n: 1 }, { n: 2 }]);
+  });
+  assert.deepEqual(hostSlotsInUse(), {}, 'no slot outlives its call');
+});
+
+test('the cap is per host: an upload PUT does not wait behind API reads', async () => {
+  const play = gatedFetch();
+  await withFetch(play.fetch, async () => {
+    const read = limitedRead(1);
+    const put = putChunk(chunkOptions({ clock: mockClock(), maxConcurrent: 1 }));
+    await flush(4);
+    assert.deepEqual(play.hosts, ['open.tiktokapis.com', 'open-upload.tiktokapis.com']);
+    play.gates[0]?.resolve(ttEnvelope({}));
+    play.gates[1]?.resolve(new Response('', { status: 201 }));
+    await Promise.all([read, put]);
+  });
+  assert.deepEqual(hostSlotsInUse(), {});
+});
+
+test('a failed attempt releases its slot', async () => {
+  const play = gatedFetch();
+  await withFetch(play.fetch, async () => {
+    const first = putChunk(
+      chunkOptions({ clock: mockClock(), maxConcurrent: 1, chunkRetries: 0 }),
+    );
+    const second = putChunk(chunkOptions({ clock: mockClock(), maxConcurrent: 1 }));
+    await flush(4);
+    assert.equal(play.gates.length, 1);
+    play.gates[0]?.reject(new TypeError('fetch failed'));
+    await assert.rejects(first);
+    await flush(4);
+    play.gates[1]?.resolve(new Response('', { status: 201 }));
+    assert.equal((await second).status, 201);
+  });
+  assert.deepEqual(hostSlotsInUse(), {});
+});
+
+test('a caller abort while queued rejects at once and gives up the place in line', async () => {
+  const play = gatedFetch();
+  await withFetch(play.fetch, async () => {
+    const holder = limitedRead(1);
+    const controller = new AbortController();
+    const queued = limitedRead(1, controller.signal);
+    // A waiter with a signal that never fires: granted, it detaches its listener.
+    const behind = limitedRead(1, new AbortController().signal);
+    await flush(4);
+
+    const reason = new Error('caller went away');
+    controller.abort(reason);
+    assert.equal(await rejection(queued), reason);
+
+    play.gates[0]?.resolve(ttEnvelope({}));
+    await holder;
+    await flush(4);
+    assert.equal(play.gates.length, 2, 'the aborted waiter never reached fetch');
+    play.gates[1]?.resolve(ttEnvelope({}));
+    await behind;
+  });
+  assert.deepEqual(hostSlotsInUse(), {});
+});
+
+test('an already-aborted signal never joins a full queue', async () => {
+  const play = gatedFetch();
+  await withFetch(play.fetch, async () => {
+    const holder = limitedRead(1);
+    await flush(4);
+    const reason = new Error('aborted before the call');
+    assert.equal(await rejection(limitedRead(1, AbortSignal.abort(reason))), reason);
+    play.gates[0]?.resolve(ttEnvelope({}));
+    await holder;
+  });
+  assert.equal(play.gates.length, 1);
+  assert.deepEqual(hostSlotsInUse(), {});
+});
+
+test('the token endpoint takes no slot, so a full host cannot block a refresh', async () => {
+  const play = gatedFetch();
+  await withFetch(play.fetch, async () => {
+    const holder = limitedRead(1);
+    const refresh = oauthRequest({
+      method: 'POST',
+      url: OAUTH_URL,
+      body: { grant_type: 'refresh_token' },
+      clock: mockClock(),
+    });
+    await flush(4);
+    assert.equal(play.gates.length, 2, 'the refresh went out past the full slot');
+    play.gates[1]?.resolve(jsonResponse({ access_token: 'x' }));
+    play.gates[0]?.resolve(ttEnvelope({}));
+    await Promise.allSettled([refresh, holder]);
+  });
+  assert.deepEqual(hostSlotsInUse(), {});
 });

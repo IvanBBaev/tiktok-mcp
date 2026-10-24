@@ -1762,10 +1762,9 @@ test('cc-f1 a read concurrent with a write sees one whole document, never a torn
 
 /**
  * Deleting a `TT_` variable from `Settings` is only non-breaking because an
- * unknown `TT_` key is a warning that survives the document. An operator who
- * installed 0.7.0 still has `TT_MAX_CONCURRENT=4` — a knob that was parsed,
- * defaulted and documented, and read by no line of the server — sitting in their
- * env file today, and the release notes promise that nothing which worked stops
+ * unknown `TT_` key is a warning that survives the document. An operator whose
+ * env file still carries a retired knob (`TT_RETIRED_KNOB=4` stands in for any
+ * of them) was promised by the release notes that nothing which worked stops
  * working.
  *
  * These tests are what that promise rests on. They are written about *a removed
@@ -1787,7 +1786,7 @@ test('cc-f1 a variable this build no longer knows loads and warns, it does not r
         '# written by 0.7.0',
         'TT_CLIENT_KEY=abc',
         'TT_CLIENT_SECRET=shh',
-        'TT_MAX_CONCURRENT=4',
+        'TT_RETIRED_KNOB=4',
         'TT_PUBLISH_RPM=6',
         'TT_CONFIG_SCHEMA=1',
         '',
@@ -1796,9 +1795,9 @@ test('cc-f1 a variable this build no longer knows loads and warns, it does not r
 
     const snapshot = await readEnvFile(file);
     assert.equal(snapshot.exists, true);
-    assert.equal(snapshot.values.get('TT_MAX_CONCURRENT'), '4');
+    assert.equal(snapshot.values.get('TT_RETIRED_KNOB'), '4');
     assert.deepEqual(snapshot.warnings, [
-      `${file}: unknown TT_ keys ignored (kept on rewrite): TT_MAX_CONCURRENT`,
+      `${file}: unknown TT_ keys ignored (kept on rewrite): TT_RETIRED_KNOB`,
     ]);
     // The startup path still gets its credentials out of that same snapshot —
     // a stale knob may not cost the operator their login.
@@ -1820,7 +1819,7 @@ test('cc-f1 a removed variable survives the rewrite a token refresh performs', a
       'TT_CLIENT_KEY=abc',
       'TT_ACCESS_TOKEN=old-access',
       '# how many requests may be in flight per host',
-      'TT_MAX_CONCURRENT=4',
+      'TT_RETIRED_KNOB=4',
       'TT_CONFIG_SCHEMA=1',
       '',
     ].join('\n');
@@ -1835,7 +1834,7 @@ test('cc-f1 a removed variable survives the rewrite a token refresh performs', a
 
     const after = await readFile(file, 'utf8');
     assert.ok(
-      after.split('\n').includes('TT_MAX_CONCURRENT=4'),
+      after.split('\n').includes('TT_RETIRED_KNOB=4'),
       `the operator's own line was rewritten or dropped:\n${after}`,
     );
     assert.equal(
@@ -1854,7 +1853,7 @@ test('cc-f1 a removed variable leaves the known set, and the live ones stay in i
   // here so that a derivation which broke outright (an empty set, a renaming
   // rule that stopped matching) cannot make the first assertion pass for free.
   assert.equal(
-    known.has('TT_MAX_CONCURRENT'),
+    known.has('TT_RETIRED_KNOB'),
     false,
     'the removed knob must be unknown again, not merely undocumented',
   );

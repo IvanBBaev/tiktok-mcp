@@ -67,6 +67,7 @@ test('an empty environment yields exactly the documented defaults', () => {
     envLockWaitMs: 30_000,
     timeoutMs: 30_000,
     uploadTimeoutMs: 120_000,
+    maxConcurrent: 4,
     maxRetries: 3,
     chunkRetries: 3,
     publishRpm: 6,
