@@ -429,6 +429,38 @@ other than the one previewed.
   ever — logs go to stderr only; enforced by a `console.log` lint ban and a
   boot test asserting stdout emptiness around a tool call.
 
+### Webhook receiver
+
+Off unless `TT_WEBHOOK_PATH` is set (HTTP transport only). It is the one path
+that answers without the bearer token, so it is held to a narrower contract:
+
+- **Authentication is the signature.** Each delivery must carry
+  `TikTok-Signature: t=…,s=…`, an HMAC-SHA256 of `"<t>." + raw body` under
+  `TT_CLIENT_SECRET`, verified over the raw bytes before any parsing and
+  compared constant-time. A timestamp outside `TT_WEBHOOK_TOLERANCE_S` (default
+  300 s, either way) is refused, so a captured delivery cannot be replayed
+  later; within the window a replay is recognised by its body digest and
+  recorded once. An event naming another app's `client_key` is refused.
+- **Exact path only.** Only the configured path is bearer-exempt (a query
+  string is ignored); its neighbours and `/mcp` still require the token. The
+  path cannot be `/mcp`.
+- **Small, bodiless surface.** `POST` only (`405` otherwise), bodies capped at
+  64 KiB (a declared `content-length` over the cap is refused before a byte is
+  read), and every answer is a bare status with an empty body — a caller
+  without the secret learns nothing beyond "refused". Refusal reasons go to
+  stderr, redacted.
+- **The Host/Origin gate still applies**, so DNS rebinding is refused here as
+  everywhere. A tunnel or reverse proxy in front of a loopback bind must
+  rewrite `Host`, or the bind must go past loopback (`TT_HTTP_INSECURE=1` plus
+  `TT_HTTP_ALLOWED_HOSTS` naming the public host). TLS is the proxy's job, as
+  for the MCP endpoint.
+- **What is stored.** Verified events are appended to `webhooks.ndjson`
+  (`0600`, directory `0700`) beside the env file, rotated past 1 MiB. Records
+  hold the event name, times, `open_id`, the matching profile, `publish_id` and
+  the event content — never a token or the signature. The secret is re-read
+  from the env file on each delivery, so a rotated secret applies without a
+  restart.
+
 ### Least-privilege scopes
 
 Login scopes are derived from the enabled tool packages: a read-only

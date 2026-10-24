@@ -152,7 +152,10 @@ export interface ToolPackageLike {
 /** JSON-RPC code for a request refused during the stdio drain (as http.ts's). */
 const SHUTTING_DOWN = -32000;
 
-const ACCOUNT_IS_FILTER: ReadonlySet<string> = new Set(['tiktok_list_publish_journal']);
+const ACCOUNT_IS_FILTER: ReadonlySet<string> = new Set([
+  'tiktok_list_publish_journal',
+  'tiktok_list_webhook_events',
+]);
 
 /**
  * Which packages this process serves.

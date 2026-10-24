@@ -1,6 +1,6 @@
 /**
- * `tiktok_post_photos` (TOOLS.md § 3.10) and `tiktok_upload_photos_draft`
- * (§ 3.11) — the carousel half of the write surface.
+ * `tiktok_post_photos` (TOOLS.md § 3.11) and `tiktok_upload_photos_draft`
+ * (§ 3.12) — the carousel half of the write surface.
  *
  * The § 2.6 two-step contract is `publish-common`'s and is pinned by
  * `tool-publish-write.test.ts`; what these tests exist to hold down is what
@@ -11,16 +11,16 @@
  *   and a `photo_images` carousel — there is no `upload_url`, no chunking and
  *   no `FILE_UPLOAD` branch to fall back to (CC-D10);
  * - `post_info` carries **no** `disable_duet` and **no** `disable_stitch`; the
- *   omission is the contract (§ 3.10), so it is asserted against a creator
+ *   omission is the contract (§ 3.11), so it is asserted against a creator
  *   fixture that *does* have duets disabled;
  * - the text budget is 90/4000, not 2200 (CC-E3), and the duplicate guard's
  *   excerpt spans title *and* description because a carousel is usually
  *   untitled;
  * - `photo_cover_index` must index the carousel, and an unverified URL is
- *   reported one offender at a time, by index (CC-E9, § 3.10);
+ *   reported one offender at a time, by index (CC-E9, § 3.11);
  * - `tiktok_post_photos` runs the `creator_info` pre-flight and
  *   `tiktok_upload_photos_draft` never does — a `video.upload`-only grant may
- *   not carry the scope (§ 3.11).
+ *   not carry the scope (§ 3.12).
  *
  * Upstream is stubbed by route rather than by call order ({@link fakeApi}), so
  * the apply step's second `creator_info` read is an observation rather than a
@@ -100,7 +100,7 @@ const STATUS_PATH = '/v2/post/publish/status/fetch/';
 /**
  * The upstream `creator_info` payload. `duet_disabled: true` is deliberate: if
  * the photo path ever resolved through the video resolver, the forced
- * `disable_duet` would show up in `post_info` and the § 3.10 assertions below
+ * `disable_duet` would show up in `post_info` and the § 3.11 assertions below
  * would catch it.
  */
 const CREATOR_PAYLOAD = {
@@ -398,10 +398,10 @@ function linesOf(lines: readonly JournalLine[], type: string): JournalLine[] {
 }
 
 // ---------------------------------------------------------------------------
-// tiktok_post_photos — preview (§ 2.6.1, § 3.10)
+// tiktok_post_photos — preview (§ 2.6.1, § 3.11)
 // ---------------------------------------------------------------------------
 
-test('§ 3.10 a preview without privacy_level returns plan_incomplete and no plan_id', async () => {
+test('§ 3.11 a preview without privacy_level returns plan_incomplete and no plan_id', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () =>
@@ -440,7 +440,7 @@ test('§ 3.10 a preview without privacy_level returns plan_incomplete and no pla
   });
 });
 
-test('§ 3.10 a complete preview mints a plan whose post_info carries no duet or stitch field', async () => {
+test('§ 3.11 a complete preview mints a plan whose post_info carries no duet or stitch field', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () => run(ctx, previewArgs()));
@@ -458,7 +458,7 @@ test('§ 3.10 a complete preview mints a plan whose post_info carries no duet or
     assert.ok(!JSON.stringify(data).includes('test-open-id-DEFAULT'));
 
     const postInfo = data.payload.post_info ?? {};
-    // § 3.10: duet and stitch do not exist for a carousel. The fixture account
+    // § 3.11: duet and stitch do not exist for a carousel. The fixture account
     // has duets disabled, so a video-shaped resolution would have forced
     // `disable_duet: true` in here.
     assert.deepEqual(Object.keys(postInfo).sort(), [
@@ -511,7 +511,7 @@ test('§ 2.6.1 a photo preview reports the rate bucket without spending from it'
  * proceed. TOOLS.md § 4 (flow 2) and § 5.1 both give the case to `note`, and a
  * `user_action` here would tell a model to halt a flow meant to continue.
  */
-test('§ 3.10 an unaudited account carries the SELF_ONLY warning on both preview shapes', async () => {
+test('§ 3.11 an unaudited account carries the SELF_ONLY warning on both preview shapes', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi({
       creator: () => creatorResponse({ privacy_level_options: ['SELF_ONLY'] }),
@@ -543,7 +543,7 @@ test('§ 3.10 an unaudited account carries the SELF_ONLY warning on both preview
   });
 });
 
-test('§ 3.10 every optional carousel flag the caller sets reaches post_info', async () => {
+test('§ 3.11 every optional carousel flag the caller sets reaches post_info', async () => {
   await withCtx({}, async (ctx) => {
     const result = await withFetch(fakeApi(), async () =>
       run(
@@ -625,7 +625,7 @@ test('cc-d10 a photo_urls entry outside every verified prefix names the first of
     assert.equal(error.details?.['field'], 'photo_urls[1]');
     assert.ok(error.message.includes('TT_VERIFIED_URL_PREFIXES'));
     assert.ok(error.message.includes('No request was sent'));
-    // § 3.10: photos have no FILE_UPLOAD branch, so the catalog's "use source
+    // § 3.11: photos have no FILE_UPLOAD branch, so the catalog's "use source
     // file" way out must not be offered here.
     assert.ok(!error.message.includes('source "file"'));
     assert.ok(error.message.includes('host the media under a verified prefix'));
@@ -808,7 +808,7 @@ test('cc-e1 a privacy level the account does not offer is refused on preview and
   });
 });
 
-test('§ 3.10 TT_WRITE_MODE=apply without privacy_level is invalid_params, not a default', async () => {
+test('§ 3.11 TT_WRITE_MODE=apply without privacy_level is invalid_params, not a default', async () => {
   await withCtx({ TT_WRITE_MODE: 'apply' }, async (ctx) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () =>
@@ -826,7 +826,7 @@ test('§ 3.10 TT_WRITE_MODE=apply without privacy_level is invalid_params, not a
 // tiktok_post_photos — apply (§ 2.6.3)
 // ---------------------------------------------------------------------------
 
-test('§ 3.10 apply posts media_type PHOTO with the previewed carousel and journals the attempt', async () => {
+test('§ 3.11 apply posts media_type PHOTO with the previewed carousel and journals the attempt', async () => {
   await withCtx({}, async (ctx, dir) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () => {
@@ -877,7 +877,7 @@ test('§ 3.10 apply posts media_type PHOTO with the previewed carousel and journ
   });
 });
 
-test('§ 3.10 TT_WRITE_MODE=apply posts the carousel with no plan and journals an empty plan_id', async () => {
+test('§ 3.11 TT_WRITE_MODE=apply posts the carousel with no plan and journals an empty plan_id', async () => {
   await withCtx({ TT_WRITE_MODE: 'apply' }, async (ctx, dir) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () => run(ctx, previewArgs()));
@@ -939,7 +939,7 @@ test('§ 2.8 the local rate limit refuses a photo apply before any network call'
   });
 });
 
-test('§ 3.10 the duplicate guard excerpts title and description together', async () => {
+test('§ 3.11 the duplicate guard excerpts title and description together', async () => {
   await withCtx({}, async (ctx, dir) => {
     const stub = fakeApi({
       init: (n) => initResponse(n === 0 ? 'v_pub_url~first.1' : 'v_pub_url~second.2'),
@@ -966,14 +966,14 @@ test('§ 3.10 the duplicate guard excerpts title and description together', asyn
       assert.equal(appliedOf(forced).publish_id, 'v_pub_url~second.2');
     });
 
-    // § 3.10: the excerpt is title + description, because a carousel is often
+    // § 3.11: the excerpt is title + description, because a carousel is often
     // untitled and every such post would otherwise look identical to the guard.
     const [intent] = linesOf(await readJournal(dir), 'intent');
     assert.equal(intent?.['title_excerpt'], `${TITLE} ${DESCRIPTION}`);
   });
 });
 
-test('§ 3.10 a carousel missing either text field journals the other one alone', async () => {
+test('§ 3.11 a carousel missing either text field journals the other one alone', async () => {
   await withCtx({}, async (ctx, dir) => {
     await withFetch(fakeApi(), async () => {
       // Untitled — the common case for a carousel.
@@ -1022,7 +1022,7 @@ test('cc-b4 an ambiguous transport failure on the content init is journaled as s
 // wait_for_completion (§ 2.7)
 // ---------------------------------------------------------------------------
 
-test('§ 3.10 wait_for_completion polls until the terminal status and returns the public post id', async () => {
+test('§ 3.11 wait_for_completion polls until the terminal status and returns the public post id', async () => {
   await withCtx({}, async (ctx, _dir, clock) => {
     const stub = fakeApi({
       status: (n) =>
@@ -1058,7 +1058,7 @@ const PHOTO_PULL_RECOVERY =
 const CANCELLED_RECOVERY =
   'The user cancelled this post in the TikTok app. Nothing to retry.';
 
-test('§ 3.10 a photo wait that ends in FAILED carries the fail_reason and its Appendix A recovery', async () => {
+test('§ 3.11 a photo wait that ends in FAILED carries the fail_reason and its Appendix A recovery', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi({
       status: () => ttEnvelope({ status: 'FAILED', fail_reason: 'photo_pull_failed' }),
@@ -1079,7 +1079,7 @@ test('§ 3.10 a photo wait that ends in FAILED carries the fail_reason and its A
   });
 });
 
-test('§ 3.11 a waited photo draft that ends in FAILED has its recovery and no inbox hint', async () => {
+test('§ 3.12 a waited photo draft that ends in FAILED has its recovery and no inbox hint', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi({
       init: () => initResponse('v_inbox~photo.failed'),
@@ -1108,7 +1108,7 @@ test('§ 3.11 a waited photo draft that ends in FAILED has its recovery and no i
   });
 });
 
-test('§ 3.11 a waited photo draft that ends in FAILED without a reason sets neither fail field', async () => {
+test('§ 3.12 a waited photo draft that ends in FAILED without a reason sets neither fail field', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi({
       init: () => initResponse('v_inbox~photo.bare'),
@@ -1164,10 +1164,10 @@ test('§ 2.7 a photo wait that runs out of time is still a success, with a still
 });
 
 // ---------------------------------------------------------------------------
-// tiktok_upload_photos_draft (§ 3.11)
+// tiktok_upload_photos_draft (§ 3.12)
 // ---------------------------------------------------------------------------
 
-test('§ 3.11 a draft preview always mints a plan and runs no creator_info pre-flight', async () => {
+test('§ 3.12 a draft preview always mints a plan and runs no creator_info pre-flight', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () => runDraft(ctx, draftArgs()));
@@ -1193,7 +1193,7 @@ test('§ 3.11 a draft preview always mints a plan and runs no creator_info pre-f
     });
     assert.deepEqual(photoSource(data.payload.source).urls, PHOTO_URLS);
 
-    // § 3.11: a `video.upload`-only grant may not carry the scope for
+    // § 3.12: a `video.upload`-only grant may not carry the scope for
     // creator_info, so the draft tool must never ask for it.
     assert.equal(countPath(stub, CREATOR_PATH), 0);
     assert.equal(stub.calls.length, 0);
@@ -1204,7 +1204,7 @@ test('§ 3.11 a draft preview always mints a plan and runs no creator_info pre-f
   });
 });
 
-test('§ 3.11 a draft apply sends post_mode MEDIA_UPLOAD and leads with the inbox hint', async () => {
+test('§ 3.12 a draft apply sends post_mode MEDIA_UPLOAD and leads with the inbox hint', async () => {
   await withCtx({}, async (ctx, dir) => {
     const stub = fakeApi({ init: () => initResponse('v_inbox~photo.9') });
     const result = await withFetch(stub, async () => {
@@ -1369,7 +1369,7 @@ test('cc-g7: the deepest photo hint chain fills all three slots and ships every 
   );
 });
 
-test('§ 3.11 TT_WRITE_MODE=apply uploads the photo draft with no plan and an empty plan_id', async () => {
+test('§ 3.12 TT_WRITE_MODE=apply uploads the photo draft with no plan and an empty plan_id', async () => {
   await withCtx({ TT_WRITE_MODE: 'apply' }, async (ctx, dir) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () => runDraft(ctx, draftArgs()));
@@ -1380,7 +1380,7 @@ test('§ 3.11 TT_WRITE_MODE=apply uploads the photo draft with no plan and an em
   });
 });
 
-test('§ 3.11 photo_cover_index defaults to 0 for a single-photo draft', async () => {
+test('§ 3.12 photo_cover_index defaults to 0 for a single-photo draft', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi();
     const applied = await withFetch(stub, async () => {
@@ -1415,7 +1415,7 @@ test('§ 2.6.3 a plan minted by tiktok_post_photos is rejected by tiktok_upload_
   });
 });
 
-test('§ 3.11 a duplicate draft is refused until force, on the draft tool’s own digest', async () => {
+test('§ 3.12 a duplicate draft is refused until force, on the draft tool’s own digest', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi({
       init: (n) => initResponse(n === 0 ? 'v_inbox~first.1' : 'v_inbox~second.2'),
@@ -1439,10 +1439,10 @@ test('§ 3.11 a duplicate draft is refused until force, on the draft tool’s ow
 });
 
 // ---------------------------------------------------------------------------
-// declarations (§ 3.10, § 3.11)
+// declarations (§ 3.11, § 3.12)
 // ---------------------------------------------------------------------------
 
-test('§ 3.10 / § 3.11 both photo tools are destructive, and only the posting one needs video.publish', () => {
+test('§ 3.11 / § 3.12 both photo tools are destructive, and only the posting one needs video.publish', () => {
   for (const spec of [postPhotosTool, uploadPhotosDraftTool]) {
     assert.deepEqual(spec.annotations, {
       readOnlyHint: false,
@@ -1454,7 +1454,7 @@ test('§ 3.10 / § 3.11 both photo tools are destructive, and only the posting o
   }
   assert.equal(postPhotosTool.name, 'tiktok_post_photos');
   assert.deepEqual(postPhotosTool.scopes, ['video.publish']);
-  // § 3.11: the whole point of the draft tool is that it works on a draft-only
+  // § 3.12: the whole point of the draft tool is that it works on a draft-only
   // grant.
   assert.equal(uploadPhotosDraftTool.name, 'tiktok_upload_photos_draft');
   assert.deepEqual(uploadPhotosDraftTool.scopes, ['video.upload']);

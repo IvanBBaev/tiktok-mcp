@@ -266,6 +266,21 @@ slow** — that creates a second post.
 | `network_ambiguous` | The connection broke or timed out after the request may have been sent, or a publish init was answered by a gateway rather than TikTok (a `2xx`/`5xx` that is not TikTok's JSON envelope, or a `5xx` without an error code). Either way the post may exist. **Not** safe to retry blindly. | Check `tiktok_list_publish_journal` and `tiktok_get_publish_status`, then decide. |
 | `publish_not_found` | TikTok has no record of that `publish_id` — expired status window, or another app's id. | Look for the attempt in `tiktok_list_publish_journal` and for the result in `tiktok_list_videos`. |
 | `journal_unreadable` | The local journal file exists but cannot be read or parsed. | Check permissions on `journal.ndjson` beside the env file. Publishing keeps working; only the journal read fails. |
+| `webhook_log_unreadable` | The local webhook event log exists but cannot be read. | Check permissions on `webhooks.ndjson` (and `webhooks.ndjson.1`) beside the env file. The receiver keeps logging while the file can be appended to; only `tiktok_list_webhook_events` fails. |
+
+## Webhooks
+
+TikTok never reaches the receiver until its public URL is the callback URL of
+the app in the developer portal, and `tiktok_list_webhook_events` stays empty
+until then. When a delivery is refused, the server logs why (component `webhook`):
+
+| Answer | Cause | Fix |
+| ------ | ----- | --- |
+| `401` (bad signature) | `TT_CLIENT_SECRET` is not the secret of the app the callback belongs to, a proxy changed the body, or the clocks are further apart than `TT_WEBHOOK_TOLERANCE_S` | Use the app's own secret; forward the body untouched; sync the clock (NTP) |
+| `401` (bearer) | A proxy forwards to another path than `TT_WEBHOOK_PATH`, so the request is not exempt from `TT_HTTP_TOKEN` | Forward the exact path; a query string is fine |
+| `403` | The DNS-rebinding gate refused TikTok's public `Host` | Have the proxy rewrite `Host` to the bind address, or bind past loopback with `TT_HTTP_INSECURE=1` and list the public name in `TT_HTTP_ALLOWED_HOSTS` |
+| `503` | No app credentials are configured yet, or the server is shutting down | Run `login` first; TikTok retries |
+| `500` | `webhooks.ndjson` cannot be appended to | Check the directory and file permissions beside the env file |
 
 ## Uninstall and data removal
 
@@ -280,6 +295,7 @@ if you set it. `doctor` prints the exact paths in its `env file` and
 | ---- | ------------- |
 | `.env` | Client key, client secret, access and refresh tokens, your `TT_*` settings |
 | `journal.ndjson` (+ `journal.ndjson.1`) | Append-only record of publish attempts: timestamp, profile, `open_id`, tool, title excerpt, `publish_id`, outcome. No media, no tokens |
+| `webhooks.ndjson` (+ `webhooks.ndjson.1`) | Only with `TT_WEBHOOK_PATH`: the events TikTok pushed — event name, times, `open_id`, profile, `publish_id`, event content. No tokens |
 | `.env.lock` | The cross-process write lock. Transient — present only while a write is in flight, or left behind by a crash |
 | `journal.ndjson.lock` | The journal's rotation lock. Transient — present only while a rotation is in flight, or left behind by a crash |
 | `.env.pre-schema<N>` | Backup written by a schema migration. Holds credentials |

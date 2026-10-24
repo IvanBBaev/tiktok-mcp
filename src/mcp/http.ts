@@ -63,7 +63,9 @@ import type { Logger } from '../core/log.js';
 import { boundPortOf } from '../core/net.js';
 import { registerSecret } from '../core/redact.js';
 import { canonicalHostName, type Settings } from '../core/settings.js';
+import { SIGNATURE_HEADER } from '../api/webhook.js';
 import type { McpServerHandle } from './server.js';
+import type { WebhookRoute } from './webhook.js';
 
 /** The single path served. Anything else is a 404 — with a valid token or not. */
 export const MCP_PATH = '/mcp';
@@ -84,6 +86,13 @@ const PARSE_ERROR = -32700;
  * any size before parsing it on the event loop.
  */
 const MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The largest webhook body read. TikTok's events are a few hundred bytes; the
+ * path skips the bearer, so an anonymous caller gets far less than the
+ * authenticated MCP endpoint does.
+ */
+const MAX_WEBHOOK_BODY_BYTES = 64 * 1024;
 
 /** Live sessions at most; one more `initialize` is refused, not queued. */
 const DEFAULT_MAX_SESSIONS = 128;
@@ -326,6 +335,12 @@ export interface HttpTransportOptions {
   sessionIdleMs?: number;
   /** How long `close()` waits for requests in flight; defaults to 10 s. A test seam. */
   drainMs?: number;
+  /**
+   * The TikTok webhook receiver (`TT_WEBHOOK_PATH`). Its path is exempt from
+   * the bearer — the signature is its authentication — but not from the
+   * `Host`/`Origin` gate.
+   */
+  webhook?: WebhookRoute;
 }
 
 export interface HttpTransportHandle {
@@ -423,16 +438,16 @@ function readBody(req: IncomingMessage, limit: number): Promise<Buffer | undefin
 }
 
 /**
- * The parsed JSON body of a POST, or `undefined` once the request has been
- * answered here: 413 past {@link MAX_BODY_BYTES}, 400 for a body that is not
- * JSON — the same answer the SDK gives, without the SDK ever buffering it.
+ * The raw body of a request, or `undefined` once it has been answered here
+ * with a 413 for exceeding `limit` — declared or actual.
  */
-async function readJsonBody(
+async function readBoundedBody(
   req: IncomingMessage,
   res: ServerResponse,
-): Promise<{ body: unknown } | undefined> {
+  limit: number,
+): Promise<Buffer | undefined> {
   const declared = Number(headerValue(req, 'content-length'));
-  const raw = declared > MAX_BODY_BYTES ? undefined : await readBody(req, MAX_BODY_BYTES);
+  const raw = declared > limit ? undefined : await readBody(req, limit);
   if (raw === undefined) {
     sendJsonRpcError(res, 413, TRANSPORT_ERROR, 'Payload Too Large', {
       connection: 'close',
@@ -441,14 +456,37 @@ async function readJsonBody(
     res.once('finish', () => {
       req.destroy();
     });
-    return undefined;
   }
+  return raw;
+}
+
+/**
+ * The parsed JSON body of a POST, or `undefined` once the request has been
+ * answered here: 413 past {@link MAX_BODY_BYTES}, 400 for a body that is not
+ * JSON — the same answer the SDK gives, without the SDK ever buffering it.
+ */
+async function readJsonBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<{ body: unknown } | undefined> {
+  const raw = await readBoundedBody(req, res, MAX_BODY_BYTES);
+  if (raw === undefined) return undefined;
   try {
     return { body: JSON.parse(raw.toString('utf8')) };
   } catch {
     sendJsonRpcError(res, 400, PARSE_ERROR, 'Parse error: Invalid JSON');
     return undefined;
   }
+}
+
+/** A bodiless answer: all a webhook sender reads is the status. */
+function sendStatus(
+  res: ServerResponse,
+  status: number,
+  headers: Record<string, string> = {},
+): void {
+  res.writeHead(status, { 'content-length': '0', ...headers });
+  res.end();
 }
 
 /**
@@ -809,10 +847,38 @@ export async function startHttpTransport(
     await openSession(req, res, body);
   }
 
+  /**
+   * One delivery on the webhook path. POST only; refused while draining, so
+   * TikTok redelivers it to the next process instead of racing the shutdown.
+   */
+  async function receiveWebhook(
+    req: IncomingMessage,
+    res: ServerResponse,
+    webhook: WebhookRoute,
+  ): Promise<void> {
+    if (req.method !== 'POST') {
+      sendStatus(res, 405, { allow: 'POST' });
+      return;
+    }
+    if (phase !== 'open') {
+      sendStatus(res, 503);
+      return;
+    }
+    const rawBody = await readBoundedBody(req, res, MAX_WEBHOOK_BODY_BYTES);
+    if (rawBody === undefined) return;
+    const status = await webhook.receive({
+      signature: headerValue(req, SIGNATURE_HEADER),
+      rawBody,
+    });
+    sendStatus(res, status);
+  }
+
   async function dispatch(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       // Order matters: the rebinding gate and the bearer both run before the
       // path is looked at, so an unauthenticated prober cannot map the surface.
+      // The one path seen earlier is the webhook's, which the operator has
+      // already published by registering it with TikTok.
       const rejected = dnsRebindingRejection(
         { host: headerValue(req, 'host'), origin: headerValue(req, 'origin') },
         policy,
@@ -832,6 +898,13 @@ export async function startHttpTransport(
         return;
       }
       req.headers.host = canonicalHostHeader(headerValue(req, 'host'));
+      // TikTok cannot present the bearer; the receiver checks the signature
+      // instead. Only the exact configured path is exempt.
+      const { webhook } = opts;
+      if (webhook !== undefined && requestPath(String(req.url)) === webhook.path) {
+        await receiveWebhook(req, res, webhook);
+        return;
+      }
       if (!bearerAccepted(headerValue(req, 'authorization'), expectedDigest)) {
         // One body and one log line for both "no credential" and "wrong
         // credential" — telling them apart is exactly what a prober is after.

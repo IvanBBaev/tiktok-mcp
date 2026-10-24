@@ -719,12 +719,40 @@ contracts are designed so a compliant UX is the natural path:
 - **Research API** (`/v2/research/…`, client-credentials auth): US/EU academic
   access only, separate application process. Planned as an optional package —
   see ROADMAP Phase 3. Not scaffolded in v1 (no dark code).
-- **Commercial Content API**, **Business/Marketing API** (ads), **Webhooks**
-  (`post.publish.*`, `authorization.removed`, `portability.*` events): out of
-  v1 scope; ROADMAP Phase 5 schedules them.
+- **Commercial Content API**, **Business/Marketing API** (ads): out of
+  v1 scope; ROADMAP Phase 5 schedules them. **Webhooks** arrived in 2.0 — § 10;
+  its events are logged as received.
 - **Comments:** the Display API / Login Kit surface this server uses has no
   comment endpoints. Comment management on owned videos exists only in the
   Business API (Business accounts, separate app and OAuth) — ROADMAP Phase 5, 2.0.
+
+## 10. Webhooks (event push)
+
+TikTok pushes events to the app's **callback URL**, registered per app in the
+developer portal (one URL for all events). This server receives them on
+`TT_WEBHOOK_PATH` under the HTTP transport.
+
+- **Request:** `POST`, `Content-Type: application/json`, body
+  `{ client_key, event, create_time, user_openid, content }` — `create_time` in
+  Unix seconds; `content` is a **JSON-encoded string** (e.g.
+  `"{\"publish_id\":\"v_pub_file~v2.123\"}"`), decoded by
+  `parseWebhookEvent`. A body that names another `client_key` is refused `400`.
+- **Signature:** header `TikTok-Signature: t=<unix seconds>,s=<hex>`, where
+  `s = HMAC-SHA256(client_secret, "<t>." + raw body)`. Verified over the raw
+  bytes before any parsing, compared constant-time; a `t` further than
+  `TT_WEBHOOK_TOLERANCE_S` (default 300 s) from the local clock, either way, is
+  refused as a replay.
+- **Answer:** any `2xx` acknowledges. TikTok retries a delivery that is not
+  acknowledged, so the same event can arrive more than once; the receiver keys
+  redeliveries on the SHA-256 of the raw body and records each event once.
+- **Events this build names** (`WEBHOOK_EVENTS`): `authorization.removed`,
+  `post.publish.failed`, `post.publish.complete`, `post.publish.inbox_delivered`,
+  `post.publish.publicly_available`, `post.publish.no_longer_publicly_available`,
+  the legacy `video.upload.failed` / `video.publish.completed`, and
+  `portability.download.ready`. The `post.publish.*` content
+  carries `publish_id` (plus `post_id` once public, `reason` on failure);
+  `authorization.removed` carries a `reason` code. An unnamed event is still
+  logged.
 
 ## Appendix A — sandbox probe index
 

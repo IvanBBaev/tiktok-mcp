@@ -14,6 +14,16 @@ plumbing stay in the commit history where they belong.
 
 ### Added
 
+- **Webhook receiver (`TT_WEBHOOK_PATH`).** On the HTTP transport, TikTok can
+  now push events — publish completed, failed, publicly available,
+  authorization removed — to a path of your choice. Deliveries are verified by
+  their `TikTok-Signature` HMAC under the client secret (the path skips the
+  bearer token), checked against a replay window (`TT_WEBHOOK_TOLERANCE_S`,
+  default 300 s), recorded once each in `webhooks.ndjson` beside the env file,
+  and read back with the new closed-world tool `tiktok_list_webhook_events`
+  (`publish` package; filter by event, `publish_id` or account). Register the
+  path's public HTTPS URL as the app's callback URL in the TikTok developer
+  portal; see CONFIGURATION.md § Transport and SECURITY.md § Webhook receiver.
 - **Per-host concurrency cap (`TT_MAX_CONCURRENT`, default 4).** In-flight HTTP
   attempts to one host are now bounded by a FIFO semaphore, so concurrent
   sessions on the HTTP transport cannot open an unbounded number of upstream

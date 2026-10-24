@@ -30,6 +30,7 @@ import { postPhotosTool, uploadPhotosDraftTool } from './publish-photos.js';
 import { postVideoTool, uploadVideoDraftTool } from './publish-write.js';
 import { getUserInfoTool } from './user.js';
 import { listVideosTool, queryVideosTool } from './video.js';
+import { listWebhookEventsTool } from './webhooks.js';
 
 export interface ToolPackageSpec {
   /** Package name as used by `TT_TOOL_PACKAGES` / `TT_PACKAGES_DENY`. */
@@ -48,6 +49,7 @@ export const PACKAGES: readonly ToolPackageSpec[] = Object.freeze([
       getCreatorInfoTool,
       getPublishStatusTool,
       listPublishJournalTool,
+      listWebhookEventsTool,
     ]),
   },
   {

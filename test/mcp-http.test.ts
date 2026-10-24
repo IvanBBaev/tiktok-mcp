@@ -196,6 +196,7 @@ interface BindOptions {
   maxSessions?: number;
   sessionIdleMs?: number;
   drainMs?: number;
+  webhook?: HttpTransportOptions['webhook'];
 }
 
 async function bind(opts: BindOptions = {}): Promise<Bound> {
@@ -218,6 +219,7 @@ async function bind(opts: BindOptions = {}): Promise<Bound> {
     ...(opts.maxSessions === undefined ? {} : { maxSessions: opts.maxSessions }),
     ...(opts.sessionIdleMs === undefined ? {} : { sessionIdleMs: opts.sessionIdleMs }),
     ...(opts.drainMs === undefined ? {} : { drainMs: opts.drainMs }),
+    ...(opts.webhook === undefined ? {} : { webhook: opts.webhook }),
   });
   return {
     transport,
@@ -2955,3 +2957,143 @@ test(
     }
   },
 );
+
+// ---------------------------------------------------------------------------
+// webhook route
+// ---------------------------------------------------------------------------
+
+const WEBHOOK_PATH = '/tiktok/events';
+
+/** A route that records what it was handed and answers `status`. */
+function recordingWebhook(status = 200): {
+  route: NonNullable<HttpTransportOptions['webhook']>;
+  deliveries: { signature: string | undefined; rawBody: string }[];
+} {
+  const deliveries: { signature: string | undefined; rawBody: string }[] = [];
+  return {
+    deliveries,
+    route: {
+      path: WEBHOOK_PATH,
+      receive: ({ signature, rawBody }) => {
+        deliveries.push({ signature, rawBody: rawBody.toString('utf8') });
+        return Promise.resolve(status);
+      },
+    },
+  };
+}
+
+test('webhook: a POST on the path skips the bearer and answers the receiver status', async () => {
+  for (const status of [200, 401, 500]) {
+    const hook = recordingWebhook(status);
+    const b = await bind({ webhook: hook.route });
+    try {
+      const res = await raw(b.port, {
+        path: WEBHOOK_PATH,
+        headers: { 'content-type': 'application/json', 'TikTok-Signature': 't=1,s=ab' },
+        body: '{"event":"x"}',
+      });
+      assert.equal(res.status, status);
+      assert.equal(res.body, '');
+      assert.equal(res.headers['content-length'], '0');
+      assert.deepEqual(hook.deliveries, [
+        { signature: 't=1,s=ab', rawBody: '{"event":"x"}' },
+      ]);
+    } finally {
+      await b.close();
+    }
+  }
+});
+
+test('webhook: no signature header reaches the receiver as undefined', async () => {
+  const hook = recordingWebhook(401);
+  const b = await bind({ webhook: hook.route });
+  try {
+    const res = await raw(b.port, { path: WEBHOOK_PATH, body: '{}' });
+    assert.equal(res.status, 401);
+    assert.deepEqual(hook.deliveries, [{ signature: undefined, rawBody: '{}' }]);
+  } finally {
+    await b.close();
+  }
+});
+
+test('webhook: only the exact path is exempt — a neighbour still needs the bearer', async () => {
+  const hook = recordingWebhook();
+  const b = await bind({ webhook: hook.route });
+  try {
+    for (const path of [`${WEBHOOK_PATH}/x`, `${WEBHOOK_PATH}x`, MCP_PATH]) {
+      const res = await raw(b.port, { path, body: '{}' });
+      assert.equal(res.status, 401, path);
+    }
+    // A query string does not change the path.
+    const res = await raw(b.port, { path: `${WEBHOOK_PATH}?a=1`, body: '{}' });
+    assert.equal(res.status, 200);
+    assert.equal(hook.deliveries.length, 1);
+  } finally {
+    await b.close();
+  }
+});
+
+test('webhook: anything but POST is a 405 with allow: POST', async () => {
+  const hook = recordingWebhook();
+  const b = await bind({ webhook: hook.route });
+  try {
+    for (const method of ['GET', 'PUT', 'DELETE']) {
+      const res = await raw(b.port, { method, path: WEBHOOK_PATH });
+      assert.equal(res.status, 405, method);
+      assert.equal(res.headers['allow'], 'POST');
+    }
+    assert.equal(hook.deliveries.length, 0);
+  } finally {
+    await b.close();
+  }
+});
+
+test('webhook: a declared body past 64 KiB is a 413 the receiver never sees', async () => {
+  const hook = recordingWebhook();
+  const b = await bind({ webhook: hook.route });
+  try {
+    const res = await raw(b.port, {
+      path: WEBHOOK_PATH,
+      headers: { 'content-length': String(64 * 1024 + 1) },
+    });
+    assert.equal(res.status, 413);
+    assert.equal(hook.deliveries.length, 0);
+  } finally {
+    await b.close();
+  }
+});
+
+test('webhook: the DNS-rebinding gate still runs first', async () => {
+  const hook = recordingWebhook();
+  const b = await bind({ webhook: hook.route });
+  try {
+    const res = await raw(b.port, {
+      path: WEBHOOK_PATH,
+      headers: { host: 'evil.example' },
+      body: '{}',
+    });
+    assert.equal(res.status, 403);
+    assert.equal(hook.deliveries.length, 0);
+  } finally {
+    await b.close();
+  }
+});
+
+test('webhook: a delivery once close() has begun is a 503 — TikTok redelivers it', async () => {
+  await withCapturedServer(async (server) => {
+    const hook = recordingWebhook();
+    const b = await bind({ webhook: hook.route });
+    await b.close();
+
+    const req = Object.assign(Readable.from([Buffer.from('{}')]), {
+      method: 'POST',
+      url: WEBHOOK_PATH,
+      headers: { host: `127.0.0.1:${String(b.port)}`, 'content-length': '2' },
+    }) as unknown as IncomingMessage;
+    const recorded = recordedResponse();
+    server().emit('request', req, recorded.res);
+    await recorded.ended;
+    assert.equal(recorded.status(), 503);
+    assert.equal(hook.deliveries.length, 0);
+  });
+});

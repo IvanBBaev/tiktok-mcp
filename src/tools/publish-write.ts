@@ -1,6 +1,6 @@
 /**
- * The video half of the write surface: `tiktok_post_video` (TOOLS.md § 3.8) and
- * `tiktok_upload_video_draft` (§ 3.9).
+ * The video half of the write surface: `tiktok_post_video` (TOOLS.md § 3.9) and
+ * `tiktok_upload_video_draft` (§ 3.10).
  *
  * These are the tools that can create something a user cannot undo from here —
  * posts are neither editable nor deletable through the API, and a draft has
@@ -12,7 +12,7 @@
  *     `post_info` from it, and posts `DIRECT_POST`.
  *   - `tiktok_upload_video_draft` sends no `post_info` at all and never calls
  *     `creator_info` — a `video.upload`-only grant may not carry the scope for
- *     it (§ 3.9) — so it has no `creator` block and no consent line.
+ *     it (§ 3.10) — so it has no `creator` block and no consent line.
  *
  * Both accept the same two byte sources, and that is the other thing this file
  * owns: `source: "url"` hands TikTok a verified URL to pull, `source: "file"`
@@ -99,7 +99,7 @@ const POST_MODE = 'DIRECT_POST';
 const DRAFT_POST_MODE = 'MEDIA_UPLOAD';
 
 // ---------------------------------------------------------------------------
-// Result shapes (TOOLS.md § 3.8, § 3.9)
+// Result shapes (TOOLS.md § 3.9, § 3.10)
 // ---------------------------------------------------------------------------
 
 export type PostVideoData = WritePreview | AppliedData;
@@ -107,7 +107,7 @@ export type PostVideoData = WritePreview | AppliedData;
 export type UploadDraftData = DraftPreview | AppliedData;
 
 // ---------------------------------------------------------------------------
-// The byte source, shared by both tools (TOOLS.md § 3.8 input rows)
+// The byte source, shared by both tools (TOOLS.md § 3.9 input rows)
 // ---------------------------------------------------------------------------
 
 /** The two source fields, as both tools' schemas expose them. */
@@ -167,7 +167,7 @@ const VIDEO_URL_DESCRIPTION =
  * The source the caller chose, once the cross-field rules have been checked —
  * one field, present, instead of two that are optional apart.
  *
- * This is the discrimination § 3.8 describes, expressed where it can be
+ * This is the discrimination § 3.9 describes, expressed where it can be
  * expressed. The schema cannot carry it: a `z.discriminatedUnion` produces a
  * JSON Schema with no top-level object shape, which both `mcp/define`'s
  * strictness probe and the models reading the manifest depend on, so the flat
@@ -386,7 +386,7 @@ function videoSender(
 }
 
 // ---------------------------------------------------------------------------
-// Input (TOOLS.md § 3.8)
+// Input (TOOLS.md § 3.9)
 // ---------------------------------------------------------------------------
 
 const DESCRIPTION =
@@ -735,7 +735,7 @@ async function executePost(
 }
 
 // ---------------------------------------------------------------------------
-// tiktok_post_video (§ 3.8)
+// tiktok_post_video (§ 3.9)
 // ---------------------------------------------------------------------------
 
 export const postVideoTool = defineTool<PostVideoInput, PostVideoData>({
@@ -776,7 +776,7 @@ export const postVideoTool = defineTool<PostVideoInput, PostVideoData>({
 });
 
 // ---------------------------------------------------------------------------
-// tiktok_upload_video_draft (TOOLS.md § 3.9)
+// tiktok_upload_video_draft (TOOLS.md § 3.10)
 // ---------------------------------------------------------------------------
 
 const DRAFT_DESCRIPTION =
@@ -845,7 +845,7 @@ async function previewDraft(
     openId,
     source.value.fileIdentity,
   );
-  // No creator_info on a draft (§ 3.9), so the platform maximum stands in.
+  // No creator_info on a draft (§ 3.10), so the platform maximum stands in.
   const media = await previewMedia(source.value);
 
   return {
@@ -936,12 +936,12 @@ export const uploadVideoDraftTool = defineTool<UploadDraftInput, UploadDraftData
   description: DRAFT_DESCRIPTION,
   package: 'publish-write',
   // NOT video.publish: the whole point of this tool is that it works on a
-  // draft-only grant (§ 3.9).
+  // draft-only grant (§ 3.10).
   scopes: ['video.upload'],
   annotations: {
     readOnlyHint: false,
     // Nothing goes live, but the draft has left for the user's inbox and this
-    // server cannot retract it — and it has spent pending-share quota (§ 3.9).
+    // server cannot retract it — and it has spent pending-share quota (§ 3.10).
     destructiveHint: true,
     idempotentHint: false,
     openWorldHint: true,

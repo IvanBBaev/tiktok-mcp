@@ -248,6 +248,19 @@ export const SECTIONS: readonly Section[] = [
         ],
         render: 'optional',
       },
+      {
+        name: 'TT_WEBHOOK_PATH',
+        comment: [
+          'Path of the TikTok webhook receiver on the http transport (e.g. /tiktok/events);',
+          'bearer-exempt, verified by the TikTok-Signature HMAC instead. Unset = no receiver.',
+        ],
+        render: 'optional',
+      },
+      {
+        name: 'TT_WEBHOOK_TOLERANCE_S',
+        comment: ['Accepted webhook signature timestamp skew, in seconds (30-3600).'],
+        render: 'default',
+      },
     ],
   },
   {

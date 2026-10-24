@@ -28,7 +28,7 @@ Conventions:
 
 ## 1. Surface at a glance
 
-**12 tools, 6 packages.** (rationale: SYNTHESIS § 2.9; `analytics` added in 1.1 — ROADMAP Phase 5)
+**13 tools, 6 packages.** (rationale: SYNTHESIS § 2.9; `analytics` added in 1.1 — ROADMAP Phase 5; `tiktok_list_webhook_events` added in 2.0)
 
 | # | Tool | Package | readOnlyHint | destructiveHint | idempotentHint | openWorldHint | Required scope |
 |---|---|---|---|---|---|---|---|
@@ -39,14 +39,15 @@ Conventions:
 | 5 | `tiktok_get_creator_info` | publish | true | false | true | true | `video.publish` |
 | 6 | `tiktok_get_publish_status` | publish | true | false | true | true | `video.publish` or `video.upload` |
 | 7 | `tiktok_list_publish_journal` | publish | true | false | true | **false** | — |
-| 8 | `tiktok_post_video` | publish-write | false | **true** | false | true | `video.publish` |
-| 9 | `tiktok_upload_video_draft` | publish-write | false | **true** | false | true | `video.upload` |
-| 10 | `tiktok_post_photos` | publish-write | false | **true** | false | true | `video.publish` |
-| 11 | `tiktok_upload_photos_draft` | publish-write | false | **true** | false | true | `video.upload` |
-| 12 | `tiktok_get_video_analytics` | analytics | true | false | true | true | `video.list` |
+| 8 | `tiktok_list_webhook_events` | publish | true | false | true | **false** | — |
+| 9 | `tiktok_post_video` | publish-write | false | **true** | false | true | `video.publish` |
+| 10 | `tiktok_upload_video_draft` | publish-write | false | **true** | false | true | `video.upload` |
+| 11 | `tiktok_post_photos` | publish-write | false | **true** | false | true | `video.publish` |
+| 12 | `tiktok_upload_photos_draft` | publish-write | false | **true** | false | true | `video.upload` |
+| 13 | `tiktok_get_video_analytics` | analytics | true | false | true | true | `video.list` |
 
 **Packages.** `auth`, `user`, `video`, `publish` (read-only publishing context:
-creator info, publish status, journal), `publish-write` (the four destructive
+creator info, publish status, journal, received webhook events), `publish-write` (the four destructive
 writes), `analytics` (figures computed locally from the video list; appended
 last so the order of the first five stays frozen). Package profiles: `core` =
 auth + user + video + publish + analytics (no writes); `all` = everything. `TT_WRITE_MODE=deny` unregisters
@@ -59,9 +60,9 @@ every tool):
 - Read tools: `readOnlyHint: true`, `destructiveHint: false`,
   `idempotentHint: true` (repeat calls observe, never mutate),
   `openWorldHint: true` (they consult the upstream API) — except
-  `tiktok_list_publish_journal`, the one closed-world tool
-  (`openWorldHint: false`): it reads a local file only, and its results are
-  fully determined by prior local writes.
+  `tiktok_list_publish_journal` and `tiktok_list_webhook_events`, the two
+  closed-world tools (`openWorldHint: false`): each reads a local file only,
+  and its results are fully determined by prior local writes.
 - Write tools: `destructiveHint: true` because a published post (or delivered
   draft) **cannot be edited or deleted through this server** — an irreversible
   external effect, which is exactly what the hint exists to signal;
@@ -446,7 +447,7 @@ seven. Per-tool sections list only additions.
 | `branded_content_privacy_conflict` | no | "brand_content_toggle: true cannot be combined with privacy_level SELF_ONLY — TikTok rejects branded content on private-visibility posts. While this app is unaudited, only SELF_ONLY is available, so branded-content posting is not possible at all. Either drop the brand toggle or wait until the app passes TikTok's audit." |
 
 `url_prefix_unverified` has one sanctioned variant. The photo tools have no
-local-file source at all (§§ 3.10–3.11), so offering `source "file"` there would
+local-file source at all (§§ 3.11–3.12), so offering `source "file"` there would
 name a field their schema does not have. For those two tools the sentence
 *"Use source \"file\" for local video files, or ask the user to host the media
 under a verified prefix."* is replaced by *"Ask the user to host the media under
@@ -502,7 +503,7 @@ here rather than blessed: closing them means moving the guard to where those
 errors become `ToolResult`s, not widening the rule.
 
 **Per-tool additions** (defined in their sections): `publish_not_found`
-(§ 3.6), `journal_unreadable` (§ 3.7).
+(§ 3.6), `journal_unreadable` (§ 3.7), `webhook_log_unreadable` (§ 3.8).
 
 Notes:
 
@@ -767,7 +768,47 @@ Notes:
   |---|---|---|
   | `journal_unreadable` | no | "The journal file at <path> is missing or unreadable. Publishes may still have happened — verify with tiktok_list_videos. Ask the user to check the file if an audit trail is required." |
 
-### 3.8 `tiktok_post_video`
+### 3.8 `tiktok_list_webhook_events`
+
+- **Package:** `publish`. **Annotations:** `readOnlyHint: true`,
+  `destructiveHint: false`, `idempotentHint: true`, **`openWorldHint: false`**
+  — closed-world like § 3.7: it reads the local webhook log only.
+- **Scopes:** none. No network.
+- **Description** (normative):
+
+  > Read the events TikTok pushed to this server's webhook receiver, newest
+  > first: event name (e.g. "post.publish.complete", "post.publish.failed",
+  > "authorization.removed"), receipt and event time, account, publish_id and
+  > the event content. Filter by event, publish_id or account. Local file read;
+  > no network, no scopes required. Events arrive only while the server runs
+  > over HTTP with TT_WEBHOOK_PATH registered as the app's callback URL.
+
+- **Input schema:**
+
+  | Field | Type | Req | Constraints | `.describe()` |
+  |---|---|---|---|---|
+  | `account` | string | no | | "Filter to one profile. Omit for all profiles." (a filter, as in § 3.7: matched after trim and upper-case, a whitespace-only value filters nothing, and under `TT_LOCK_PROFILE` only the locked profile's events are shown; an event whose `open_id` matched no local profile has no account and appears only unfiltered) |
+  | `event` | string | no | | "Filter to one event name, e.g. \"post.publish.complete\"." |
+  | `publish_id` | string | no | | "Filter to the events of one publish." |
+  | `limit` | integer | no | 1–200, default 20 | "Newest events to return." |
+
+- **Output:** `{ events: [{ received_at, event, created_at, account?,
+  open_id, publish_id?, content }], meta: { log_path, total_matching,
+  skipped_lines } }` — `created_at` is TikTok's `create_time` as ISO-8601 UTC,
+  `content` the decoded event content (TIKTOK-API.md § 10), `skipped_lines` the
+  torn or unknown-version log lines the reader ignored.
+- **Source:** the receiver of `TT_WEBHOOK_PATH` (CONFIGURATION.md § Transport)
+  appends each verified event to `webhooks.ndjson` beside the env file (mode
+  `0600`, rotated to `webhooks.ndjson.1` past 1 MiB; both generations are read, redeliveries logged once). With no log yet the
+  answer is empty with a `note` that says how to set the receiver up — or, when
+  `TT_WEBHOOK_PATH` is set, how to check the registered callback URL.
+- **Errors:**
+
+  | Code | Retryable | Message text (normative) |
+  |---|---|---|
+  | `webhook_log_unreadable` | no | "The webhook event log at <path> exists but cannot be read. Ask the user to check its permissions; events TikTok sends are still recorded while the file can be appended to." |
+
+### 3.9 `tiktok_post_video`
 
 - **Package:** `publish-write`. **Annotations:** `readOnlyHint: false`,
   **`destructiveHint: true`**, `idempotentHint: false`, `openWorldHint: true`.
@@ -877,7 +918,7 @@ Notes:
   `file_outside_media_root`, `url_prefix_unverified`, `local_rate_limited`,
   `daily_post_cap`, `active_user_cap`.
 
-### 3.9 `tiktok_upload_video_draft`
+### 3.10 `tiktok_upload_video_draft`
 
 - **Package:** `publish-write`. **Annotations:** `readOnlyHint: false`,
   **`destructiveHint: true`**, `idempotentHint: false`, `openWorldHint: true`.
@@ -901,13 +942,13 @@ Notes:
   > post.
 
 - **Input schema:** `account`, `source`, `file_path`, `video_url` (rows as
-  § 3.8, including the flat strict object and the handler-side mutual-exclusion
+  § 3.9, including the flat strict object and the handler-side mutual-exclusion
   check), `wait_for_completion` (default `false`; the terminal status here is
   `SEND_TO_USER_INBOX`), `plan_id`, `force`. **No title/privacy/toggle
   fields** — the upstream inbox init accepts none, and offering dead fields
   teaches the model false affordances. The schema omission is itself the
   contract.
-- **Preview/apply output:** as § 3.8 with `action: "MEDIA_UPLOAD video
+- **Preview/apply output:** as § 3.9 with `action: "MEDIA_UPLOAD video
   draft"`, with everything the absent fields imply removed: the preview is
   always `mode: "plan"` (nothing can be missing, so `plan_incomplete` is
   unreachable), `payload` carries **`source` only — no `post_info`**, and there
@@ -920,14 +961,14 @@ Notes:
   edit and publish the draft. Unopened drafts expire."* — except when
   `wait_for_completion` observed a terminal `FAILED`: that draft never reached
   the inbox, so there is nothing to open and no `user_action` is given (the
-  `fail_reason`/`fail_recovery` pair of § 3.8 carries the outcome instead).
-  A file preview carries the § 3.8 `media_check` (and its `note` hint),
+  `fail_reason`/`fail_recovery` pair of § 3.9 carries the outcome instead).
+  A file preview carries the § 3.9 `media_check` (and its `note` hint),
   judged against the 600 s platform maximum since there is no `creator_info`.
 - **Errors:** shared catalog; `pending_share_cap` is the signature error
   here. No `privacy_level_unavailable` / `branded_content_privacy_conflict`
   (the fields do not exist on this tool).
 
-### 3.10 `tiktok_post_photos`
+### 3.11 `tiktok_post_photos`
 
 - **Package:** `publish-write`. **Annotations:** `readOnlyHint: false`,
   **`destructiveHint: true`**, `idempotentHint: false`, `openWorldHint: true`.
@@ -957,15 +998,15 @@ Notes:
   | `photo_cover_index` | integer | no | 0 ≤ i < `photo_urls.length`; default 0; the cross-field bound is a handler check (zod bounds the array, not the index against it) | "Zero-based index of the cover photo. Must be a valid index into photo_urls." |
   | `title` | string | no | ≤ 90 UTF-16 code units | "Photo post title — max 90 UTF-16 code units (NOT 2200; photos differ from videos). Longer text goes in description." |
   | `description` | string | no | ≤ 4000 UTF-16 code units | "Photo post description, up to 4000 UTF-16 code units. #hashtags and @mentions are parsed here." |
-  | `privacy_level` | enum | for execution | as § 3.8 | (as § 3.8) |
+  | `privacy_level` | enum | for execution | as § 3.9 | (as § 3.9) |
   | `disable_comment` | boolean | no | default `false` | "true disables comments on this post." |
   | `auto_add_music` | boolean | no | default `false` | "true lets TikTok add recommended music to the carousel. Ask the user; photo posts without music play silent." |
-  | `brand_content_toggle` | boolean | no | default `false` | (as § 3.8) |
-  | `brand_organic_toggle` | boolean | no | default `false` | (as § 3.8) |
-  | `is_aigc` | boolean | no | default from `TT_DEFAULT_AIGC_LABEL` | (as § 3.8) |
-  | `wait_for_completion` | boolean | no | **default `false`** | (as § 3.8) |
-  | `plan_id` | string | no | `plan_` + 32 lowercase hex characters | (as § 3.8) |
-  | `force` | boolean | no | default `false` | (as § 3.8) |
+  | `brand_content_toggle` | boolean | no | default `false` | (as § 3.9) |
+  | `brand_organic_toggle` | boolean | no | default `false` | (as § 3.9) |
+  | `is_aigc` | boolean | no | default from `TT_DEFAULT_AIGC_LABEL` | (as § 3.9) |
+  | `wait_for_completion` | boolean | no | **default `false`** | (as § 3.9) |
+  | `plan_id` | string | no | `plan_` + 32 lowercase hex characters | (as § 3.9) |
+  | `force` | boolean | no | default `false` | (as § 3.9) |
 
 - **Carousel validation happens before any network call.** Both cross-field
   rules are enforced in the handler, on the preview call and again on the
@@ -977,7 +1018,7 @@ Notes:
   is told which entry is wrong fixes that entry, where a list of every
   offender invites a blind re-send. There is no `source` field and no `"file"`
   path: the photo API pulls from URLs only.
-- **Preview/apply output:** as § 3.8 with `action: "DIRECT_POST photos"`; the
+- **Preview/apply output:** as § 3.9 with `action: "DIRECT_POST photos"`; the
   source block is `{ type: "url", urls, photo_cover_index }`; the
   duplicate-guard title hash uses title + description.
 - **Errors:** shared catalog; `url_prefix_unverified` (checked per URL, the
@@ -988,11 +1029,11 @@ Notes:
   **No duet/stitch fields exist for photos** — the schema omission is itself
   the contract.
 
-### 3.11 `tiktok_upload_photos_draft`
+### 3.12 `tiktok_upload_photos_draft`
 
 - **Package:** `publish-write`. **Annotations:** `readOnlyHint: false`,
   **`destructiveHint: true`**, `idempotentHint: false`, `openWorldHint: true`
-  (same justification as § 3.9).
+  (same justification as § 3.10).
 - **Scopes:** `video.upload`.
 - **Description** (normative):
 
@@ -1006,21 +1047,21 @@ Notes:
   > success, tell the user to open the TikTok app inbox notification.
 
 - **Input schema:** `account`, `photo_urls`, `photo_cover_index`, `title`,
-  `description` (rows as § 3.10). Unlike the video draft, this tool therefore
+  `description` (rows as § 3.11). Unlike the video draft, this tool therefore
   **does** carry a `post_info` — the photo draft endpoint accepts the two text
   fields and they prefill the app editor. Whether MEDIA_UPLOAD honours them
   upstream is still *probe P-13* (TIKTOK-API.md § 4.4); the shipped schema is
   the working assumption, and only the probe can retire the hedge. Plus
   `wait_for_completion` (default `false`),
   `plan_id`, `force`. No privacy, toggle, or brand fields. The same
-  before-any-network carousel validation as § 3.10 applies (cover index in
+  before-any-network carousel validation as § 3.11 applies (cover index in
   range, every `photo_urls[<i>]` https and verified-prefix).
-- **Preview/apply output:** as § 3.9 with `action: "MEDIA_UPLOAD photos
+- **Preview/apply output:** as § 3.10 with `action: "MEDIA_UPLOAD photos
   draft"` — always `mode: "plan"`, no `derived`, no `creator` block, no
   `consent_line`, `account` without `nickname` — **except** that `payload`
-  carries `post_info` (the title and description limits of § 3.10, resolved
+  carries `post_info` (the title and description limits of § 3.11, resolved
   without a `creator_info` pre-flight) alongside `source`. Apply success
-  carries the same `user_action` hint as § 3.9, withheld under the same rule
+  carries the same `user_action` hint as § 3.10, withheld under the same rule
   when the waited status is `FAILED`.
 - **Errors:** shared catalog; `pending_share_cap`, `url_prefix_unverified`
   (per URL, by index, with no `source: "file"` alternative), `invalid_params`
@@ -1029,7 +1070,7 @@ Notes:
   `video.publish`), hence no `privacy_level_unavailable` /
   `branded_content_privacy_conflict`.
 
-### 3.12 `tiktok_get_video_analytics`
+### 3.13 `tiktok_get_video_analytics`
 
 - **Package:** `analytics`. **Annotations:** `readOnlyHint: true`,
   `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true`.
@@ -1228,7 +1269,7 @@ Every hint additionally has `text: string` — the model-facing sentence(s).
 - `user_action` (draft): `{ type: "user_action", action: "open_tiktok_app",
   text: "Tell the user: open the TikTok app notification to edit and publish
   the draft. Unopened drafts expire." }` — on every draft apply except one whose
-  waited status is `FAILED` (§ 3.9).
+  waited status is `FAILED` (§ 3.10).
 - `user_action` (`file_outside_media_root`): `{ type: "user_action", action:
   "move_file", text: "Only the user can move files: ask them to put the file
   inside the media root the error names, or to set TT_MEDIA_ROOT to a
@@ -1328,7 +1369,7 @@ Every prompt renders **one `user` text message**: the situation in the user's
 own terms, then the numbered steps of the flow it steers, every tool named
 verbatim.
 
-`tiktok_post_video_guided` walks the client through § 4 item 1 with § 3.8's
+`tiktok_post_video_guided` walks the client through § 4 item 1 with § 3.9's
 failure discipline attached: read `tiktok_get_creator_info`, preview with
 `tiktok_post_video` and no `plan_id` (mapping `video` to `source: "url"` +
 `video_url` when it starts with `https://`, else to `source: "file"` +
@@ -1341,7 +1382,7 @@ on `possible_duplicate` verify through `tiktok_list_publish_journal` before
 `force`, and on `plan_mismatch` / `plan_not_found` re-preview rather than
 invent a token.
 
-`tiktok_post_photos_guided` is the same shape over § 3.10: read
+`tiktok_post_photos_guided` is the same shape over § 3.11: read
 `tiktok_get_creator_info` for `privacy_level_options` and whether comments are
 disabled; preview with `tiktok_post_photos` and no `plan_id`, passing
 `photo_urls` as an array in the given order and `photo_cover_index` 0 unless the
@@ -1356,7 +1397,7 @@ discipline is the video flow's plus `url_prefix_unverified`, whose message
 names `photo_urls[<i>]`: the user must host that photo under a verified prefix
 — there is no file upload for photos — and a URL is never rewritten.
 
-`tiktok_upload_draft_guided` covers § 3.9 and § 3.11 with one prompt; the two
+`tiktok_upload_draft_guided` covers § 3.10 and § 3.12 with one prompt; the two
 media arguments decide which of four messages is rendered. A `video` ⇒ the
 `tiktok_upload_video_draft` flow; `photo_urls` ⇒ the
 `tiktok_upload_photos_draft` flow; both ⇒ a message that asks which one to send
@@ -1497,7 +1538,7 @@ ask on every keystroke.
 | Argument | Where | Source |
 |---|---|---|
 | `account` | every prompt; every resource (the `{?account}` variable — concrete URI or template) | the configured profile names (§ 2.2), read fresh from the credential store on each request; under `TT_LOCK_PROFILE` the locked name alone, because that is the only name a call would accept |
-| `privacy_level` | `tiktok_post_video_guided`, `tiktok_post_photos_guided` | the four privacy levels (§ 3.8): `PUBLIC_TO_EVERYONE`, `MUTUAL_FOLLOW_FRIENDS`, `FOLLOWER_OF_CREATOR`, `SELF_ONLY` |
+| `privacy_level` | `tiktok_post_video_guided`, `tiktok_post_photos_guided` | the four privacy levels (§ 3.9): `PUBLIC_TO_EVERYONE`, `MUTUAL_FOLLOW_FRIENDS`, `FOLLOWER_OF_CREATOR`, `SELF_ONLY` |
 | `publish_id` | `tiktok://publish/{publish_id}/status` | the ids in the write-ahead journal (§ 3.7): newest attempt first, each id once, attempts without an id skipped; `context.arguments.account`, when present and non-blank, keeps that profile's attempts only — compared case-insensitively after trim, the filter `tiktok_list_publish_journal` applies; a blank account is no filter; under `TT_LOCK_PROFILE` only the locked profile's attempts, and another account narrows to nothing; no journal yet is no ids. The folded journal is reused while neither generation's size, mtime or inode has changed — a `stat` of each replaces the read; any append, rotation or replacement re-reads both generations |
 | `video`, `photo_urls`, `title`, `description` | the prompts | nothing — `{ "values": [], "total": 0, "hasMore": false }` is the answer, not an error |
 
@@ -1545,7 +1586,7 @@ Rules:
 
 Normative `fail_recovery` texts returned by `tiktok_get_publish_status`
 (§ 3.6) when `status: "FAILED"`, and by the four write tools' applied result
-when `wait_for_completion: true` observed a terminal `FAILED` (§ 3.8):
+when `wait_for_completion: true` observed a terminal `FAILED` (§ 3.9):
 
 | `fail_reason` | Recovery text (normative) |
 |---|---|

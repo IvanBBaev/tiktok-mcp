@@ -1,6 +1,6 @@
 /**
- * The photo half of the write surface: `tiktok_post_photos` (TOOLS.md § 3.10)
- * and `tiktok_upload_photos_draft` (§ 3.11).
+ * The photo half of the write surface: `tiktok_post_photos` (TOOLS.md § 3.11)
+ * and `tiktok_upload_photos_draft` (§ 3.12).
  *
  * Photos are not videos with a different `media_type`, and the differences are
  * the reason this file exists rather than another branch inside
@@ -15,7 +15,7 @@
  *   the long text belongs in `description` (4000). Both limits are enforced in
  *   `api/publish` so the two photo tools cannot drift apart.
  * - **No duet or stitch.** Those fields do not exist upstream for a carousel,
- *   so the schema omits them — the omission is itself the contract (§ 3.10).
+ *   so the schema omits them — the omission is itself the contract (§ 3.11).
  *
  * Everything else — the § 2.6.3 ordering, the plan guards, the duplicate guard,
  * the journal — is `publish-common`'s, unchanged.
@@ -189,7 +189,7 @@ function photoSender(
 }
 
 /**
- * § 3.10: the journal's `title_excerpt` takes title *and* description. A
+ * § 3.11: the journal's `title_excerpt` takes title *and* description. A
  * carousel is frequently untitled with all the text in the description, and
  * excerpting only the title would make every such line look identical to the
  * person reading the journal (the guard itself matches on the payload digest).
@@ -199,7 +199,7 @@ function excerptText(title: string | undefined, description: string | undefined)
 }
 
 // ---------------------------------------------------------------------------
-// tiktok_post_photos (TOOLS.md § 3.10)
+// tiktok_post_photos (TOOLS.md § 3.11)
 // ---------------------------------------------------------------------------
 
 const DESCRIPTION =
@@ -506,7 +506,7 @@ export const postPhotosTool = defineTool<PostPhotosInput, PostPhotosData>({
 });
 
 // ---------------------------------------------------------------------------
-// tiktok_upload_photos_draft (TOOLS.md § 3.11)
+// tiktok_upload_photos_draft (TOOLS.md § 3.12)
 // ---------------------------------------------------------------------------
 
 const DRAFT_DESCRIPTION =
@@ -629,7 +629,7 @@ async function executePhotosDraft(
   if (refused !== undefined) return refused;
 
   // Step 3 — no `creator_info` to re-read: a `video.upload`-only grant may not
-  // carry the scope for it (§ 3.11).
+  // carry the scope for it (§ 3.12).
   const postInfo = draftPostInfo(args);
   const openId = await resolveOpenId(ctx);
 
@@ -680,12 +680,12 @@ export const uploadPhotosDraftTool = defineTool<
   description: DRAFT_DESCRIPTION,
   package: 'publish-write',
   // NOT video.publish: the point of this tool is that it works on a draft-only
-  // grant (§ 3.11).
+  // grant (§ 3.12).
   scopes: ['video.upload'],
   annotations: {
     readOnlyHint: false,
     // Nothing goes live, but the draft has left for the user's inbox, this
-    // server cannot retract it, and it has spent pending-share quota (§ 3.11).
+    // server cannot retract it, and it has spent pending-share quota (§ 3.12).
     destructiveHint: true,
     idempotentHint: false,
     openWorldHint: true,

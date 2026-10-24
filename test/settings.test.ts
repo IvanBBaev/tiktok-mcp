@@ -83,6 +83,8 @@ test('an empty environment yields exactly the documented defaults', () => {
     httpToken: undefined,
     httpInsecure: false,
     httpAllowedHosts: undefined,
+    webhookPath: undefined,
+    webhookToleranceS: 300,
     oauthBaseUrl: undefined,
   });
 });
@@ -685,4 +687,49 @@ test('env-docs-sync Settings has exactly one field per documented variable', asy
 
   assert.deepEqual(missing, [], 'documented variables with no Settings field');
   assert.deepEqual(extra, [], 'Settings fields with no documented variable');
+});
+
+// ---------------------------------------------------------------------------
+// webhooks
+// ---------------------------------------------------------------------------
+
+const HTTP = { TT_TRANSPORT: 'http', TT_HTTP_TOKEN: 'test-http-bearer-0123456789abcdef' };
+
+test('TT_WEBHOOK_PATH takes an absolute unreserved path under http', () => {
+  for (const path of ['/tiktok/webhook', '/a', '/hooks/tt-1.v2_~x']) {
+    assert.equal(load({ ...HTTP, TT_WEBHOOK_PATH: path }).webhookPath, path);
+  }
+});
+
+test('TT_WEBHOOK_PATH rejects relative, odd-character, overlong paths and /mcp', () => {
+  for (const bad of ['tiktok', '/', '/a b', '/a?b=1', '/%2e', `/${'a'.repeat(128)}`]) {
+    assert.match(
+      loadError({ ...HTTP, TT_WEBHOOK_PATH: bad }).message,
+      /TT_WEBHOOK_PATH.*expected an absolute path/,
+      bad,
+    );
+  }
+  assert.match(
+    loadError({ ...HTTP, TT_WEBHOOK_PATH: '/mcp' }).message,
+    /TT_WEBHOOK_PATH.*must differ from the MCP endpoint/,
+  );
+});
+
+test('TT_WEBHOOK_PATH under stdio is refused — nothing could reach it', () => {
+  assert.match(
+    loadError({ TT_WEBHOOK_PATH: '/tiktok/webhook' }).message,
+    /TT_WEBHOOK_PATH: requires TT_TRANSPORT=http/,
+  );
+});
+
+test('TT_WEBHOOK_TOLERANCE_S is 30..3600 seconds', () => {
+  assert.equal(load({ TT_WEBHOOK_TOLERANCE_S: '30' }).webhookToleranceS, 30);
+  assert.equal(load({ TT_WEBHOOK_TOLERANCE_S: '3600' }).webhookToleranceS, 3_600);
+  for (const bad of ['29', '3601', 'soon']) {
+    assert.match(
+      loadError({ TT_WEBHOOK_TOLERANCE_S: bad }).message,
+      /TT_WEBHOOK_TOLERANCE_S/,
+      bad,
+    );
+  }
 });

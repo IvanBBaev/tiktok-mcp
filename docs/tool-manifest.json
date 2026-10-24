@@ -387,6 +387,44 @@
       }
     },
     {
+      "package": "publish",
+      "scopes": [],
+      "name": "tiktok_list_webhook_events",
+      "title": "List received webhook events",
+      "description": "Read the events TikTok pushed to this server's webhook receiver, newest first: event name (e.g. \"post.publish.complete\", \"post.publish.failed\", \"authorization.removed\"), receipt and event time, account, publish_id and the event content. Filter by event, publish_id or account. Local file read; no network, no scopes required. Events arrive only while the server runs over HTTP with TT_WEBHOOK_PATH registered as the app's callback URL.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "description": "Filter to one profile. Omit for all profiles.",
+            "type": "string"
+          },
+          "event": {
+            "description": "Filter to one event name, e.g. \"post.publish.complete\".",
+            "type": "string"
+          },
+          "publish_id": {
+            "description": "Filter to the events of one publish.",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Newest events to return.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "List received webhook events",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
       "package": "publish-write",
       "scopes": [
         "video.publish"

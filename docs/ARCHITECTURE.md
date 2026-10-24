@@ -171,6 +171,19 @@ await connectTransport(server);
   session with a request in flight, an open stream or an unanswered JSON-RPC
   call is never idle. A `Host` whose port is not a decimal 1–65535 is refused
   `403` by the Origin/Host gate, not a bare SDK `400`.
+- **Webhook receiver** (`TT_WEBHOOK_PATH`, `src/mcp/webhook.ts` +
+  `src/api/webhook.ts`). `src/index.ts` builds it with `webhookRouteFor` and
+  hands it to the HTTP transport as `HttpTransportOptions.webhook`. That exact
+  path is answered before the bearer check (after the Origin/Host gate): `POST`
+  only, a 64 KiB body cap, `503` while draining, and a bare status from the
+  receiver. The receiver re-reads the app credentials and profile `open_id`s
+  from the env file per delivery, verifies `TikTok-Signature` over the raw
+  body, decodes the event, drops a redelivery by body digest (the last 1024 in
+  memory, the log on disk), and appends the record to `webhooks.ndjson` before
+  answering `200` — so an event TikTok saw acknowledged is on disk. An
+  `onEvent` callback fires once per new record after the write (the seam later
+  consumers such as revocation hook into). `tiktok_list_webhook_events` reads
+  the log back; it is a closed-world tool like the publish journal.
 
 ## 4. Tool definition pattern (`src/mcp/define.ts`)
 
@@ -187,7 +200,7 @@ export interface ToolCtx {
 }
 
 export interface ToolSpec<In, Out> {
-  name: `tiktok_${string}`;      // 12 tools (v1.1 surface + analytics)
+  name: `tiktok_${string}`;      // 13 tools (v1.1 surface + analytics)
   title: string;
   description: string;           // model-facing; includes constraints & failure modes
   package: PackageName;

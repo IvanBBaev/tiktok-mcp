@@ -69,7 +69,7 @@ export type WriteMode = (typeof WRITE_MODES)[number];
 export const TRANSPORTS = ['stdio', 'http'] as const;
 export type Transport = (typeof TRANSPORTS)[number];
 
-/** The six tool packages (TOOLS.md § 1 — 12 tools / 6 packages). */
+/** The six tool packages (TOOLS.md § 1 — 13 tools / 6 packages). */
 export const TOOL_PACKAGES = [
   'auth',
   'user',
@@ -219,6 +219,9 @@ export interface Settings {
    * loopback `Origin` is only held to `Host` (SECURITY.md § Transport).
    */
   httpAllowedHosts?: readonly string[];
+  /** Where the HTTP transport takes TikTok webhook deliveries; unset = no receiver. */
+  webhookPath?: string;
+  webhookToleranceS: number;
 
   // Internal / test-only (CONFIGURATION.md § Internal / test-only)
   oauthBaseUrl?: string;
@@ -351,6 +354,20 @@ function bearerToken(): StringSchema<string> {
       `expected at least ${String(HTTP_TOKEN_MIN_LENGTH)} characters`,
     )
     .regex(/^[!-~]+$/, 'expected printable ASCII with no spaces');
+}
+
+/**
+ * A webhook path: absolute, unreserved characters only, short, and not the MCP
+ * endpoint — the two must never be confused, since one skips the bearer.
+ */
+function webhookPath(): StringSchema<string> {
+  return z
+    .string()
+    .regex(
+      /^\/[A-Za-z0-9._~/-]{1,127}$/,
+      'expected an absolute path such as /tiktok/webhook (letters, digits, . _ ~ - /)',
+    )
+    .refine((value) => value !== '/mcp', 'must differ from the MCP endpoint /mcp');
 }
 
 function httpsPrefix(): StringSchema<string> {
@@ -520,6 +537,9 @@ function checkCombinations(settings: Settings, collector: Collector): void {
         `binding ${settings.httpHost} exposes the server beyond loopback: put TLS termination in front and set TT_HTTP_INSECURE=1 to acknowledge it`,
       );
     }
+  } else if (settings.webhookPath !== undefined) {
+    // Under stdio there is no listener for TikTok to reach.
+    collector.reject('TT_WEBHOOK_PATH', 'requires TT_TRANSPORT=http');
   }
 
   // A heartbeat slower than the stale threshold would let a *live* holder be
@@ -673,6 +693,12 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     httpToken: c.optional('TT_HTTP_TOKEN', bearerToken()),
     httpInsecure: c.withDefault('TT_HTTP_INSECURE', flag(), false),
     httpAllowedHosts: c.optional('TT_HTTP_ALLOWED_HOSTS', hostList()),
+    webhookPath: c.optional('TT_WEBHOOK_PATH', webhookPath()),
+    webhookToleranceS: c.withDefault(
+      'TT_WEBHOOK_TOLERANCE_S',
+      decimalInt({ min: 30, max: 3_600, unit: 'seconds' }),
+      300,
+    ),
 
     // Internal / test-only
     oauthBaseUrl: c.optional('TT_OAUTH_BASE_URL', httpsOrigin()),

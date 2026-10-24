@@ -250,7 +250,7 @@ export interface ResolvedPostInfo {
 
 /** Server-side defaults the caller did not state. */
 export interface PostDefaults {
-  /** `TT_DEFAULT_AIGC_LABEL` — ships as `true` (TOOLS.md § 3.8). */
+  /** `TT_DEFAULT_AIGC_LABEL` — ships as `true` (TOOLS.md § 3.9). */
   isAigc: boolean;
 }
 
@@ -451,7 +451,7 @@ export function resolvePhotoPostInfo(
 
 /**
  * The `post_info` of a photo carousel sent to the inbox as a draft
- * (TOOLS.md § 3.11).
+ * (TOOLS.md § 3.12).
  *
  * A draft carries no privacy level and no toggles — the user picks those in the
  * app — so this is not {@link resolvePhotoPostInfo} with optional arguments: it

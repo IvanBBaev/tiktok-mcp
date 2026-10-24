@@ -186,10 +186,13 @@ async function startServer(): Promise<void> {
 
   if (settings.transport === 'http') {
     const { startHttpTransport } = await import('./mcp/http.js');
+    const { webhookRouteFor } = await import('./mcp/webhook.js');
+    const webhook = webhookRouteFor(settings, log, systemClock);
     const transport = await startHttpTransport({
       settings,
       log,
       clock: systemClock,
+      ...(webhook === undefined ? {} : { webhook }),
       createHandle: () => makeHandle(),
       releaseHandle: (handle) => {
         handles.delete(handle);
@@ -228,6 +231,7 @@ async function startServer(): Promise<void> {
       url: transport.url,
       profile: settings.activeProfile,
       env_file: envFilePath,
+      ...(webhook === undefined ? {} : { webhook_path: webhook.path }),
     });
   } else {
     const handle = makeHandle();

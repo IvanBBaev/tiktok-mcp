@@ -229,6 +229,8 @@ export interface Settings {
   maxConcurrent: number;       // TT_MAX_CONCURRENT, default 4 (1..64)
   mediaRoot?: string;          // TT_MEDIA_ROOT (fail-closed for FILE_UPLOAD)
   redirectPort?: number;       // TT_REDIRECT_PORT (optional pin, CC-A8)
+  webhookPath?: string;        // TT_WEBHOOK_PATH (http only; not /mcp)
+  webhookToleranceS: number;   // TT_WEBHOOK_TOLERANCE_S, default 300 (30..3600)
   // …one field per remaining TT_ var; keep in lockstep with CONFIGURATION.md
 }
 
@@ -826,7 +828,7 @@ export function resolveVideoPostInfo(
 export function resolvePhotoPostInfo(
   input: PhotoPostInput, creator: CreatorInfo, defaults: PostDefaults,
 ): ResolvedPostInfo;                        // CC-E1–E4
-/** The photo DRAFT `post_info` (TOOLS.md § 3.11) — title + description only,
+/** The photo DRAFT `post_info` (TOOLS.md § 3.12) — title + description only,
  *  `derived: []`. Not `resolvePhotoPostInfo` with optional arguments: a draft
  *  carries no privacy level and no toggles (the user picks those in the app),
  *  and must not grow defaults. It takes no `CreatorInfo` because the draft
@@ -1030,6 +1032,42 @@ export function inspectMovie(moov: Uint8Array): Omit<MediaProbe, 'container'>;
 export function checkMedia(probe: MediaProbe, maxDurationSec?: number): MediaIssue[];
 ```
 
+## api/webhook.ts (signature + event decoding)
+
+Pure: no I/O, no clock beyond the `nowMs` argument (TIKTOK-API.md § 10).
+
+```ts
+export const SIGNATURE_HEADER = "tiktok-signature";
+export const DEFAULT_SIGNATURE_TOLERANCE_S = 300;
+/** Frozen; the events this build names. Others are kept, not rejected. */
+export const WEBHOOK_EVENTS: readonly WebhookEventName[];
+export function isKnownEvent(name: string): name is WebhookEventName;
+
+export interface WebhookEvent {
+  client_key: string;
+  event: string;
+  create_time: number;                  // Unix seconds, finite
+  user_openid: string;
+  content: Record<string, unknown>;     // JSON-in-a-string decoded; else {}
+}
+
+export type SignatureCheck =
+  | { ok: true }
+  | { ok: false; reason: "missing" | "malformed" | "stale" | "mismatch" };
+
+/** `TikTok-Signature: t=<unix s>,s=<hex>` in any order; s = HMAC-SHA256 of
+ *  `${t}.` + raw body under the client secret, compared constant-time;
+ *  |now − t| > toleranceS is "stale". */
+export function verifyWebhookSignature(input: {
+  header: string | undefined; rawBody: Buffer; clientSecret: string;
+  nowMs: number; toleranceS?: number;
+}): SignatureCheck;
+export function parseWebhookEvent(rawBody: Buffer): WebhookEvent | undefined;
+/** SHA-256 hex of the raw body — the redelivery key. */
+export function eventDigest(rawBody: Buffer): string;
+export function eventPublishId(event: WebhookEvent): string | undefined;
+```
+
 ## mcp/define.ts (tools-as-data)
 
 ```ts
@@ -1043,7 +1081,7 @@ export interface ToolCtx {
 }
 
 export interface ToolSpec<In, Out> {
-  name: `tiktok_${string}`;      // 12 tools (SYNTHESIS § 2.9 + analytics, ROADMAP Phase 5)
+  name: `tiktok_${string}`;      // 13 tools (SYNTHESIS § 2.9 + analytics, ROADMAP Phase 5)
   title: string;
   description: string;
   package: PackageName;
@@ -1544,6 +1582,11 @@ export interface HttpTransportOptions {
    *  (DEFAULT_DRAIN_MS). A test seam. */
   drainMs?: number;
   clock?: Clock;                       // default systemClock (CC-H4)
+  /** The TikTok webhook receiver (TT_WEBHOOK_PATH): its exact path is exempt
+   *  from the bearer — the signature authenticates it — but not from the
+   *  Host/Origin gate. POST only (405), 64 KiB body cap (413), 503 while
+   *  draining; otherwise the receiver's status, with an empty body. */
+  webhook?: WebhookRoute;
 }
 
 export interface HttpTransportHandle {
@@ -1655,6 +1698,57 @@ Rules that are contract, not implementation detail:
   case for this server.
 - Nothing writes to stdout (CC-G3), and every time-dependent value (a session's
   `duration_ms`) comes from the injected `Clock`.
+
+## mcp/webhook.ts (receiver + event log)
+
+```ts
+export const WEBHOOK_LOG_VERSION = 1;
+export const WEBHOOK_LOG_MAX_BYTES = 1_048_576;   // rotate to .1 past it
+export const RECENT_DIGESTS = 1024;               // redelivery memory
+
+/** One line of webhooks.ndjson (0600, beside the env file). Additive-only
+ *  under v:1. */
+export interface WebhookRecord {
+  v: 1; received_at: string; digest: string; event: string;
+  create_time: number; user_openid: string;
+  profile?: string; publish_id?: string; content: Record<string, unknown>;
+}
+export function resolveWebhookLogPath(envFile?: string): string;
+/** One complete line per write() on an O_APPEND fd; a short write throws. */
+export function appendWebhookRecord(path: string, record: WebhookRecord,
+  maxBytes?: number): Promise<void>;
+export interface WebhookLogRead {
+  records: WebhookRecord[];   // oldest first, both generations, one per digest
+  skippedLines: number; exists: boolean;
+}
+/** Throws TikTokError `webhook_log_unreadable` (kind "internal") for a file
+ *  that exists but cannot be read; a missing one is `exists: false`. */
+export function readWebhookLog(path: string): Promise<WebhookLogRead>;
+
+export interface WebhookIdentity {
+  clientKey: string; clientSecret: string;
+  profiles: ReadonlyMap<string, string>;   // open_id → profile
+}
+/** `undefined` when the app credentials are not configured. */
+export function readWebhookIdentity(envFile: string,
+  env?: NodeJS.ProcessEnv): Promise<WebhookIdentity | undefined>;
+
+export interface WebhookReceiverOptions {
+  identity: () => Promise<WebhookIdentity | undefined>;  // read per request
+  logPath: string; clock: Clock; log: Logger; toleranceS: number;
+  onEvent?: (record: WebhookRecord) => void;  // once per new record, after disk
+  maxBytes?: number;
+}
+export interface WebhookDelivery { signature: string | undefined; rawBody: Buffer }
+/** Resolves the HTTP status: 200 recorded or redelivered, 401 signature,
+ *  400 not an event of this app, 500 log write failed, 503 no identity. */
+export type WebhookReceiver = (delivery: WebhookDelivery) => Promise<number>;
+export function createWebhookReceiver(opts: WebhookReceiverOptions): WebhookReceiver;
+
+export interface WebhookRoute { path: string; receive: WebhookReceiver }
+export function webhookRouteFor(settings: Settings, log: Logger, clock: Clock,
+  onEvent?: (record: WebhookRecord) => void): WebhookRoute | undefined;
+```
 
 ## mcp/plan-store.ts
 
@@ -2317,7 +2411,7 @@ export interface AccountBlock {
   profile: string;
   /** From `creator_info`. Absent on the draft tools, which never run that
    *  pre-flight — a `video.upload`-only grant may not even carry the scope
-   *  (TOOLS.md § 3.9), so there is no honest value to put here. */
+   *  (TOOLS.md § 3.10), so there is no honest value to put here. */
   nickname?: string;
   open_id_masked: string;                  // `maskOpenId` (TOOLS.md § 2.5)
 }
@@ -2460,7 +2554,7 @@ export function stillProcessingAfterApplyHint(
 ): Hint;
 export function journalUnavailableNote(publishId: string | undefined): Hint;
 export function choosePrivacyHint(toolName: string, options: readonly string[]): Hint;
-/** Every successful draft apply (§ 3.9, § 3.11). Verbatim from TOOLS.md § 5.3,
+/** Every successful draft apply (§ 3.10, § 3.12). Verbatim from TOOLS.md § 5.3,
  *  which is the normative rendering: "Unopened drafts expire." */
 export function draftInboxHint(): Hint;
 /** The two normative § 2.6.1 consent lines, branded and plain. */
@@ -2609,17 +2703,17 @@ completed the upload: `classifyDispatch` records it as `send_ambiguous` with
 
 ## tools/publish-write.ts
 
-The video half of the write surface: `tiktok_post_video` (TOOLS.md § 3.8) and
-`tiktok_upload_video_draft` (§ 3.9). Both sources ship — `"url"`
+The video half of the write surface: `tiktok_post_video` (TOOLS.md § 3.9) and
+`tiktok_upload_video_draft` (§ 3.10). Both sources ship — `"url"`
 (`PULL_FROM_URL`) and `"file"` (`FILE_UPLOAD` through `api/upload.ts` under
 `TT_MEDIA_ROOT`) — and one `resolveSource` serves four consumers: what the
 preview shows, what the init sends, what the digest binds and what the journal
 records.
 
 ```ts
-/** The two result modes of § 3.8, from `tools/publish-common.ts`. */
+/** The two result modes of § 3.9, from `tools/publish-common.ts`. */
 export type PostVideoData = WritePreview | AppliedData;
-/** § 3.9: a draft has no `creator` block, no `consent_line` and no
+/** § 3.10: a draft has no `creator` block, no `consent_line` and no
  *  `plan_incomplete` mode, so its preview is the narrower `DraftPreview`. */
 export type UploadDraftData = DraftPreview | AppliedData;
 
@@ -2642,7 +2736,7 @@ both `mcp/define`'s strictness contract and every model reading the manifest
 depend on; the flat object plus the check is the same contract with a schema a
 client can actually render. `plan_id` is validated the same way, against
 `PLAN_ID_PATTERN` in the handler, because a `.refine()` would make the schema a
-`ZodEffects` and cost the same shape. TOOLS.md § 3.8 records both.
+`ZodEffects` and cost the same shape. TOOLS.md § 3.9 records both.
 
 **What the digest binds** (`mcp/plan`, § 2.6.2). Post:
 `{ post_info, post_mode: "DIRECT_POST", source_info }`. Draft:
@@ -2665,8 +2759,8 @@ one that failed is the next one.
 
 ## tools/publish-photos.ts
 
-The carousel half: `tiktok_post_photos` (TOOLS.md § 3.10) and
-`tiktok_upload_photos_draft` (§ 3.11). There is no `source` field and no
+The carousel half: `tiktok_post_photos` (TOOLS.md § 3.11) and
+`tiktok_upload_photos_draft` (§ 3.12). There is no `source` field and no
 `"file"` branch — the photo endpoints pull from URLs only — so both tools are
 `PULL_FROM_URL` and both go through `initPhotoPost`, which returns a
 `publish_id` and no upload URL.
@@ -2716,14 +2810,14 @@ they cannot drift apart. Every `tiktok_*` name in the text is checked against
 ```ts
 /** `tiktok_post_video_guided`. Arguments: `video` (required — local path or
  *  https URL), `title`, `privacy_level`, `account`. The § 4 item 1 flow with
- *  § 3.8's failure discipline, arguments interpolated as sentences. All three
+ *  § 3.9's failure discipline, arguments interpolated as sentences. All three
  *  prompts declare `requires: ['publish']` and render every user value
  *  JSON-quoted, so a quote or newline in it cannot inject a step. */
 export const postVideoGuidedPrompt: PromptSpec;
 
 /** `tiktok_post_photos_guided`. Arguments: `photo_urls` (required — one string,
  *  split on commas and whitespace, blanks dropped), `title`, `description`,
- *  `privacy_level`, `account`. The § 3.10 flow: creator info, preview with the
+ *  `privacy_level`, `account`. The § 3.11 flow: creator info, preview with the
  *  urls as an array and `photo_cover_index` 0 unless told otherwise, approval,
  *  apply, poll to PUBLISH_COMPLETE; `url_prefix_unverified` names
  *  `photo_urls[<i>]`. A value that names no URL renders a request for them and
@@ -2732,9 +2826,9 @@ export const postPhotosGuidedPrompt: PromptSpec;
 
 /** `tiktok_upload_draft_guided`. Arguments, all optional: `video`,
  *  `photo_urls`, `title`, `description`, `account` — exactly one of the two
- *  media. Four renders: a video ⇒ the § 3.9 flow (`tiktok_upload_video_draft`;
+ *  media. Four renders: a video ⇒ the § 3.10 flow (`tiktok_upload_video_draft`;
  *  a `title` and/or a `description` is stated as not sent — one sentence for
- *  either or both); photos ⇒ the § 3.11 flow (`tiktok_upload_photos_draft`,
+ *  either or both); photos ⇒ the § 3.12 flow (`tiktok_upload_photos_draft`,
  *  title and description passed when given); both ⇒ ask which one, no steps;
  *  neither ⇒ ask for one, no steps. The valid flows say not to call
  *  `tiktok_get_creator_info`, preview (always `mode: "plan"`), approval, apply,
@@ -3240,11 +3334,11 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-08-09 | `docs/TOOLS.md` § 3.0: added the write-tool code `file_empty` (not retryable) immediately after `file_not_found`. CC-D1 mandates that a zero-byte file be rejected locally at plan time, and no existing code's normative text is true for one — `file_not_found` says the path "does not exist or is not a regular file", which an empty file is. `resolveMediaFile` raises it; no signature changed (raised by TD-5) | integrator (Wave-D sanctioned edit) |
 | 2026-08-09 | Added § `tools/publish-common.ts` — new module, no contract changed. `AccountBlock`, `CreatorBlock`, `ChunkSummary`, `SourceBlock`, `AppliedData`, `WritePreview`, `DraftPreview`, `ChunkPosition`, `DispatchOptions`, the write-only catalog constructors, the § 5 hints, `takeWriteToken`/`mintPlan`/`runPlanGuards`, `dispatchWrite` and `waitIfAsked`. The four write tools differ only in the payload they resolve and the endpoint they hit; the § 2.6.3 ordering, the journal records and the failure classification are one contract stated four times, and four copies would be four places for the guarantee a refused duplicate rests on to drift. `report` inside `DispatchOptions.send` is the whole classification — before it a failure is `network_unsent`/`network_ambiguous`, after it the attempt exists upstream and the outcome is `upload_failed`, never `error` (CC-B4) (raised by TD-6) | integrator (Wave-D sanctioned edit) |
 | 2026-08-09 | `tools/publish-write.ts`: `source: "file"` ships. The block said `"url"` only and pointed at "the draft tools" for the chunked upload; both video tools now take `file_path` under `TT_MEDIA_ROOT`, plan chunks at preview time and re-stat immediately before the first PUT (CC-D3/CC-D4). `PostVideoPreview` / `PostVideoApplied` are folded into `WritePreview` / `AppliedData` in `tools/publish-common.ts` — same members, one definition, because the three other write tools answer in them too; `PostVideoData` is unchanged as a name and as a shape. Added `UploadDraftData` and `uploadVideoDraftTool` (scopes `["video.upload"]`, so a draft-only authorization works and no `creator_info` pre-flight runs). `WritePreview.payload.source` widened from `{ type: "url"; url }` to the three-armed `SourceBlock`, and `AccountBlock.nickname` became optional — it comes from `creator_info`, which the draft tools never call (raised by TD-6) | integrator (Wave-D approved deviation) |
-| 2026-08-09 | `tools/publish-write.ts` / `tools/publish-photos.ts`: the `source` union is a **flat strict object**, not a `z.discriminatedUnion` — `source` enum plus optional `file_path` plus optional `video_url`, with the mutual exclusion checked imperatively in the handler. TOOLS.md § 3.8 said "discriminated on `source`" and the contract is unchanged, but a discriminated union produces a JSON Schema with no top-level object shape, which `mcp/define`'s import-time strictness probe and every manifest reader depend on. `plan_id` is checked against `PLAN_ID_PATTERN` in the handler for the same reason: a `.refine()` makes the schema a `ZodEffects` and costs the same shape. TOOLS.md §§ 3.8/3.9 updated in the same change to describe what ships (raised by TD-6) | integrator (Wave-D approved deviation) |
-| 2026-08-09 | Added § `tools/publish-photos.ts` — new module, no contract changed. `PostPhotosData`, `UploadPhotosDraftData`, `postPhotosTool` (`video.publish`), `uploadPhotosDraftTool` (`video.upload`); `PACKAGES`' `publish-write` entry is now the four tools of TOOLS.md § 2, in § 3.8–3.11 order. Both carousel rules are enforced in the handler **before any network call**, on the preview and again on the apply: an out-of-range `photo_cover_index` (zod bounds the array, nothing in a flat schema bounds an index against it) and every `photo_urls[i]`, reported one at a time by index and without the `source: "file"` sentence, which would point at a branch the photo endpoints do not have. The photo draft carries a `post_info` where the video draft carries none (raised by TD-6) | integrator (Wave-D sanctioned edit) |
+| 2026-08-09 | `tools/publish-write.ts` / `tools/publish-photos.ts`: the `source` union is a **flat strict object**, not a `z.discriminatedUnion` — `source` enum plus optional `file_path` plus optional `video_url`, with the mutual exclusion checked imperatively in the handler. TOOLS.md § 3.9 said "discriminated on `source`" and the contract is unchanged, but a discriminated union produces a JSON Schema with no top-level object shape, which `mcp/define`'s import-time strictness probe and every manifest reader depend on. `plan_id` is checked against `PLAN_ID_PATTERN` in the handler for the same reason: a `.refine()` makes the schema a `ZodEffects` and costs the same shape. TOOLS.md §§ 3.9/3.9 updated in the same change to describe what ships (raised by TD-6) | integrator (Wave-D approved deviation) |
+| 2026-08-09 | Added § `tools/publish-photos.ts` — new module, no contract changed. `PostPhotosData`, `UploadPhotosDraftData`, `postPhotosTool` (`video.publish`), `uploadPhotosDraftTool` (`video.upload`); `PACKAGES`' `publish-write` entry is now the four tools of TOOLS.md § 2, in § 3.9–3.12 order. Both carousel rules are enforced in the handler **before any network call**, on the preview and again on the apply: an out-of-range `photo_cover_index` (zod bounds the array, nothing in a flat schema bounds an index against it) and every `photo_urls[i]`, reported one at a time by index and without the `source: "file"` sentence, which would point at a branch the photo endpoints do not have. The photo draft carries a `post_info` where the video draft carries none (raised by TD-6) | integrator (Wave-D sanctioned edit) |
 | 2026-08-09 | `api/publish`: added `resolvePhotoDraftPostInfo({ title?, description? })` — the photo draft `post_info`, `derived: []`, no `CreatorInfo`. Not `resolvePhotoPostInfo` with optional arguments: a draft carries no privacy level and no toggles and must not grow defaults. It lives in `api/` anyway because it shares `PHOTO_TITLE_MAX` / `PHOTO_DESCRIPTION_MAX`, and a second copy of those limits is a second place for them to drift. Additive — no existing signature changed (raised by TD-6) | integrator (Wave-D sanctioned edit) |
 | 2026-08-09 | `api/publish`: a `FILE_UPLOAD` init whose payload carries no `upload_url` now throws `malformedPayload(<init endpoint>, "upload_url string for a FILE_UPLOAD init")` instead of returning a `PublishInitResult` with the field absent. `uploadUrl` was optional for the honest reason that `PULL_FROM_URL` has none, which made the one case that cannot proceed without it indistinguishable from the one that never wants it — and the tool layer would only discover the hole after the publish attempt was already spent. `PULL_FROM_URL` is unchecked and unchanged (raised by TD-6) | integrator (Wave-D approved deviation) |
-| 2026-08-09 | `docs/TOOLS.md` § 3.9: the draft `user_action` hint says "**Unopened** drafts expire", not "Unfinished". § 5.3's rendering and the tool description both already said "unopened", and the claim matters: TikTok expires a draft the user never opened, not one they opened and left unfinished, so the wrong word tells a user their in-progress edit is on a timer. § 5.3 is the normative rendering and two of the three sites already agreed. `docs/TIKTOK-API.md`'s scope table updated in the same change — `video.upload` listed `tiktok_post_photos` (MEDIA_UPLOAD), a tool that does not exist, where `tiktok_upload_photos_draft` does (raised by TD-6) | integrator (Wave-D spec reconciliation) |
+| 2026-08-09 | `docs/TOOLS.md` § 3.10: the draft `user_action` hint says "**Unopened** drafts expire", not "Unfinished". § 5.3's rendering and the tool description both already said "unopened", and the claim matters: TikTok expires a draft the user never opened, not one they opened and left unfinished, so the wrong word tells a user their in-progress edit is on a timer. § 5.3 is the normative rendering and two of the three sites already agreed. `docs/TIKTOK-API.md`'s scope table updated in the same change — `video.upload` listed `tiktok_post_photos` (MEDIA_UPLOAD), a tool that does not exist, where `tiktok_upload_photos_draft` does (raised by TD-6) | integrator (Wave-D spec reconciliation) |
 | 2026-08-09 | Added § `mcp/lifecycle.ts` — new module, no contract changed; the preamble's note that it is deliberately absent now points at the § the task wrote. It exports a watcher and a plain `onChange`, not a `Server` call: the notification is the composition root's to send, and `mcp/lifecycle` importing `mcp/server` to send it would make an untestable module out of a decision that is one line at the call site. The signal is the *derived* `profileSignature`, never file activity — a token refresh rewrites the env file on its own schedule and firing `tools/list_changed` on every refresh would be a bug, not a feature. Polling through the injected `Clock` is the floor rather than an `fs.watch` optimisation: `persistProfilePatch` writes by rename-replacement (which `fs.watch` reports inconsistently), network homes do not deliver events at all, and a watch no `mockClock` can drive cannot be tested to CC-H4. The interval doubles as § 6.3's debounce, so it is floored at 500 ms and an unusable value warns and falls back like `core/env-lock`'s duration (raised by TE-6) | integrator (Wave-E sanctioned edit) |
 | 2026-08-13 | Added § `mcp/http.ts` — new module, no contract changed. `TT_TRANSPORT=http` was documented as shipped (README § env table, CONFIGURATION.md § transport, SECURITY.md § Transport) while `src/index.ts` refused to start, so the § records the surface that closes the gap: `startHttpTransport`/`HttpTransportOptions`/`HttpTransportHandle`, `MCP_PATH`, and the exported `dnsRebindingRejection`/`OriginPolicy`. The refusal predicate is exported because the off-box branch of the `Host`/`Origin` policy is otherwise reachable only by binding off-box, which a test suite may not do. The check order (403 → 401 → 404 → 405), the byte-identical 401 for a missing and a wrong credential, and one `McpServerHandle` per session are contract rather than implementation: the first is what stops an unauthenticated caller from mapping the surface, the second is what stops it probing, and the third is what keeps two clients' initialization state apart (raised by TE-7) | integrator (Wave-E sanctioned edit) |
 | 2026-08-13 | `mcp/plan`: `peekPublishBucket`, `takePublishToken` and `localRateLimitedError` gained a trailing `options?: RateBucketOptions` (`{ limits?: PublishRateLimits }`) — additive, so every frozen call form still compiles; `PUBLISH_BUCKET_CAPACITY` / `PUBLISH_BUCKET_REFILL_MS` are replaced by `DEFAULT_PUBLISH_RPM` plus `resolvePublishBucket(options)`, since the two numbers are derived from one setting and only ever meaningful together. Same precedent as `PlanStoreOptions`: CONFIGURATION.md advertises `TT_PUBLISH_RPM` and `core/settings` parses it, but the bucket had no way to receive it and hard-coded the default, so the setting silently did nothing. `capacity = rpm`, `refillMs = ceil(60_000 / rpm)` — whole milliseconds because `refill` banks the remainder *in* `updatedAt` (a fractional interval would drift over a session and put `retry_at` on instants `Date` truncates), rounded up so a non-divisor lands just under the configured rate rather than just over. The default 6 still resolves to capacity 6 / 10 000 ms, which a test asserts equals `loadSettings(baselineEnv()).publishRpm`. `refill` also clamps a bucket down to the current capacity, because the bucket map is process-wide while the rate arrives per call (raised by the TT_PUBLISH_RPM defect fix) | integrator (Wave-E approved deviation) |
@@ -3303,3 +3397,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-22 | `core/config`: `overlayEnvFile` gains the additive `platform?: NodeJS.Platform` (default `process.platform`). On win32 every `TT_`-prefixed environment key is copied under its upper-case spelling and shadows the file's key in any case, because the OS environment is case-insensitive there and the returned plain object is not. No other signature changes | integrator |
 | 2026-10-24 | Added `api/media.ts` (`probeMediaFile`, `inspectMovie`, `checkMedia`, `MEDIA_LIMITS`, `ACCEPTED_CODECS`, `MAX_MOOV_BYTES`) and, in `tools/publish-common`, `MediaCheck`, `mediaPreflight` and `mediaPreflightNote`; `WritePreview` and `DraftPreview` gain the optional `media_check` — additive. The pre-flight is advisory (ROADMAP Phase 5, CC-D9): a local video file is probed at preview only, the result is not digested and not re-checked at apply, and a file TikTok would reject still gets a plan with one `note` hint, because TikTok remains the authority and a local refusal would invent a catalog code. § Extended harness gains `mp4.ts` | owner (Phase 5) |
 | 2026-10-24 | `core/http`, `core/settings`: per-host concurrency (ARCHITECTURE § 6 item 4). `TtRequestOptions` and `PutChunkOptions` gain the additive `maxConcurrent?`; `OauthRequestOptions` now also omits it; new export `hostSlotsInUse()`. `Settings.maxConcurrent` / `TT_MAX_CONCURRENT` (default 4, `1`–`64`) return — this reverses the 2026-09-01 removal, now that the semaphore exists and the field is read: `api/context` passes it to every `ttRequest`, `api/upload` to every `putChunk`. A slot covers one attempt (released before a retry backoff), queueing is FIFO per hostname and outside the per-attempt timeout, an abort while queued rejects with the signal's reason, and `oauthRequest` and the `login` CLI's call stay unbounded so a token refresh can never deadlock behind the slots it unblocks. The `cc-f1` removed-variable tests in `test/config.test.ts` now use a fictional `TT_RETIRED_KNOB` | integrator |
+| 2026-10-24 | `core/settings`: additive `Settings.webhookPath?` (`TT_WEBHOOK_PATH`, `/` plus 1–127 URL-safe characters, not `/mcp`, rejected unless `TT_TRANSPORT=http`) and `Settings.webhookToleranceS` (`TT_WEBHOOK_TOLERANCE_S`, default 300, `30`–`3600`). New modules `api/webhook` (signature verification, event decoding) and `mcp/webhook` (event log `webhooks.ndjson`, identity, receiver, `webhookRouteFor`). `mcp/http`: additive `HttpTransportOptions.webhook?` — the exact path is bearer-exempt, POST only, 64 KiB cap. New tool `tiktok_list_webhook_events` (`publish` package, closed-world, TOOLS.md § 3.8); TOOLS.md §§ 3.8–3.12 renumber to 3.9–3.13, and `mcp/server`'s `ACCOUNT_IS_FILTER` includes the new tool. No existing signature changed | integrator |

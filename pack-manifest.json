@@ -15,6 +15,8 @@
     "build/src/api/user.js",
     "build/src/api/video.d.ts",
     "build/src/api/video.js",
+    "build/src/api/webhook.d.ts",
+    "build/src/api/webhook.js",
     "build/src/cli/doctor.d.ts",
     "build/src/cli/doctor.js",
     "build/src/cli/index.d.ts",
@@ -71,6 +73,8 @@
     "build/src/mcp/result.js",
     "build/src/mcp/server.d.ts",
     "build/src/mcp/server.js",
+    "build/src/mcp/webhook.d.ts",
+    "build/src/mcp/webhook.js",
     "build/src/tools/analytics.d.ts",
     "build/src/tools/analytics.js",
     "build/src/tools/auth.d.ts",
@@ -93,6 +97,8 @@
     "build/src/tools/user.js",
     "build/src/tools/video.d.ts",
     "build/src/tools/video.js",
+    "build/src/tools/webhooks.d.ts",
+    "build/src/tools/webhooks.js",
     "package.json"
   ]
 }

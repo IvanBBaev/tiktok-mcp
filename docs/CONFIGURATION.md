@@ -379,6 +379,8 @@ terminal (CC-B8).
 | `TT_HTTP_TOKEN` | — | Bearer token, **required whenever `TT_TRANSPORT=http`** — loopback included; at least 16 characters of printable ASCII with no spaces (it travels verbatim in an `Authorization` header); compared constant-time via fixed-length digests (secret) |
 | `TT_HTTP_INSECURE` | `0` | `1` explicitly acknowledges a non-loopback bind without TLS; otherwise the server refuses to bind beyond loopback without TLS termination in front. On a loopback bind it is redundant and accepted silently: the startup and `doctor` warnings fire only past loopback |
 | `TT_HTTP_ALLOWED_HOSTS` | — | Comma-separated bare host names (DNS names, IPv4, IPv6 with or without brackets; no scheme, port, wildcard or IPv6 zone id) the HTTP transport answers to, canonicalized the way the WHATWG URL parser does (lowercased, IPv6 compressed, `127.1` → `127.0.0.1`) — `Host` and `Origin` hostnames are canonicalized the same way before the comparison: a `Host` header, or a browser's `Origin` host, not on the list is rejected. Applies on every bind, so a loopback allowlist must name `127.0.0.1` / `localhost` too. Recommended with `TT_HTTP_INSECURE=1`, where it is what stops DNS rebinding; the server warns at startup, and `doctor` warns, when insecure mode runs without it on a non-loopback bind |
+| `TT_WEBHOOK_PATH` | — | Path of the TikTok webhook receiver on the HTTP transport, e.g. `/tiktok/events` (`/` plus 1–127 of `A-Z a-z 0-9 . _ ~ / -`; not `/mcp`). Requires `TT_TRANSPORT=http`. The path is exempt from the bearer token — each `POST` is verified by its `TikTok-Signature` HMAC under `TT_CLIENT_SECRET` instead — and verified events are appended to `webhooks.ndjson` beside the env file, readable with `tiktok_list_webhook_events`. Register its public HTTPS URL as the app's callback URL in the TikTok developer portal. Unset: no receiver |
+| `TT_WEBHOOK_TOLERANCE_S` | `300` | Accepted clock skew of a webhook signature's `t=` timestamp, either way, in seconds (`30`–`3600`); an older or newer delivery is refused `401` |
 
 The HTTP transport has fixed limits that are **not** configurable: request
 bodies up to 4 MiB (`413 Payload Too Large` past it, including a declared
@@ -392,6 +394,21 @@ get up to 10 s to finish (`GET` SSE streams have no end and are not waited for;
 a cancelled request, or one whose session closed, is no longer waited for), and
 whatever is still running past that budget is aborted with a warning before
 the sessions and the listener close. See SECURITY.md § Transport.
+
+#### Webhook receiver
+
+With `TT_WEBHOOK_PATH` set, the HTTP transport answers TikTok's event pushes
+on that exact path (a query string is ignored; any other path still needs the
+bearer token). Only `POST` is accepted (`405` otherwise), bodies are capped at
+64 KiB (`413`), and the answer is an empty `200` once the event is verified and
+logged, `401` for a missing, malformed, stale or mismatched signature, `400`
+for an unusable event, `500` when the log cannot be written (TikTok retries),
+and `503` while the server shuts down or before credentials are configured.
+Redeliveries are recognised by a digest of the raw body and logged once. The
+DNS-rebinding `Host` check still applies: behind a tunnel or reverse proxy on a
+loopback bind, either have the proxy rewrite `Host` to `127.0.0.1`, or bind past
+loopback with `TT_HTTP_INSECURE=1` and list the public name in
+`TT_HTTP_ALLOWED_HOSTS`. See SECURITY.md § Webhook receiver.
 
 ### Internal / test-only
 
