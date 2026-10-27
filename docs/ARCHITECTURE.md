@@ -44,7 +44,7 @@ src/
     lifecycle.ts    #   credential watch → scope markers + tools/ + resources/list_changed
   tools/            # Layer 3 — declarative ToolSpec files
     index.ts        #   PACKAGES manifest-in-code — the ONE tool-surface source (§ 5)
-    auth.ts  user.ts  video.ts  publish.ts  publish-write.ts
+    auth.ts  user.ts  video.ts  publish.ts  publish-write.ts  publish-batch.ts
     prompts.ts      #   PROMPTS manifest — the three guided write flows (§ 5.1)
     resources.ts    #   RESOURCES manifest — six read snapshots at tiktok:// URIs, one a template (§ 5.1)
 ```
@@ -204,6 +204,13 @@ await connectTransport(server);
   digest, `open_id` and file identity against the stored ones. Publishing
   therefore goes through the one write path (journal, duplicate guard, rate
   bucket) and never through a stored token.
+- **Batch publishing** (`src/tools/publish-batch.ts`; TOOLS.md § 2.11). The
+  batch tool composes the four write tools through `ToolCtx.call`, which
+  `callTool` sets to a recursive `callTool` sharing the request's signal — so
+  each item gets its own account resolution, scope check and envelope. The
+  preview mints one plan over the item list and keeps the item plans behind it
+  in a bounded in-process map; the apply consumes the batch plan and applies
+  each item with its own plan.
 
 ## 4. Tool definition pattern (`src/mcp/define.ts`)
 

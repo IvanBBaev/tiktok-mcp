@@ -89,6 +89,8 @@
     "build/src/tools/index.js",
     "build/src/tools/prompts.d.ts",
     "build/src/tools/prompts.js",
+    "build/src/tools/publish-batch.d.ts",
+    "build/src/tools/publish-batch.js",
     "build/src/tools/publish-common.d.ts",
     "build/src/tools/publish-common.js",
     "build/src/tools/publish-photos.d.ts",

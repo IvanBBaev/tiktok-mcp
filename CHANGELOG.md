@@ -14,6 +14,13 @@ plumbing stay in the commit history where they belong.
 
 ### Added
 
+- **Batch publishing (`tiktok_publish_batch`).** Up to 10 posts — the same
+  video on several profiles, or several files on one — previewed together and
+  approved with one `plan_id`. Each item runs through its own write tool, so
+  account, scopes, creator_info, the duplicate guard, the per-profile rate
+  limit and the journal all apply per item; one failing item does not stop
+  the rest, and the result reports each. `run_at` on the batch apply schedules
+  every item. See TOOLS.md § 2.11 and § 3.15.
 - **Local scheduled publishing.** The four write tools accept `run_at` on the
   apply call: the approved request is queued in `schedule.json` beside the env
   file instead of being sent, and the new `tiktok-mcp-ai run-queue` command

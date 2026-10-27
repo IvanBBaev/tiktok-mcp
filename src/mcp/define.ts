@@ -49,6 +49,16 @@ export interface ToolCtx {
    * Never called with a `done` greater than `total`.
    */
   progress?: (done: number, total: number) => void;
+
+  /**
+   * Runs another tool exactly as an MCP `tools/call` would — its own account
+   * resolution, scopes and envelope — sharing this call's cancellation. Set
+   * by the server; a tool that composes others (`tiktok_publish_batch`) uses it.
+   */
+  call?: (
+    spec: ToolSpec<unknown, unknown>,
+    args: unknown,
+  ) => Promise<ToolResult<unknown>>;
 }
 
 export interface ToolSpec<In, Out> {

@@ -28,7 +28,7 @@ Conventions:
 
 ## 1. Surface at a glance
 
-**15 tools, 6 packages.** (rationale: SYNTHESIS § 2.9; `analytics` added in 1.1 — ROADMAP Phase 5; `tiktok_list_webhook_events`, `tiktok_list_scheduled` and `tiktok_cancel_scheduled` added in 2.0)
+**16 tools, 6 packages.** (rationale: SYNTHESIS § 2.9; `analytics` added in 1.1 — ROADMAP Phase 5; `tiktok_list_webhook_events`, `tiktok_list_scheduled`, `tiktok_cancel_scheduled` and `tiktok_publish_batch` added in 2.0)
 
 | # | Tool | Package | readOnlyHint | destructiveHint | idempotentHint | openWorldHint | Required scope |
 |---|---|---|---|---|---|---|---|
@@ -46,11 +46,12 @@ Conventions:
 | 12 | `tiktok_post_photos` | publish-write | false | **true** | false | true | `video.publish` |
 | 13 | `tiktok_upload_photos_draft` | publish-write | false | **true** | false | true | `video.upload` |
 | 14 | `tiktok_cancel_scheduled` | publish-write | false | false | true | **false** | — |
-| 15 | `tiktok_get_video_analytics` | analytics | true | false | true | true | `video.list` |
+| 15 | `tiktok_publish_batch` | publish-write | false | **true** | false | true | — (each item: its tool's scope) |
+| 16 | `tiktok_get_video_analytics` | analytics | true | false | true | true | `video.list` |
 
 **Packages.** `auth`, `user`, `video`, `publish` (read-only publishing context:
 creator info, publish status, journal, received webhook events, the local schedule), `publish-write` (the four destructive
-writes, and cancelling a scheduled one), `analytics` (figures computed locally from the video list; appended
+writes, a batch of them, and cancelling a scheduled one), `analytics` (figures computed locally from the video list; appended
 last so the order of the first five stays frozen). Package profiles: `core` =
 auth + user + video + publish + analytics (no writes); `all` = everything. `TT_WRITE_MODE=deny` unregisters
 `publish-write` and wins over any profile setting (see § 2.6.4 and
@@ -444,6 +445,29 @@ keeps, not one TikTok does.
   `expired` (`error: { code, message }` set), `cancelled`. Finished entries are
   pruned 30 days after their last change. `TT_LOCK_PROFILE` confines the
   tools and the runner to the locked profile's entries.
+
+### 2.11 Batch publishing (`tiktok_publish_batch`)
+
+One approval for several publishes — the same file on several profiles, or
+several files on one. The batch adds no publishing path of its own:
+
+- **Preview.** Each item (`{ tool, args }`, 1–10 items, one of the four write
+  tools) is previewed through that tool exactly as a direct call would be:
+  its own `account` (default: the batch's), scopes, `TT_LOCK_PROFILE`,
+  creator_info and § 2.6.1 checks. When every item previews as a plan, the
+  batch mints **one** plan bound to the whole item list (§ 2.6.3 digest over
+  `[{ tool, args }]`, `account` pinned per item) and keeps the item plans
+  behind it; the item plans are never shown. Otherwise the result is
+  `plan_incomplete` with every item's preview or error, and no plan.
+- **Apply.** The batch plan is consumed once; then each item is applied in
+  order with its own plan, so each runs the full § 2.6.3 pipeline (digest,
+  `open_id`, file identity, duplicate guard, its profile's § 2.8 bucket,
+  journal). A failing item does not stop the rest; the result reports every
+  item. `run_at` on the batch apply schedules every item (§ 2.10).
+- **Rate limits.** The preview adds a `note` when a profile gets more items
+  than its bucket holds now; at apply time the surplus fails
+  `local_rate_limited` and is re-previewed on its own.
+- `TT_WRITE_MODE=apply` applies the items without a plan, as for every write.
 
 ---
 
@@ -1178,7 +1202,48 @@ Notes:
   | `schedule_not_cancellable` | no | "This scheduled publish is <status>, so it can no longer be cancelled. Check tiktok_list_scheduled and tiktok_list_publish_journal for what happened." `details: { status }`. |
   | `schedule_unreadable` | no | (§ 3.0) |
 
-### 3.15 `tiktok_get_video_analytics`
+### 3.15 `tiktok_publish_batch`
+
+- **Package:** `publish-write`. **Annotations:** `readOnlyHint: false`,
+  `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (§ 1).
+- **Scopes:** none. Each item checks its own tool's scope on its own
+  profile (§ 2.11).
+- **Description** (normative):
+
+  > Publish up to 10 videos/photo posts in one approval — across several
+  > profiles or files. Each item is { tool, args } for tiktok_post_video,
+  > tiktok_upload_video_draft, tiktok_post_photos or tiktok_upload_photos_draft,
+  > with that tool’s own arguments (account picks the profile; omitted, the
+  > batch’s account). Call without plan_id for one preview of every item; after
+  > the user approves it, call again with the same items plus plan_id. Each item
+  > is applied with its own checks and rate limit; one failing does not stop the
+  > rest.
+
+- **Input schema:**
+
+  | Field | Type | Req | Constraints | `.describe()` |
+  |---|---|---|---|---|
+  | `account` | string | no | | (common) |
+  | `items` | array | yes | 1–10 `{ tool, args }`; `tool` one of the four write tools; `args` without `plan_id`, `force`, `wait_for_completion`, `run_at` | "The publishes, 1–10, applied in this order." |
+  | `plan_id` | string | no | `plan_` + 32 lowercase hex characters | "Omit to preview. To apply, the plan_id from the batch preview, after the user approved it." |
+  | `run_at` | string | no | as § 3.10; forwarded to every item | (as § 3.10) |
+
+- **Output:** preview `{ mode: "plan", plan_id, expires_at, items: [{ index,
+  tool, account, ok, data }] }` (`data` is the item's preview without its
+  `plan_id` / `expires_at`) with `approval_required` and possibly a rate
+  `note`; or `{ mode: "plan_incomplete", items }` with an `error` on failing
+  items. Apply `{ mode: "applied", items: [{ index, tool, account, ok, data |
+  error }], succeeded, failed }` — `ok: true` even when items failed; each
+  item's `data` / `error` is what its tool returned.
+- **Errors:**
+
+  | Code | Retryable | Message text (normative) |
+  |---|---|---|
+  | `invalid_params` | no | "items[<i>].args.<field>: set on the batch call, not on an item" for a control field inside an item; also for a malformed `plan_id`. |
+  | `plan_not_found` | no | (§ 3.0) — also for a batch plan this process no longer remembers. |
+  | `plan_mismatch` | no | (§ 3.0) — the items differ from the previewed list; the plan stays valid. |
+
+### 3.16 `tiktok_get_video_analytics`
 
 - **Package:** `analytics`. **Annotations:** `readOnlyHint: true`,
   `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: true`.

@@ -1085,6 +1085,8 @@ export interface ToolCtx {
   log: Logger;
   signal?: AbortSignal;
   progress?: (done: number, total: number) => void;
+  /** Set by callTool: runs another tool as a tools/call would, same signal. */
+  call?: (spec: ToolSpec<unknown, unknown>, args: unknown) => Promise<ToolResult<unknown>>;
 }
 
 export interface ToolSpec<In, Out> {
@@ -2949,6 +2951,18 @@ export const listScheduledTool: AnyToolSpec;    // TOOLS.md § 3.9
 export const cancelScheduledTool: AnyToolSpec;  // TOOLS.md § 3.14
 ```
 
+## tools/publish-batch.ts
+
+```ts
+export const BATCH_MAX_ITEMS = 10;
+export type PublishBatchData =
+  | { mode: 'plan'; plan_id: string; expires_at: string; items: BatchPreviewItem[] }
+  | { mode: 'plan_incomplete'; items: BatchPreviewItem[] }
+  | { mode: 'applied'; items: BatchAppliedItem[]; succeeded: number; failed: number };
+export const publishBatchTool: AnyToolSpec;  // TOOLS.md § 3.15; needs ToolCtx.call
+export function resetBatchPlans(): void;      // test seam
+```
+
 ## tools/prompts.ts
 
 The prompt manifest (TOOLS.md § 7.1): the three write flows, each one `user`
@@ -3586,3 +3600,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-24 | `core/oauth`: additive `forgetRevokedProfile` and `ForgetOutcome` — the local-only clear behind `authorization.removed`. `mcp/webhook`: `onEvent` may return a promise (still not awaited), plus `AUTHORIZATION_REMOVED`, `RevocationListenerOptions` and `revocationListener`, which `src/index.ts` passes to `webhookRouteFor` | integrator |
 | 2026-10-24 | Resource subscriptions (TOOLS.md § 7.4). New module `mcp/subscriptions` (`createSubscriptionHub`, `DEFAULT_SUBSCRIPTION_POLL_MS`). `mcp/resources`: additive `ResourceSpec.watch?` and `ResourceWatch`. `mcp/server`: additive `ServerOptions.clock?` / `subscriptionPollMs?` and `McpServerHandle.notifyResourcesUpdated`; the `resources` capability gains `subscribe: true`. `tools/resources`: the status resource declares a `watch`; new exports `settledPublishStatus`, `isPublishStatusOf`. `src/index.ts` passes `systemClock` and forwards a webhook event with a `publish_id` to every session | integrator |
 | 2026-10-27 | Scheduled publishing (TOOLS.md § 2.10). New modules `mcp/schedule` (store), `tools/schedule` (`RUN_AT_ARG`, `schedulePlanned`, `tiktok_list_scheduled`, `tiktok_cancel_scheduled`) and `cli/run-queue`. The four write tools: additive optional `run_at` and `ScheduledData` in their result union. `mcp/plan`: `run_at` joins the control fields. `mcp/server`'s `ACCOUNT_IS_FILTER` includes `tiktok_list_scheduled`. TOOLS.md §§ 3.9–3.13 renumber to 3.10–3.13 and 3.15; the new tools are §§ 3.9 and 3.14. No existing signature changed | integrator |
+| 2026-10-27 | Batch publishing (TOOLS.md § 2.11). New module `tools/publish-batch` (`tiktok_publish_batch`, TOOLS.md § 3.15; `tiktok_get_video_analytics` renumbers to § 3.16). `mcp/define`: additive optional `ToolCtx.call`, set by `mcp/server`'s `callTool`. No existing signature changed | integrator |

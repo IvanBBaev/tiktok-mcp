@@ -27,6 +27,7 @@ import {
   listPublishJournalTool,
 } from './publish.js';
 import { postPhotosTool, uploadPhotosDraftTool } from './publish-photos.js';
+import { publishBatchTool } from './publish-batch.js';
 import { postVideoTool, uploadVideoDraftTool } from './publish-write.js';
 import { cancelScheduledTool, listScheduledTool } from './schedule.js';
 import { getUserInfoTool } from './user.js';
@@ -62,6 +63,7 @@ export const PACKAGES: readonly ToolPackageSpec[] = Object.freeze([
       postPhotosTool,
       uploadPhotosDraftTool,
       cancelScheduledTool,
+      publishBatchTool,
     ]),
   },
   { name: 'analytics', tools: Object.freeze([getVideoAnalyticsTool]) },

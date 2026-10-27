@@ -1,5 +1,5 @@
 /**
- * `tiktok_get_video_analytics` — the `analytics` package (TOOLS.md § 3.15).
+ * `tiktok_get_video_analytics` — the `analytics` package (TOOLS.md § 3.16).
  *
  * The Display API reports raw counters per video and nothing else: no rates,
  * no aggregates, no history. This tool walks the public video list once and

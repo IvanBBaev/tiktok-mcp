@@ -442,6 +442,13 @@ export async function callTool(
     const ctx: ToolCtx = { api, log };
     if (opts.signal !== undefined) ctx.signal = opts.signal;
     if (opts.progress !== undefined) ctx.progress = opts.progress;
+    ctx.call = (inner, innerArgs) =>
+      callTool(
+        inner,
+        innerArgs,
+        runtime,
+        opts.signal === undefined ? {} : { signal: opts.signal },
+      );
     const result = await spec.handler(parsed.data, ctx);
     return stampAccount(result, profile);
   } catch (cause) {

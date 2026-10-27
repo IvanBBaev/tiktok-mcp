@@ -840,6 +840,76 @@
       }
     },
     {
+      "package": "publish-write",
+      "scopes": [],
+      "name": "tiktok_publish_batch",
+      "title": "Publish several posts in one approval",
+      "description": "Publish up to 10 videos/photo posts in one approval — across several profiles or files. Each item is { tool, args } for tiktok_post_video, tiktok_upload_video_draft, tiktok_post_photos or tiktok_upload_photos_draft, with that tool’s own arguments (account picks the profile; omitted, the batch’s account). Call without plan_id for one preview of every item; after the user approves it, call again with the same items plus plan_id. Each item is applied with its own checks and rate limit; one failing does not stop the rest.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok.",
+            "type": "string",
+            "minLength": 1
+          },
+          "items": {
+            "minItems": 1,
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "tool": {
+                  "type": "string",
+                  "enum": [
+                    "tiktok_post_video",
+                    "tiktok_upload_video_draft",
+                    "tiktok_post_photos",
+                    "tiktok_upload_photos_draft"
+                  ],
+                  "description": "The write tool this item runs."
+                },
+                "args": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {},
+                  "description": "That tool’s arguments, as for a direct preview call (no plan_id, run_at, force or wait_for_completion)."
+                }
+              },
+              "required": [
+                "tool",
+                "args"
+              ],
+              "additionalProperties": false
+            },
+            "description": "The publishes, 1–10, applied in this order."
+          },
+          "plan_id": {
+            "description": "Omit to preview. To apply, the plan_id from the batch preview, after the user approved it.",
+            "type": "string"
+          },
+          "run_at": {
+            "description": "Schedule instead of publishing now: an ISO-8601 date-time with Z or an offset, up to 30 days ahead. Only on the apply call (with plan_id). The approved request is queued locally and published by `tiktok-mcp-ai run-queue`, which must run on THIS machine at or after that time (cron/launchd) — TikTok has no scheduling of its own.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Publish several posts in one approval",
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
       "package": "analytics",
       "scopes": [
         "video.list"
