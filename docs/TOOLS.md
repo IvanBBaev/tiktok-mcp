@@ -339,6 +339,49 @@ otherwise, when the dispatch settles. `force: true` skips the
 check like the journal check, but still registers the entry: a forced apply
 is a dispatch an unforced one for the same payload must not race.
 
+#### 2.6.6 Consent dialog (MCP elicitation)
+
+A `plan_id` proves that a preview happened. It cannot prove that a human
+approved it, because a model can preview and apply in one turn. When the client
+declares **form** elicitation (`capabilities.elicitation.form`, or the bare
+`elicitation: {}` older clients send), an apply that carries a `plan_id` also
+asks the human directly through `elicitation/create`, before step 5:
+
+1. The plan is **verified** first (as in step 5, without consuming it), so
+   nobody is asked about a `plan_id` that would be refused anyway.
+2. The dialog shows a server-owned template filled only with the request's own
+   values: the action ("Publish a video", "Upload a photo carousel to the
+   TikTok inbox as a draft", …), the canonical profile, a 48-character excerpt
+   of the title or caption, the privacy level of a direct post, and the
+   `run_at` instant when the apply queues. No upstream text is put in it. The
+   form has one boolean field, `approve`, which is unchecked by default.
+3. Only `accept` with `approve: true` continues to step 5. The answers map
+   like this:
+
+| Answer | Result | The plan |
+|---|---|---|
+| accept + `approve: true` | the pipeline continues | spent at step 5, as usual |
+| accept + `approve: false`, or decline | `consent_declined` | **voided** on the spot, so an injected retry cannot reuse it |
+| cancel, or no answer in 5 minutes | `consent_cancelled` | still valid until its TTL |
+| the request fails | `consent_unavailable` (`details.reason: "failed"`) | still valid |
+
+The dialog is asked **once per approval**:
+
+- A `tiktok_publish_batch` apply asks once, listing every item, and its items
+  do not ask again.
+- An apply with `run_at` asks when it queues. `run-queue` replays the queued
+  entry without asking again.
+- `TT_WRITE_MODE=apply` calls carry no plan, so there is nothing to confirm.
+- A preview never asks.
+
+`TT_ELICITATION` sets the policy:
+
+| Value | Behavior |
+|---|---|
+| `auto` (default) | Ask when the client can show the dialog. Otherwise `plan_id` stays the only checkpoint, as before. |
+| `off` | Never ask. |
+| `required` | Ask, and refuse a plan apply from a client that cannot show the dialog with `consent_unavailable` (`details.reason: "unsupported"`). Batch items and `run-queue` replays are exempt, because their consent was already given. |
+
 ### 2.7 `wait_for_completion` policy
 
 (rationale: SYNTHESIS § 2.3)
@@ -459,7 +502,7 @@ several files on one. The batch adds no publishing path of its own:
   `[{ tool, args }]`, `account` pinned per item) and keeps the item plans
   behind it; the item plans are never shown. Otherwise the result is
   `plan_incomplete` with every item's preview or error, and no plan.
-- **Apply.** The batch plan is consumed once; then each item is applied in
+- **Apply.** One consent dialog covers the whole batch (§ 2.6.6). The batch plan is consumed once; then each item is applied in
   order with its own plan, so each runs the full § 2.6.3 pipeline (digest,
   `open_id`, file identity, duplicate guard, its profile's § 2.8 bucket,
   journal). A failing item does not stop the rest; the result reports every
@@ -503,6 +546,9 @@ seven. Per-tool sections list only additions.
 | `plan_not_found` | no | "This plan_id is unknown, already used, or expired (plans are single-use and expire <ttl> minutes after the preview). Call the tool again WITHOUT plan_id to generate a fresh preview, show it to the user, and apply with the new plan_id only after the user approves." |
 | `plan_mismatch` | no | "The arguments (or the target account) differ from what this plan_id previewed. A plan applies only the exact previewed payload. Call the tool again WITHOUT plan_id to preview the changed arguments, show the new preview to the user, then apply with the new plan_id." File-changed form (CC-D3, § 2.6.3 step 3), `details: { reason: "file_changed" }`: "The file changed since plan: the file at file_path no longer matches the size, modification time and identity captured when the preview was generated. Generate a fresh preview and apply again." |
 | `possible_duplicate` | no | "A publish attempt with an identical payload (same media, text and settings — the guard matches the whole resolved request, not any single field) on account '<profile>' was journaled at <ts> with outcome '<ok\|unknown>'<, publish_id <id>>. Verify with tiktok_get_publish_status and tiktok_list_publish_journal that no post was created. Only if confirmed, re-preview and apply with force: true." In-flight form (§ 2.6.5), `details: { in_flight: true }`: "A publish attempt with an identical payload on account '<profile>' is being sent right now. Wait for it to finish, then check tiktok_list_publish_journal and tiktok_get_publish_status. Only if no post was created, re-preview and apply with force: true." |
+| `consent_declined` | no | "The user declined this write in the confirmation dialog. Nothing was sent and the plan_id is now void. Do not retry; ask the user what to change, then preview again." (§ 2.6.6) |
+| `consent_cancelled` | no | "The confirmation dialog was closed without an answer. Nothing was sent and the plan_id is still valid until it expires. Ask the user whether to go ahead; only if they say yes, call the tool again with the same arguments and plan_id." (§ 2.6.6) |
+| `consent_unavailable` | no | `details: { reason: "unsupported" }`: "This server requires a confirmation dialog for every write (TT_ELICITATION=required) and this MCP client does not support elicitation. Nothing was sent. Use a client that supports elicitation, or ask the operator to change TT_ELICITATION." `details: { reason: "failed" }`: "The confirmation dialog could not be shown (the elicitation request failed). Nothing was sent and the plan_id is still valid. Try the same call again once; if it fails again, tell the user." (§ 2.6.6) |
 | `network_unsent` | no | "The network failed before the publish request was sent — TikTok received nothing and no post was created (journal outcome 'error'). When the connection recovers, generate a fresh preview and apply with the new plan_id." |
 | `network_ambiguous` | no | "The network failed after the publish request may already have been sent — the post MAY exist upstream. Do NOT apply again. Check tiktok_list_publish_journal (the latest entry will show outcome 'unknown') and tiktok_get_publish_status or tiktok_list_videos first; retry only if no post exists, with a fresh preview." Also the answer to a caller cancellation that lands while the send is in flight (CC-G4); after the init it carries `details: { publish_id }`. |
 | `media_root_not_configured` | no | "source \"file\" is disabled: the operator has not set TT_MEDIA_ROOT (the only directory this server may read media from). Ask the user to set TT_MEDIA_ROOT in the server configuration and restart, or host the media on a verified URL and use source \"url\"." |

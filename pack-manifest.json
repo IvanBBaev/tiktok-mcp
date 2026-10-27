@@ -53,6 +53,8 @@
     "build/src/index.js",
     "build/src/mcp/completions.d.ts",
     "build/src/mcp/completions.js",
+    "build/src/mcp/consent.d.ts",
+    "build/src/mcp/consent.js",
     "build/src/mcp/define.d.ts",
     "build/src/mcp/define.js",
     "build/src/mcp/errors.d.ts",

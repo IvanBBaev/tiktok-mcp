@@ -61,6 +61,7 @@ import {
   localRefusal,
   mintPlan,
   resolveOpenId,
+  confirmWrite,
   runPlanGuards,
   signalOpt,
   waitIfAsked,
@@ -453,6 +454,20 @@ async function executePhotos(
     tool: TOOL_NAME,
   };
 
+  // § 2.6.6 — the human checkpoint, where the client can show one.
+  const declined = await confirmWrite(ctx, planId, expectation, {
+    items: [
+      {
+        action: 'Publish a photo carousel',
+        account: api.profile,
+        text: excerptText(args.title, args.description),
+        privacy: args.privacy_level,
+      },
+    ],
+    runAt: args.run_at,
+  });
+  if (declined !== undefined) return declined;
+
   // Steps 5–7.
   // § 2.10 — queue the approved request instead of publishing it now.
   if (args.run_at !== undefined) {
@@ -658,6 +673,19 @@ async function executePhotosDraft(
     openId,
     tool: DRAFT_TOOL_NAME,
   };
+
+  // § 2.6.6 — the human checkpoint, where the client can show one.
+  const declined = await confirmWrite(ctx, planId, expectation, {
+    items: [
+      {
+        action: 'Upload a photo carousel to the TikTok inbox as a draft',
+        account: api.profile,
+        text: excerptText(args.title, args.description),
+      },
+    ],
+    runAt: args.run_at,
+  });
+  if (declined !== undefined) return declined;
 
   // Steps 5–7.
   // § 2.10 — queue the approved request instead of publishing it now.

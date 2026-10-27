@@ -75,6 +75,7 @@ import {
   mediaPreflight,
   mintPlan,
   resolveOpenId,
+  confirmWrite,
   runPlanGuards,
   signalOpt,
   waitIfAsked,
@@ -712,6 +713,20 @@ async function executePost(
     fileIdentity: source.value.fileIdentity,
   };
 
+  // § 2.6.6 — the human checkpoint, where the client can show one.
+  const declined = await confirmWrite(ctx, planId, expectation, {
+    items: [
+      {
+        action: 'Publish a video',
+        account: api.profile,
+        text: args.title ?? '',
+        privacy: args.privacy_level,
+      },
+    ],
+    runAt: args.run_at,
+  });
+  if (declined !== undefined) return declined;
+
   // Steps 5–7.
   // § 2.10 — queue the approved request instead of publishing it now.
   if (args.run_at !== undefined) {
@@ -914,6 +929,19 @@ async function executeDraft(
     tool: DRAFT_TOOL_NAME,
     fileIdentity: source.value.fileIdentity,
   };
+
+  // § 2.6.6 — the human checkpoint, where the client can show one.
+  const declined = await confirmWrite(ctx, planId, expectation, {
+    items: [
+      {
+        action: 'Upload a video to the TikTok inbox as a draft',
+        account: api.profile,
+        text: '',
+      },
+    ],
+    runAt: args.run_at,
+  });
+  if (declined !== undefined) return declined;
 
   // Steps 5–7.
   // § 2.10 — queue the approved request instead of publishing it now.

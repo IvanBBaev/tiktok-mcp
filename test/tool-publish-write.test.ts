@@ -52,6 +52,7 @@ import { planChunks } from '../src/api/upload.js';
 import { TikTokError } from '../src/core/errors.js';
 import { createLogger, type Logger } from '../src/core/log.js';
 import { loadSettings } from '../src/core/settings.js';
+import type { ConsentAnswer, ConsentRequest } from '../src/mcp/consent.js';
 import type { ToolCtx } from '../src/mcp/define.js';
 import {
   peekPublishBucket,
@@ -3402,3 +3403,179 @@ test(
     });
   },
 );
+
+// ---------------------------------------------------------------------------
+// § 2.6.6 — the consent dialog between the plan and the post
+// ---------------------------------------------------------------------------
+
+/** `ctx` with a consent dialog that records each request and answers `answer`. */
+function withDialog(
+  ctx: ToolCtx,
+  answer: ConsentAnswer | (() => Promise<ConsentAnswer>),
+): { ctx: ToolCtx; asked: ConsentRequest[] } {
+  const asked: ConsentRequest[] = [];
+  return {
+    asked,
+    ctx: {
+      ...ctx,
+      confirm: async (request) => {
+        asked.push(request);
+        return typeof answer === 'string' ? answer : await answer();
+      },
+    },
+  };
+}
+
+test('§ 2.6.6: an approved dialog lets the apply post, and shows what it approves', async () => {
+  await withCtx({}, async (ctx) => {
+    const dialog = withDialog(ctx, 'approved');
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => {
+      const preview = previewOf(await run(dialog.ctx, previewArgs()));
+      // A preview never asks: nothing is about to happen yet.
+      assert.equal(dialog.asked.length, 0);
+      return await run(dialog.ctx, previewArgs({ plan_id: preview.plan_id }));
+    });
+
+    assert.equal(appliedOf(result).mode, 'applied');
+    assert.equal(countPath(stub, INIT_PATH), 1);
+    assert.equal(dialog.asked.length, 1);
+    assert.deepEqual(dialog.asked[0]?.items, [
+      {
+        action: 'Publish a video',
+        account: 'DEFAULT',
+        text: 'A clip',
+        privacy: 'SELF_ONLY',
+      },
+    ]);
+    assert.equal(dialog.asked[0]?.runAt, undefined);
+  });
+});
+
+test('§ 2.6.6: a declined dialog sends nothing and voids the plan', async () => {
+  await withCtx({}, async (ctx) => {
+    const dialog = withDialog(ctx, 'declined');
+    const stub = fakeApi();
+    await withFetch(stub, async () => {
+      const preview = previewOf(await run(dialog.ctx, previewArgs()));
+      const declined = await run(dialog.ctx, previewArgs({ plan_id: preview.plan_id }));
+      assert.equal(errorOf(declined).code, 'consent_declined');
+      assert.equal(errorOf(declined).retryable, false);
+
+      // The same plan_id without a dialog: the "no" must still hold.
+      const replay = await run(ctx, previewArgs({ plan_id: preview.plan_id }));
+      assert.equal(errorOf(replay).code, 'plan_not_found');
+    });
+    assert.equal(countPath(stub, INIT_PATH), 0);
+  });
+});
+
+test('§ 2.6.6: a dismissed dialog sends nothing and leaves the plan appliable', async () => {
+  await withCtx({}, async (ctx) => {
+    const dialog = withDialog(ctx, 'cancelled');
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => {
+      const preview = previewOf(await run(dialog.ctx, previewArgs()));
+      const cancelled = await run(dialog.ctx, previewArgs({ plan_id: preview.plan_id }));
+      assert.equal(errorOf(cancelled).code, 'consent_cancelled');
+      assert.equal(countPath(stub, INIT_PATH), 0);
+      return await run(
+        withDialog(ctx, 'approved').ctx,
+        previewArgs({ plan_id: preview.plan_id }),
+      );
+    });
+    assert.equal(appliedOf(result).mode, 'applied');
+  });
+});
+
+test('§ 2.6.6: a dialog that fails is consent_unavailable, and the plan survives', async () => {
+  await withCtx({}, async (ctx) => {
+    const dialog = withDialog(ctx, () => Promise.reject(new Error('transport closed')));
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => {
+      const preview = previewOf(await run(dialog.ctx, previewArgs()));
+      const failed = await run(dialog.ctx, previewArgs({ plan_id: preview.plan_id }));
+      assert.equal(errorOf(failed).code, 'consent_unavailable');
+      assert.deepEqual(errorOf(failed).details, { reason: 'failed' });
+      return await run(ctx, previewArgs({ plan_id: preview.plan_id }));
+    });
+    assert.equal(appliedOf(result).mode, 'applied');
+  });
+});
+
+test('§ 2.6.6: a dialog that throws because the call was cancelled is consent_cancelled', async () => {
+  await withCtx({}, async (ctx) => {
+    const controller = new AbortController();
+    const dialog = withDialog({ ...ctx, signal: controller.signal }, () => {
+      controller.abort();
+      return Promise.reject(new Error('request aborted'));
+    });
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => {
+      const preview = previewOf(await run(ctx, previewArgs()));
+      const cancelled = await run(dialog.ctx, previewArgs({ plan_id: preview.plan_id }));
+      assert.equal(errorOf(cancelled).code, 'consent_cancelled');
+      assert.equal(countPath(stub, INIT_PATH), 0);
+      // Nobody said no: the plan is still there for the next call.
+      return await run(ctx, previewArgs({ plan_id: preview.plan_id }));
+    });
+    assert.equal(appliedOf(result).mode, 'applied');
+  });
+});
+
+test('§ 2.6.6: a plan that would be refused is refused before anyone is asked', async () => {
+  await withCtx({}, async (ctx) => {
+    const dialog = withDialog(ctx, 'approved');
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () =>
+      run(dialog.ctx, previewArgs({ plan_id: `plan_${'0'.repeat(32)}` })),
+    );
+    assert.equal(errorOf(result).code, 'plan_not_found');
+    assert.equal(dialog.asked.length, 0);
+  });
+});
+
+test('§ 2.6.6: TT_ELICITATION=required refuses a write the client cannot confirm', async () => {
+  await withCtx({ TT_ELICITATION: 'required' }, async (ctx) => {
+    const stub = fakeApi();
+    await withFetch(stub, async () => {
+      const preview = previewOf(await run(ctx, previewArgs()));
+      const refused = await run(ctx, previewArgs({ plan_id: preview.plan_id }));
+      assert.equal(errorOf(refused).code, 'consent_unavailable');
+      assert.deepEqual(errorOf(refused).details, { reason: 'unsupported' });
+
+      // Consent given upstream (a batch, a queued entry) is not asked for again.
+      const applied = await run(
+        { ...ctx, consented: true },
+        previewArgs({ plan_id: preview.plan_id }),
+      );
+      assert.equal(appliedOf(applied).mode, 'applied');
+    });
+  });
+});
+
+test('§ 2.6.6: TT_WRITE_MODE=apply has no plan, so there is nothing to confirm', async () => {
+  await withCtx({ TT_WRITE_MODE: 'apply', TT_ELICITATION: 'required' }, async (ctx) => {
+    const dialog = withDialog(ctx, 'declined');
+    const result = await withFetch(fakeApi(), async () => run(dialog.ctx, previewArgs()));
+    assert.equal(appliedOf(result).mode, 'applied');
+    assert.equal(dialog.asked.length, 0);
+  });
+});
+
+test('§ 2.6.6: the draft tool asks too, with its own action text', async () => {
+  await withCtx({}, async (ctx) => {
+    const dialog = withDialog(ctx, 'declined');
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => {
+      const preview = draftPreviewOf(await runDraft(dialog.ctx, draftArgs()));
+      return await runDraft(dialog.ctx, draftArgs({ plan_id: preview.plan_id }));
+    });
+    assert.equal(result.error?.code, 'consent_declined');
+    assert.equal(
+      dialog.asked[0]?.items[0]?.action,
+      'Upload a video to the TikTok inbox as a draft',
+    );
+    assert.equal(stub.calls.filter((call) => call.path.includes('/init/')).length, 0);
+  });
+});

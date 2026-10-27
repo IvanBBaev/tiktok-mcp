@@ -38,6 +38,7 @@ import test from 'node:test';
 import { createApiContext, type ApiContext } from '../src/api/context.js';
 import { createLogger } from '../src/core/log.js';
 import { loadSettings } from '../src/core/settings.js';
+import type { ConsentRequest } from '../src/mcp/consent.js';
 import type { ToolCtx } from '../src/mcp/define.js';
 import {
   publishRateLimits,
@@ -1484,5 +1485,60 @@ test('§ 2.5 no result either photo tool returns carries a token or a raw open_i
     // absence should hold by construction — pinned so it stays that way.
     assert.ok(!serialized.includes('upload_url'));
     assert.ok(!serialized.includes('upload_token'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// § 2.6.6 — the consent dialog between the plan and the post
+// ---------------------------------------------------------------------------
+
+test('§ 2.6.6 a declined carousel sends no init, and the dialog shows title and description', async () => {
+  await withCtx({}, async (ctx) => {
+    const asked: ConsentRequest[] = [];
+    const dialogCtx: ToolCtx = {
+      ...ctx,
+      confirm: (request) => {
+        asked.push(request);
+        return Promise.resolve('declined');
+      },
+    };
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => {
+      const preview = previewOf(await run(dialogCtx, previewArgs()));
+      return await run(dialogCtx, previewArgs({ plan_id: preview.plan_id }));
+    });
+
+    assert.equal(errorOf(result).code, 'consent_declined');
+    assert.equal(countPath(stub, INIT_PATH), 0);
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0]?.items[0]?.action, 'Publish a photo carousel');
+    assert.equal(asked[0]?.items[0]?.privacy, 'SELF_ONLY');
+    assert.match(asked[0]?.items[0]?.text ?? '', /Trip photos/);
+  });
+});
+
+test('§ 2.6.6 a declined carousel draft sends no init, under its own action text', async () => {
+  await withCtx({}, async (ctx) => {
+    const asked: ConsentRequest[] = [];
+    const dialogCtx: ToolCtx = {
+      ...ctx,
+      confirm: (request) => {
+        asked.push(request);
+        return Promise.resolve('declined');
+      },
+    };
+    const stub = fakeApi();
+    const result = await withFetch(stub, async () => {
+      const preview = draftPreviewOf(await runDraft(dialogCtx, draftArgs()));
+      return await runDraft(dialogCtx, draftArgs({ plan_id: preview.plan_id }));
+    });
+
+    assert.equal(errorOf(result).code, 'consent_declined');
+    assert.equal(stub.calls.filter((call) => call.path.includes('/init/')).length, 0);
+    assert.equal(
+      asked[0]?.items[0]?.action,
+      'Upload a photo carousel to the TikTok inbox as a draft',
+    );
+    assert.equal(asked[0]?.items[0]?.privacy, undefined);
   });
 });

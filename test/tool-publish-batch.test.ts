@@ -11,6 +11,7 @@ import test from 'node:test';
 
 import { createApiContext, type ApiContext } from '../src/api/context.js';
 import { createLogger } from '../src/core/log.js';
+import type { ConsentRequest } from '../src/mcp/consent.js';
 import { loadSettings } from '../src/core/settings.js';
 import { resetRateBuckets } from '../src/mcp/plan.js';
 import { resetPlanStore } from '../src/mcp/plan-store.js';
@@ -393,5 +394,132 @@ test('the handler needs ctx.call', async () => {
       }),
       /needs ToolCtx\.call/,
     );
+  });
+});
+
+test('§ 2.6.6: one dialog approves the whole batch, and the items do not ask again', async () => {
+  // `required` would refuse any item that asked on its own: the items run
+  // without a dialog of their own, so they pass only because consent carried.
+  await withHarness({ TT_ELICITATION: 'required' }, async (h) => {
+    const asked: ConsentRequest[] = [];
+    const confirm = (request: ConsentRequest): Promise<'approved'> => {
+      asked.push(request);
+      return Promise.resolve('approved');
+    };
+    const preview = dataOf(await batch(h, { items: TWO_PROFILES }));
+    assert.equal(preview.mode, 'plan');
+    if (preview.mode !== 'plan') return;
+    assert.equal(asked.length, 0, 'a preview never asks');
+
+    const applied = dataOf(
+      (await callTool(
+        publishBatchTool,
+        { items: TWO_PROFILES, plan_id: preview.plan_id },
+        h.runtime,
+        { confirm },
+      )) as ToolResult<PublishBatchData>,
+    );
+    assert.equal(applied.mode, 'applied');
+    if (applied.mode !== 'applied') return;
+    assert.equal(applied.succeeded, 2);
+    assert.equal(asked.length, 1);
+    assert.deepEqual(
+      asked[0]?.items.map((item) => [item.action, item.account]),
+      [
+        ['Upload a video to the TikTok inbox as a draft', 'DEFAULT'],
+        ['Upload a video to the TikTok inbox as a draft', 'BRAND'],
+      ],
+    );
+  });
+});
+
+test('§ 2.6.6: a declined batch sends nothing and its plan is void', async () => {
+  await withHarness({}, async (h) => {
+    const preview = dataOf(await batch(h, { items: TWO_PROFILES }));
+    assert.equal(preview.mode, 'plan');
+    if (preview.mode !== 'plan') return;
+    const declined = await callTool(
+      publishBatchTool,
+      { items: TWO_PROFILES, plan_id: preview.plan_id },
+      h.runtime,
+      { confirm: () => Promise.resolve('declined') },
+    );
+    assert.equal(errorCode(declined), 'consent_declined');
+    assert.equal(h.inits.size, 0);
+
+    const replay = await batch(h, { items: TWO_PROFILES, plan_id: preview.plan_id });
+    assert.equal(errorCode(replay), 'plan_not_found');
+    assert.equal(h.inits.size, 0);
+  });
+});
+
+test('§ 2.6.6: the batch dialog names each item by its own tool and caption', async () => {
+  await withHarness({}, async (h) => {
+    const items = [
+      {
+        tool: 'tiktok_upload_photos_draft',
+        args: {
+          photo_urls: [`${VERIFIED_PREFIX}a.jpg`],
+          description: 'Only a description',
+          account: 'brand',
+        },
+      },
+      draftItem('a.mp4'),
+    ];
+    const preview = dataOf(await batch(h, { items }));
+    assert.equal(preview.mode, 'plan');
+    if (preview.mode !== 'plan') return;
+
+    const asked: ConsentRequest[] = [];
+    const declined = await callTool(
+      publishBatchTool,
+      { items, plan_id: preview.plan_id },
+      h.runtime,
+      {
+        confirm: (request) => {
+          asked.push(request);
+          return Promise.resolve('declined');
+        },
+      },
+    );
+    assert.equal(errorCode(declined), 'consent_declined');
+    assert.deepEqual(
+      asked[0]?.items.map((item) => [item.action, item.account, item.text, item.privacy]),
+      [
+        [
+          'Upload a photo carousel to the TikTok inbox as a draft',
+          'BRAND',
+          'Only a description',
+          undefined,
+        ],
+        [
+          'Upload a video to the TikTok inbox as a draft',
+          'DEFAULT',
+          undefined,
+          undefined,
+        ],
+      ],
+    );
+  });
+});
+
+test('§ 2.6.6: a dismissed batch dialog sends nothing and keeps the plan appliable', async () => {
+  await withHarness({}, async (h) => {
+    const preview = dataOf(await batch(h, { items: TWO_PROFILES }));
+    assert.equal(preview.mode, 'plan');
+    if (preview.mode !== 'plan') return;
+    const cancelled = await callTool(
+      publishBatchTool,
+      { items: TWO_PROFILES, plan_id: preview.plan_id },
+      h.runtime,
+      { confirm: () => Promise.resolve('cancelled') },
+    );
+    assert.equal(errorCode(cancelled), 'consent_cancelled');
+    assert.equal(h.inits.size, 0);
+
+    const applied = dataOf(
+      await batch(h, { items: TWO_PROFILES, plan_id: preview.plan_id }),
+    );
+    assert.equal(applied.mode, 'applied');
   });
 });

@@ -8,9 +8,12 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
+  ElicitRequestSchema,
   ErrorCode,
   McpError,
   ResourceUpdatedNotificationSchema,
+  type ClientCapabilities,
+  type ElicitResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
@@ -1029,6 +1032,7 @@ async function connectedClient(
     runtime?: ServerRuntime;
     clock?: Clock;
     subscriptionPollMs?: number;
+    capabilities?: ClientCapabilities;
   } = {},
 ): Promise<{ client: Client; handle: McpServerHandle; close: () => Promise<void> }> {
   const runtime = opts.runtime ?? runtimeOf();
@@ -1045,7 +1049,10 @@ async function connectedClient(
     runtime,
   });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: 'test-client', version: '0.0.0' });
+  const client = new Client(
+    { name: 'test-client', version: '0.0.0' },
+    opts.capabilities === undefined ? {} : { capabilities: opts.capabilities },
+  );
   await Promise.all([
     handle.server.connect(serverTransport),
     client.connect(clientTransport),
@@ -3024,4 +3031,89 @@ test('closing the session stops its subscription polling', async () => {
   await close();
   await flush(5);
   assert.equal(clock.pending(), 0);
+});
+
+// ---------------------------------------------------------------------------
+// § 2.6.6 — the consent dialog over elicitation/create
+// ---------------------------------------------------------------------------
+
+/** A fixture that reports what `ctx.confirm` answered, or that there was none. */
+function consentProbeTool(): AnyToolSpec {
+  return echoTool({
+    handler: async (_args, ctx) => ({
+      ok: true,
+      data: {
+        answer:
+          ctx.confirm === undefined
+            ? 'no_dialog'
+            : await ctx.confirm({
+                items: [
+                  { action: 'Publish a video', account: 'DEFAULT', text: 'A clip' },
+                ],
+              }),
+      },
+    }),
+  });
+}
+
+async function probeAnswer(client: Client): Promise<unknown> {
+  const result = await client.callTool({ name: 'tiktok_list_videos', arguments: {} });
+  return (result.structuredContent as { data?: { answer?: unknown } } | undefined)?.data
+    ?.answer;
+}
+
+test('§ 2.6.6: a client with form elicitation gets the consent dialog', async () => {
+  const { client, close } = await connectedClient({
+    packages: packagesOf(consentProbeTool()),
+    capabilities: { elicitation: { form: {} } },
+  });
+  try {
+    const asked: string[] = [];
+    let reply: ElicitResult = { action: 'accept', content: { approve: true } };
+    client.setRequestHandler(ElicitRequestSchema, (request) => {
+      asked.push(request.params.message);
+      assert.equal(request.params.mode ?? 'form', 'form');
+      return reply;
+    });
+
+    assert.equal(await probeAnswer(client), 'approved');
+    assert.equal(asked.length, 1);
+    assert.match(asked[0] ?? '', /Publish a video on account 'DEFAULT' — "A clip"/);
+
+    reply = { action: 'accept', content: { approve: false } };
+    assert.equal(await probeAnswer(client), 'declined');
+    reply = { action: 'decline' };
+    assert.equal(await probeAnswer(client), 'declined');
+    reply = { action: 'cancel' };
+    assert.equal(await probeAnswer(client), 'cancelled');
+  } finally {
+    await close();
+  }
+});
+
+test('§ 2.6.6: a client without elicitation gets no dialog, and plan_id stays the floor', async () => {
+  const { client, close } = await connectedClient({
+    packages: packagesOf(consentProbeTool()),
+  });
+  try {
+    assert.equal(await probeAnswer(client), 'no_dialog');
+  } finally {
+    await close();
+  }
+});
+
+test('§ 2.6.6: TT_ELICITATION=off never asks, even a client that could answer', async () => {
+  const { client, close } = await connectedClient({
+    packages: packagesOf(consentProbeTool()),
+    runtime: runtimeOf({ settings: settings({ TT_ELICITATION: 'off' }) }),
+    capabilities: { elicitation: {} },
+  });
+  try {
+    client.setRequestHandler(ElicitRequestSchema, () => {
+      throw new Error('the dialog must not be shown');
+    });
+    assert.equal(await probeAnswer(client), 'no_dialog');
+  } finally {
+    await close();
+  }
 });

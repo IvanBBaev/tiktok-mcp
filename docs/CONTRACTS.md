@@ -215,6 +215,7 @@ export interface Settings {
   envFile?: string;            // TT_ENV_FILE
   activeProfile: string;       // TT_ACTIVE_PROFILE (default "DEFAULT")
   writeMode: "plan" | "apply" | "deny";   // TT_WRITE_MODE, default "plan"
+  elicitation: "auto" | "off" | "required"; // TT_ELICITATION, default "auto"
   timeoutMs: number;           // TT_TIMEOUT_MS
   uploadTimeoutMs: number;     // TT_UPLOAD_TIMEOUT_MS (per chunk PUT, CC-D7)
   statusPollTimeoutMs: number; // TT_STATUS_POLL_TIMEOUT_MS

@@ -79,6 +79,13 @@ import {
   type Settings,
   type ToolPackage,
 } from '../core/settings.js';
+import {
+  CONSENT_SCHEMA,
+  CONSENT_TIMEOUT_MS,
+  consentAnswerOf,
+  consentMessage,
+  supportsConsentDialog,
+} from './consent.js';
 import type { AnyToolSpec, ToolCtx } from './define.js';
 import {
   argumentErrorMap,
@@ -391,9 +398,38 @@ function progressReporter(
   };
 }
 
+/**
+ * The consent dialog for one `tools/call`, or `undefined` when the operator
+ * turned it off or the client cannot show it (TOOLS.md § 2.6.6). Read per call:
+ * capabilities are known only once the session has initialized.
+ */
+function consentDialog(
+  server: Server,
+  settings: Settings,
+  signal: AbortSignal,
+): ToolCtx['confirm'] {
+  if (settings.elicitation === 'off') return undefined;
+  if (!supportsConsentDialog(server.getClientCapabilities())) return undefined;
+  return async (request) => {
+    const result = await server.elicitInput(
+      {
+        mode: 'form',
+        message: consentMessage(request),
+        requestedSchema: CONSENT_SCHEMA,
+      },
+      { signal, timeout: CONSENT_TIMEOUT_MS },
+    );
+    return consentAnswerOf(result);
+  };
+}
+
 export interface CallOptions {
   signal?: AbortSignal;
   progress?: ToolCtx['progress'];
+  /** The client's consent dialog, when it can show one (TOOLS.md § 2.6.6). */
+  confirm?: ToolCtx['confirm'];
+  /** Consent was already given for this call — see {@link ToolCtx.consented}. */
+  consented?: boolean;
 }
 
 /**
@@ -442,13 +478,15 @@ export async function callTool(
     const ctx: ToolCtx = { api, log };
     if (opts.signal !== undefined) ctx.signal = opts.signal;
     if (opts.progress !== undefined) ctx.progress = opts.progress;
+    if (opts.confirm !== undefined) ctx.confirm = opts.confirm;
+    if (opts.consented === true) ctx.consented = true;
+    // A composing tool asks once for everything it runs, so the calls it makes
+    // carry that consent instead of a dialog of their own.
     ctx.call = (inner, innerArgs) =>
-      callTool(
-        inner,
-        innerArgs,
-        runtime,
-        opts.signal === undefined ? {} : { signal: opts.signal },
-      );
+      callTool(inner, innerArgs, runtime, {
+        ...(opts.signal === undefined ? {} : { signal: opts.signal }),
+        consented: true,
+      });
     const result = await spec.handler(parsed.data, ctx);
     return stampAccount(result, profile);
   } catch (cause) {
@@ -570,6 +608,8 @@ export function createServer(opts: ServerOptions): McpServerHandle {
       runtime.log,
     );
     if (progress !== undefined) callOpts.progress = progress;
+    const confirm = consentDialog(server, runtime.settings, extra.signal);
+    if (confirm !== undefined) callOpts.confirm = confirm;
     const result = await callTool(spec, request.params.arguments, runtime, callOpts);
     return toCallToolResult(result, runtime.settings);
   });

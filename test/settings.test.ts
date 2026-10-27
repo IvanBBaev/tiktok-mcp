@@ -56,6 +56,7 @@ test('an empty environment yields exactly the documented defaults', () => {
     packagesDeny: [],
     packagesReadonly: false,
     writeMode: 'plan',
+    elicitation: 'auto',
     planTtlS: 600,
     planMaxOutstanding: 32,
     defaultAigcLabel: true,
@@ -208,6 +209,8 @@ test('booleans accept 0/1 and the true/false superset, case-insensitively', () =
 
 test('enums list the accepted values when they are wrong', () => {
   assert.equal(load({ TT_WRITE_MODE: 'deny' }).writeMode, 'deny');
+  assert.equal(load({ TT_ELICITATION: 'required' }).elicitation, 'required');
+  assert.match(loadError({ TT_ELICITATION: 'always' }).message, /TT_ELICITATION/);
   assert.equal(load({ TT_LOG_LEVEL: 'debug' }).logLevel, 'debug');
   assert.equal(
     load({ TT_TRANSPORT: 'http', TT_HTTP_TOKEN: HTTP_TOKEN }).transport,

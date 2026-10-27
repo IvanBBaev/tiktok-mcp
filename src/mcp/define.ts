@@ -22,6 +22,7 @@ import type { ApiContext } from '../api/context.js';
 import { TikTokError } from '../core/errors.js';
 import type { Logger } from '../core/log.js';
 import { TOOL_PACKAGES, type ToolPackage } from '../core/settings.js';
+import type { ConsentAsk } from './consent.js';
 import type { ToolResult } from './result.js';
 
 /**
@@ -59,6 +60,20 @@ export interface ToolCtx {
     spec: ToolSpec<unknown, unknown>,
     args: unknown,
   ) => Promise<ToolResult<unknown>>;
+
+  /**
+   * Asks the human to approve a write through the client's elicitation dialog
+   * (TOOLS.md § 2.6.6). Set by the server only when the client can show the
+   * dialog and `TT_ELICITATION` is not `off`.
+   */
+  confirm?: ConsentAsk;
+
+  /**
+   * True on a call whose consent was already given upstream: an item of an
+   * approved batch, or a queued entry `run-queue` applies. Such a call does not
+   * ask again.
+   */
+  consented?: boolean;
 }
 
 export interface ToolSpec<In, Out> {

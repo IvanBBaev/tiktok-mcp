@@ -57,6 +57,13 @@ import {
   type OutcomeRecord,
 } from '../mcp/journal.js';
 import {
+  consentCancelledError,
+  consentDeclinedError,
+  consentUnavailableError,
+  type ConsentAnswer,
+  type ConsentRequest,
+} from '../mcp/consent.js';
+import {
   approvalRequiredHint,
   localRateLimitedError,
   localRateLimitedHint,
@@ -840,6 +847,56 @@ function planRefused(ctx: ToolCtx, reason: ConsumeFailure): ToolResult<never> {
       ? fileChangedError()
       : planFailureError(reason, ctx.api.settings.planTtlS);
   return { ok: false, error };
+}
+
+/**
+ * The human checkpoint of § 2.6.6, between step 4 and step 5: an apply that
+ * carries a `plan_id` asks the user through the client's consent dialog before
+ * anything else happens to the plan.
+ *
+ * The plan is verified first, so nobody is asked about a token that would be
+ * refused anyway, and nothing is spent while the dialog is open: the later
+ * steps re-verify, which also catches a plan that expired while the user read.
+ * A "no" voids the plan on the spot, so an injected retry cannot reuse it; a
+ * dismissed dialog leaves it valid, because nobody said no.
+ *
+ * Skipped when there is no plan (`TT_WRITE_MODE=apply`), when consent was
+ * already given upstream (a batch item, a queued entry), and — unless
+ * `TT_ELICITATION=required` — when the client cannot show the dialog, which
+ * leaves `plan_id` as the floor it always was.
+ */
+export async function confirmWrite(
+  ctx: ToolCtx,
+  planId: string | undefined,
+  expectation: PlanExpectation,
+  request: ConsentRequest,
+): Promise<ToolResult<never> | undefined> {
+  if (planId === undefined || ctx.consented === true) return undefined;
+  const { api } = ctx;
+  const failed = (error: ToolError): ToolResult<never> => ({ ok: false, error });
+
+  if (ctx.confirm === undefined) {
+    return api.settings.elicitation === 'required'
+      ? failed(consentUnavailableError('unsupported'))
+      : undefined;
+  }
+
+  const verdict = verifyPlan(planId, expectation, api.clock, planLimits(ctx));
+  if (!verdict.ok) return planRefused(ctx, verdict.reason);
+
+  let answer: ConsentAnswer;
+  try {
+    answer = await ctx.confirm(request);
+  } catch (cause) {
+    if (ctx.signal?.aborted === true) return failed(consentCancelledError());
+    ctx.log.warn('consent dialog failed', { reason: String(cause) });
+    return failed(consentUnavailableError('failed'));
+  }
+  if (answer === 'approved') return undefined;
+  if (answer === 'cancelled') return failed(consentCancelledError());
+  // Voided, not merely refused: the same plan_id must not apply after a "no".
+  consumePlan(planId, expectation, api.clock, planLimits(ctx));
+  return failed(consentDeclinedError());
 }
 
 /**

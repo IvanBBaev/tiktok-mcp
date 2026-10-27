@@ -65,6 +65,10 @@ import type { LogLevel } from './log.js';
 export const WRITE_MODES = ['plan', 'apply', 'deny'] as const;
 export type WriteMode = (typeof WRITE_MODES)[number];
 
+/** `TT_ELICITATION` (CONFIGURATION.md § Tool surface & write policy). */
+export const ELICITATION_MODES = ['auto', 'off', 'required'] as const;
+export type ElicitationMode = (typeof ELICITATION_MODES)[number];
+
 /** `TT_TRANSPORT`. */
 export const TRANSPORTS = ['stdio', 'http'] as const;
 export type Transport = (typeof TRANSPORTS)[number];
@@ -177,6 +181,7 @@ export interface Settings {
   packagesDeny: readonly ToolPackage[];
   packagesReadonly: boolean;
   writeMode: WriteMode;
+  elicitation: ElicitationMode;
   planTtlS: number;
   planMaxOutstanding: number;
   defaultAigcLabel: boolean;
@@ -607,6 +612,7 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     packagesDeny: c.withDefault('TT_PACKAGES_DENY', listOf(TOOL_PACKAGES, 'package'), []),
     packagesReadonly: c.withDefault('TT_PACKAGES_READONLY', flag(), false),
     writeMode: c.withDefault('TT_WRITE_MODE', oneOf(WRITE_MODES), 'plan'),
+    elicitation: c.withDefault('TT_ELICITATION', oneOf(ELICITATION_MODES), 'auto'),
     planTtlS: c.withDefault(
       'TT_PLAN_TTL_S',
       decimalInt({ min: 1, unit: 'seconds' }),

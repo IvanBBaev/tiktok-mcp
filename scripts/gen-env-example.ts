@@ -143,6 +143,14 @@ export const SECTIONS: readonly Section[] = [
         render: 'default',
       },
       {
+        name: 'TT_ELICITATION',
+        comment: [
+          'Consent dialog on a plan apply: auto (ask when the client supports',
+          'elicitation, default) | off | required (refuse clients without it).',
+        ],
+        render: 'default',
+      },
+      {
         name: 'TT_PLAN_TTL_S',
         comment: ['Lifetime (seconds) of a minted plan_id before it expires.'],
         render: 'default',

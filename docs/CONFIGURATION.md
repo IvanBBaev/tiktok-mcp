@@ -212,6 +212,7 @@ binds a redirect shape that is not registered (CC-A8).
 | `TT_PACKAGES_DENY` | — | Packages forced off regardless of the above (deny wins) |
 | `TT_PACKAGES_READONLY` | `0` | `1` = register only tools with `readOnlyHint` (unregisters `publish-write`) |
 | `TT_WRITE_MODE` | `plan` | `plan` \| `apply` \| `deny` — see below |
+| `TT_ELICITATION` | `auto` | `auto` \| `off` \| `required` — the consent dialog on a plan apply (TOOLS.md § 2.6.6) — see below |
 | `TT_PLAN_TTL_S` | `600` | Lifetime of a minted `plan_id`; an expired plan fails with `plan_not_found` and requires a fresh preview |
 | `TT_PLAN_MAX_OUTSTANDING` | `32` | Cap on the in-memory plan store; oldest plans are evicted first, used plans before live ones |
 | `TT_DEFAULT_AIGC_LABEL` | `1` | Default for `is_aigc` on posts |
@@ -229,6 +230,18 @@ binds a redirect shape that is not registered (CC-A8).
   directly. Documented warning, verbatim: **"trusted automation only: this
   mode has no injection resistance"**.
 - **`deny`.** The `publish-write` package is not registered at all.
+
+**`TT_ELICITATION` — the consent dialog** (TOOLS.md § 2.6.6). When the MCP
+client supports form elicitation, an apply that carries a `plan_id` asks the
+human to approve it in a client-side dialog before anything is sent. A "no"
+voids the plan.
+
+- **`auto` (default).** Ask when the client can show the dialog. Otherwise
+  `plan_id` stays the only checkpoint.
+- **`off`.** Never ask.
+- **`required`.** Refuse a plan apply (`consent_unavailable`) from a client
+  that cannot show the dialog. Batch items and `run-queue` replays are exempt,
+  because their consent was already given.
 
 ### Media & URL sources
 

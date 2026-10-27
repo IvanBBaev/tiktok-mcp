@@ -343,14 +343,19 @@ other than the one previewed.
   injected instruction cannot know an unissued `plan_id`. It does **not**
   prove a human sat between the two calls: a model can chain preview →
   execute in one autonomous turn.
-- **Elicitation is demoted to optional post-v1** (rationale: SYNTHESIS
-  § 2.9). Residual risk, stated honestly: without elicitation, plan-mode
-  confirmation happens in the client conversation, so a sufficiently
-  deceived model could still execute a previewed plan; the digest binding
-  limits this to **exactly the previewed payload** — nothing else can be
-  posted under that plan_id. If elicitation ships later, it becomes the hard
-  human checkpoint where the client supports it; `plan_id` remains the
-  floor.
+- **Elicitation is the human checkpoint where the client supports it**
+  (TOOLS.md § 2.6.6). A plan apply asks the human through an MCP
+  `elicitation/create` form before anything is sent. The model does not
+  answer it, and the dialog text is a server template filled with the
+  request's own values, never upstream text. A "no" voids the plan, so an
+  injected retry cannot reuse it. `plan_id` remains the floor: with a client
+  that has no elicitation (or with `TT_ELICITATION=off`), confirmation happens
+  in the client conversation. A deceived model can then still execute a
+  previewed plan, but the digest binding limits this to **exactly the
+  previewed payload**. `TT_ELICITATION=required` closes that gap for
+  operators who want it, at the cost of refusing clients without the dialog.
+  Residual risk: the dialog is rendered by the client, so a compromised client
+  can still approve on the user's behalf.
 
 ### Transport
 

@@ -194,7 +194,10 @@ async function applyEntry(
     );
     if (!verdict.ok) return { kind: 'failed', error: mismatch(verdict.reason) };
 
-    const applied = await callTool(spec, { ...entry.args, plan_id: planId }, runtime);
+    // Consent was given when the entry was queued (§ 2.6.6); the replay never asks again.
+    const applied = await callTool(spec, { ...entry.args, plan_id: planId }, runtime, {
+      consented: true,
+    });
     const appliedError = errorOf(applied);
     if (appliedError === undefined) {
       const publishId = (applied as { data?: { publish_id?: unknown } }).data?.publish_id;

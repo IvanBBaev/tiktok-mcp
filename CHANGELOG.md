@@ -14,6 +14,16 @@ plumbing stay in the commit history where they belong.
 
 ### Added
 
+- **Consent dialog for writes (MCP elicitation).** When the MCP client
+  supports form elicitation, applying a `plan_id` first asks the user in a
+  client-side dialog. The dialog shows the action, account, title excerpt,
+  privacy and schedule. A "no" voids the plan, and a dismissed dialog leaves it
+  valid. A batch asks once for all its items. A scheduled post asks when it is
+  queued, not again when `run-queue` sends it. The new `TT_ELICITATION`
+  setting is `auto` (default), `off` or `required`; `required` refuses
+  clients that cannot show the dialog. There are three new error codes:
+  `consent_declined`, `consent_cancelled` and `consent_unavailable`. See
+  TOOLS.md § 2.6.6.
 - **Batch publishing (`tiktok_publish_batch`).** Up to 10 posts — the same
   video on several profiles, or several files on one — previewed together and
   approved with one `plan_id`. Each item runs through its own write tool, so

@@ -385,6 +385,7 @@ knobs. See [.env.example](.env.example) for a template and
 | `TT_PACKAGES_DENY` | no | — | Packages forced off regardless of `TT_TOOL_PACKAGES` (deny wins). |
 | `TT_PACKAGES_READONLY` | no | `0` | `1` registers only read-only tools (unregisters `publish-write`). |
 | `TT_WRITE_MODE` | no | `plan` | `plan` (default — preview then `plan_id`), `apply` (**trusted automation only: no injection resistance**), or `deny` (the `publish-write` package is not registered). |
+| `TT_ELICITATION` | no | `auto` | Consent dialog on a plan apply: `auto` (ask when the client supports MCP elicitation), `off`, or `required` (refuse clients that cannot show it). A "no" voids the plan. |
 | `TT_PLAN_TTL_S` | no | `600` | Lifetime of a minted `plan_id`; an expired plan fails with `plan_not_found` and needs a fresh preview. |
 | `TT_PLAN_MAX_OUTSTANDING` | no | `32` | Cap on the in-memory plan store; oldest plans evicted first. |
 | `TT_DEFAULT_AIGC_LABEL` | no | `1` | Default for the AIGC (`is_aigc`) label on posts — on, because MCP-driven content is typically AI-assisted. |

@@ -27,9 +27,10 @@ import {
   publishRateLimits,
   resolveWriteStep,
 } from '../mcp/plan.js';
+import type { ConsentItem } from '../mcp/consent.js';
 import { consumePlan, PLAN_ID_PATTERN, type PlanExpectation } from '../mcp/plan-store.js';
 import type { Hint, ToolError, ToolResult } from '../mcp/result.js';
-import { mintPlan, planLimits } from './publish-common.js';
+import { confirmWrite, mintPlan, planLimits } from './publish-common.js';
 import { postPhotosTool, uploadPhotosDraftTool } from './publish-photos.js';
 import { postVideoTool, uploadVideoDraftTool } from './publish-write.js';
 import { RUN_AT_ARG } from './schedule.js';
@@ -192,6 +193,31 @@ function batchExpectation(items: readonly ResolvedItem[], ctx: ToolCtx): PlanExp
   };
 }
 
+/** What each item tool does, in the consent dialog's words (§ 2.6.6). */
+const ITEM_ACTIONS: Readonly<Record<string, string>> = {
+  [postVideoTool.name]: 'Publish a video',
+  [uploadVideoDraftTool.name]: 'Upload a video to the TikTok inbox as a draft',
+  [postPhotosTool.name]: 'Publish a photo carousel',
+  [uploadPhotosDraftTool.name]: 'Upload a photo carousel to the TikTok inbox as a draft',
+};
+
+function stringArg(args: Record<string, unknown>, key: string): string | undefined {
+  const value = args[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** One dialog line per item: the whole batch is approved, or none of it. */
+function consentItems(items: readonly ResolvedItem[]): ConsentItem[] {
+  return items.map((item) => {
+    return {
+      action: ITEM_ACTIONS[item.tool.name] ?? item.tool.name,
+      account: canonicalProfileName(String(item.args['account'])),
+      text: stringArg(item.args, 'title') ?? stringArg(item.args, 'description'),
+      privacy: stringArg(item.args, 'privacy_level'),
+    };
+  });
+}
+
 function callerOf(ctx: ToolCtx): NonNullable<ToolCtx['call']> {
   const { call } = ctx;
   if (call === undefined) {
@@ -310,6 +336,15 @@ async function applyBatch(
 
   let planIds: readonly (string | undefined)[] = items.map(() => undefined);
   if (planId !== undefined) {
+    // One dialog for the whole batch; the items run with `consented` set.
+    const declined = await confirmWrite(ctx, planId, batchExpectation(items, ctx), {
+      items: consentItems(items),
+      runAt: args.run_at,
+    });
+    if (declined !== undefined) {
+      if (declined.error?.code === 'consent_declined') itemPlans.delete(planId);
+      return declined;
+    }
     const consumed = consumePlan(
       planId,
       batchExpectation(items, ctx),
