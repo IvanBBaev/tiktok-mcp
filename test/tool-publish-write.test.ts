@@ -1,5 +1,5 @@
 /**
- * `tiktok_post_video` (TOOLS.md § 3.9) — the two-step write contract of § 2.6.
+ * `tiktok_post_video` (TOOLS.md § 3.10) — the two-step write contract of § 2.6.
  *
  * This is the only tool that can create something the user cannot undo from
  * here, so the tests are organised around the guarantees that stand between a
@@ -204,7 +204,7 @@ async function run(ctx: ToolCtx, args: Args): Promise<ToolResult<PostVideoData>>
 
 /**
  * The same clip for `tiktok_upload_video_draft`, which takes no title and no
- * privacy level — the user sets both in the app (§ 3.10).
+ * privacy level — the user sets both in the app (§ 3.11).
  *
  * The draft tool's own contract is covered by `tool-publish-draft.test.ts`; it
  * appears here only because the § 5.2 case at the end of this file has to run
@@ -510,13 +510,19 @@ function dataOf<T>(result: ToolResult<T>): T {
 
 function previewOf(result: ToolResult<PostVideoData>): WritePreview {
   const data = dataOf(result);
-  assert.ok(data.mode !== 'applied', 'expected a preview, got an applied post');
+  assert.ok(
+    data.mode !== 'applied' && data.mode !== 'scheduled',
+    'expected a preview, got an applied post',
+  );
   return data;
 }
 
 function draftPreviewOf(result: ToolResult<UploadDraftData>): DraftPreview {
   const data = dataOf(result);
-  assert.ok(data.mode !== 'applied', 'expected a preview, got an applied draft');
+  assert.ok(
+    data.mode !== 'applied' && data.mode !== 'scheduled',
+    'expected a preview, got an applied draft',
+  );
   return data;
 }
 
@@ -2237,7 +2243,7 @@ const SPAM_TEXT_RECOVERY =
   "TikTok's spam filter rejected the title or description wording. Change the text and " +
   'post again.';
 
-test('§ 3.9 a wait that ends in FAILED carries the fail_reason and its Appendix A recovery', async () => {
+test('§ 3.10 a wait that ends in FAILED carries the fail_reason and its Appendix A recovery', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi({
       status: () => ttEnvelope({ status: 'FAILED', fail_reason: 'video_pull_failed' }),
@@ -2262,7 +2268,7 @@ test('§ 3.9 a wait that ends in FAILED carries the fail_reason and its Appendix
   });
 });
 
-test('§ 3.9 a wait that ends in FAILED without a reason sets neither fail field', async () => {
+test('§ 3.10 a wait that ends in FAILED without a reason sets neither fail field', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi({ status: () => ttEnvelope({ status: 'FAILED' }) });
     const result = await withFetch(stub, async () => {
@@ -2281,7 +2287,7 @@ test('§ 3.9 a wait that ends in FAILED without a reason sets neither fail field
   });
 });
 
-test('§ 3.9 a wait that completes ignores a fail_reason TikTok echoes alongside', async () => {
+test('§ 3.10 a wait that completes ignores a fail_reason TikTok echoes alongside', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi({
       status: () =>
@@ -2306,7 +2312,7 @@ test('§ 3.9 a wait that completes ignores a fail_reason TikTok echoes alongside
   });
 });
 
-test('§ 3.10 a waited draft that ends in FAILED has its recovery and no inbox hint', async () => {
+test('§ 3.11 a waited draft that ends in FAILED has its recovery and no inbox hint', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi({
       init: () => initResponse('v_inbox~failed.8'),
@@ -2703,7 +2709,7 @@ test('cc-g7: the deepest hint chain fills all three slots and ships every one of
   );
 });
 
-test('the tool declares itself destructive and non-idempotent (§ 3.9)', () => {
+test('the tool declares itself destructive and non-idempotent (§ 3.10)', () => {
   assert.deepEqual(postVideoTool.annotations, {
     readOnlyHint: false,
     destructiveHint: true,
@@ -2736,7 +2742,7 @@ test('no result this tool returns ever carries an upload token or an access toke
 });
 
 // ---------------------------------------------------------------------------
-// source: "file" — the FILE_UPLOAD half (§ 3.9, TIKTOK-API.md §§ 4.6–4.8)
+// source: "file" — the FILE_UPLOAD half (§ 3.10, TIKTOK-API.md §§ 4.6–4.8)
 // ---------------------------------------------------------------------------
 
 /**
@@ -2748,7 +2754,7 @@ const SYMLINK_SKIP: string | false =
     ? 'symlink creation requires elevation or developer mode on Windows'
     : false;
 
-test('a file preview publishes the resolved path and the chunk plan (CC-D2, § 3.9)', async () => {
+test('a file preview publishes the resolved path and the chunk plan (CC-D2, § 3.10)', async () => {
   await withCtx({}, async (ctx, dir) => {
     const path = await writeMedia(dir, 'clip.mp4', MEDIA_BYTES);
     const stub = fakeApi();
@@ -3192,7 +3198,7 @@ test(
   },
 );
 
-test('source and its media argument are mutually exclusive, and each half is required (§ 3.9)', async () => {
+test('source and its media argument are mutually exclusive, and each half is required (§ 3.10)', async () => {
   await withCtx({}, async (ctx, dir) => {
     const path = await writeMedia(dir, 'clip.mp4', MEDIA_BYTES);
     const stub = fakeApi();

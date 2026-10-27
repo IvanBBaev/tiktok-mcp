@@ -65,6 +65,7 @@ import {
   type AppliedData,
   type WritePreview,
 } from '../src/tools/publish-common.js';
+import type { ScheduledData } from '../src/tools/schedule.js';
 import { getPublishStatusTool, type PublishStatusData } from '../src/tools/publish.js';
 import { postPhotosTool, type PostPhotosData } from '../src/tools/publish-photos.js';
 import { postVideoTool, type PostVideoData } from '../src/tools/publish-write.js';
@@ -481,13 +482,19 @@ function dataOf<T>(result: ToolResult<T>): T {
   return result.data;
 }
 
-function previewOf(result: ToolResult<WritePreview | AppliedData>): WritePreview {
+function previewOf(
+  result: ToolResult<WritePreview | AppliedData | ScheduledData>,
+): WritePreview {
   const data = dataOf(result);
-  if (data.mode === 'applied') assert.fail('expected a preview, got an applied post');
+  if (data.mode === 'applied' || data.mode === 'scheduled') {
+    assert.fail(`expected a preview, got ${data.mode}`);
+  }
   return data;
 }
 
-function appliedOf(result: ToolResult<WritePreview | AppliedData>): AppliedData {
+function appliedOf(
+  result: ToolResult<WritePreview | AppliedData | ScheduledData>,
+): AppliedData {
   const data = dataOf(result);
   if (data.mode !== 'applied') assert.fail('expected an applied post, got a preview');
   return data;

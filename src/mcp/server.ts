@@ -160,6 +160,7 @@ const SHUTTING_DOWN = -32000;
 const ACCOUNT_IS_FILTER: ReadonlySet<string> = new Set([
   'tiktok_list_publish_journal',
   'tiktok_list_webhook_events',
+  'tiktok_list_scheduled',
 ]);
 
 /**

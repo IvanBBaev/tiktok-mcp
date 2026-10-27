@@ -1,5 +1,5 @@
 /**
- * The machinery the four write tools share (TOOLS.md § 3.9–§ 3.12).
+ * The machinery the four write tools share (TOOLS.md § 3.10–§ 3.13).
  *
  * `tiktok_post_video`, `tiktok_upload_video_draft`, `tiktok_post_photos` and
  * `tiktok_upload_photos_draft` differ in three places only — what they validate,
@@ -89,7 +89,7 @@ import {
 import { failRecovery, journalOptions, pollPublishStatus } from './publish.js';
 
 // ---------------------------------------------------------------------------
-// Result shapes (TOOLS.md § 3.9)
+// Result shapes (TOOLS.md § 3.10)
 // ---------------------------------------------------------------------------
 
 export interface AccountBlock {
@@ -97,7 +97,7 @@ export interface AccountBlock {
   /**
    * From `creator_info`. Absent on the draft tools, which never run that
    * pre-flight — a `video.upload`-only grant may not even carry the scope
-   * (§ 3.10), so there is no honest value to put here.
+   * (§ 3.11), so there is no honest value to put here.
    */
   nickname?: string;
   open_id_masked: string;
@@ -276,7 +276,7 @@ export function initialStatus(source: IntentSource): string {
  *
  * The catalog text offers `source: "file"` as the way out. That sentence is
  * omitted for photos on purpose: the photo endpoints have no upload at all
- * (§ 3.11), so pointing a caller at a branch that does not exist would cost a
+ * (§ 3.12), so pointing a caller at a branch that does not exist would cost a
  * round of wrong advice.
  */
 export function urlPrefixUnverifiedError(
@@ -532,8 +532,8 @@ export function choosePrivacyHint(toolName: string, options: readonly string[]):
 }
 
 /**
- * Every successful draft apply (§ 3.10, § 3.12). Verbatim from § 5.3, which is
- * the normative rendering — the § 3.10 prose says "Unfinished" where § 5.3 and
+ * Every successful draft apply (§ 3.11, § 3.13). Verbatim from § 5.3, which is
+ * the normative rendering — the § 3.11 prose says "Unfinished" where § 5.3 and
  * the tool description both say "Unopened"; two of three win.
  */
 export function draftInboxHint(): Hint {
@@ -571,7 +571,7 @@ export function moveFileHint(toolName: string): Hint {
  * `url_prefix_unverified` (§ 3.0, CC-D10). Verbatim from § 5.3.
  *
  * Says nothing about `source: "file"` on purpose. That alternative exists for
- * two of the four write tools only (§ 3.11 photos have no upload path), it is
+ * two of the four write tools only (§ 3.12 photos have no upload path), it is
  * already in the catalog message for the two that have it, and a `user_action`
  * hint operationalizes the human branch — the one the model cannot resolve on
  * its own. § 5.2 rule 5 asks the hint not to contradict the error, not to

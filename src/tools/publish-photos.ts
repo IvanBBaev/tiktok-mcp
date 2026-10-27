@@ -1,6 +1,6 @@
 /**
- * The photo half of the write surface: `tiktok_post_photos` (TOOLS.md § 3.11)
- * and `tiktok_upload_photos_draft` (§ 3.12).
+ * The photo half of the write surface: `tiktok_post_photos` (TOOLS.md § 3.12)
+ * and `tiktok_upload_photos_draft` (§ 3.13).
  *
  * Photos are not videos with a different `media_type`, and the differences are
  * the reason this file exists rather than another branch inside
@@ -15,7 +15,7 @@
  *   the long text belongs in `description` (4000). Both limits are enforced in
  *   `api/publish` so the two photo tools cannot drift apart.
  * - **No duet or stitch.** Those fields do not exist upstream for a carousel,
- *   so the schema omits them — the omission is itself the contract (§ 3.11).
+ *   so the schema omits them — the omission is itself the contract (§ 3.12).
  *
  * Everything else — the § 2.6.3 ordering, the plan guards, the duplicate guard,
  * the journal — is `publish-common`'s, unchanged.
@@ -71,6 +71,7 @@ import {
   type WritePreview,
 } from './publish-common.js';
 import { auditRestrictionsNote } from './publish.js';
+import { RUN_AT_ARG, schedulePlanned, type ScheduledData } from './schedule.js';
 
 const TOOL_NAME = 'tiktok_post_photos';
 const DRAFT_TOOL_NAME = 'tiktok_upload_photos_draft';
@@ -84,8 +85,8 @@ const DRAFT_POST_MODE = 'MEDIA_UPLOAD';
 /** Both photo tools resolve to `PULL_FROM_URL`; nothing else is possible. */
 const INTENT = 'PULL_FROM_URL';
 
-export type PostPhotosData = WritePreview | AppliedData;
-export type UploadPhotosDraftData = DraftPreview | AppliedData;
+export type PostPhotosData = WritePreview | AppliedData | ScheduledData;
+export type UploadPhotosDraftData = DraftPreview | AppliedData | ScheduledData;
 
 // ---------------------------------------------------------------------------
 // The carousel, shared by both tools
@@ -189,7 +190,7 @@ function photoSender(
 }
 
 /**
- * § 3.11: the journal's `title_excerpt` takes title *and* description. A
+ * § 3.12: the journal's `title_excerpt` takes title *and* description. A
  * carousel is frequently untitled with all the text in the description, and
  * excerpting only the title would make every such line look identical to the
  * person reading the journal (the guard itself matches on the payload digest).
@@ -199,7 +200,7 @@ function excerptText(title: string | undefined, description: string | undefined)
 }
 
 // ---------------------------------------------------------------------------
-// tiktok_post_photos (TOOLS.md § 3.11)
+// tiktok_post_photos (TOOLS.md § 3.12)
 // ---------------------------------------------------------------------------
 
 const DESCRIPTION =
@@ -296,6 +297,7 @@ const POST_PHOTOS_INPUT = toolInput({
         'tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical ' +
         'attempt did not create a post.',
     ),
+  run_at: RUN_AT_ARG,
 });
 
 type PostPhotosInput = z.infer<typeof POST_PHOTOS_INPUT>;
@@ -415,7 +417,8 @@ async function executePhotos(
 
   // Step 2 — an empty bucket refuses before any network; the token is taken at
   // step 7, once nothing else can still say no.
-  const refused = checkWriteBucket(ctx);
+  // Scheduling spends no token: the runner takes one when the entry falls due.
+  const refused = args.run_at === undefined ? checkWriteBucket(ctx) : undefined;
   if (refused !== undefined) return refused;
 
   // Step 3 — the preview's own code path, against live creator state.
@@ -451,6 +454,18 @@ async function executePhotos(
   };
 
   // Steps 5–7.
+  // § 2.10 — queue the approved request instead of publishing it now.
+  if (args.run_at !== undefined) {
+    return await schedulePlanned(ctx, {
+      toolName: TOOL_NAME,
+      args,
+      runAt: args.run_at,
+      planId,
+      expectation,
+      title: excerptText(args.title, args.description),
+    });
+  }
+
   const guard = await runPlanGuards(ctx, planId, expectation, args.force === true);
   if (guard !== undefined) return guard;
 
@@ -506,7 +521,7 @@ export const postPhotosTool = defineTool<PostPhotosInput, PostPhotosData>({
 });
 
 // ---------------------------------------------------------------------------
-// tiktok_upload_photos_draft (TOOLS.md § 3.12)
+// tiktok_upload_photos_draft (TOOLS.md § 3.13)
 // ---------------------------------------------------------------------------
 
 const DRAFT_DESCRIPTION =
@@ -559,6 +574,7 @@ const UPLOAD_PHOTOS_DRAFT_INPUT = toolInput({
         'tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical ' +
         'attempt did not create a draft.',
     ),
+  run_at: RUN_AT_ARG,
 });
 
 type UploadPhotosDraftInput = z.infer<typeof UPLOAD_PHOTOS_DRAFT_INPUT>;
@@ -625,11 +641,12 @@ async function executePhotosDraft(
   const { api } = ctx;
 
   // Step 2.
-  const refused = checkWriteBucket(ctx);
+  // Scheduling spends no token: the runner takes one when the entry falls due.
+  const refused = args.run_at === undefined ? checkWriteBucket(ctx) : undefined;
   if (refused !== undefined) return refused;
 
   // Step 3 — no `creator_info` to re-read: a `video.upload`-only grant may not
-  // carry the scope for it (§ 3.12).
+  // carry the scope for it (§ 3.13).
   const postInfo = draftPostInfo(args);
   const openId = await resolveOpenId(ctx);
 
@@ -643,6 +660,18 @@ async function executePhotosDraft(
   };
 
   // Steps 5–7.
+  // § 2.10 — queue the approved request instead of publishing it now.
+  if (args.run_at !== undefined) {
+    return await schedulePlanned(ctx, {
+      toolName: DRAFT_TOOL_NAME,
+      args,
+      runAt: args.run_at,
+      planId,
+      expectation,
+      title: excerptText(args.title, args.description),
+    });
+  }
+
   const guard = await runPlanGuards(ctx, planId, expectation, args.force === true);
   if (guard !== undefined) return guard;
 
@@ -680,12 +709,12 @@ export const uploadPhotosDraftTool = defineTool<
   description: DRAFT_DESCRIPTION,
   package: 'publish-write',
   // NOT video.publish: the point of this tool is that it works on a draft-only
-  // grant (§ 3.12).
+  // grant (§ 3.13).
   scopes: ['video.upload'],
   annotations: {
     readOnlyHint: false,
     // Nothing goes live, but the draft has left for the user's inbox, this
-    // server cannot retract it, and it has spent pending-share quota (§ 3.12).
+    // server cannot retract it, and it has spent pending-share quota (§ 3.13).
     destructiveHint: true,
     idempotentHint: false,
     openWorldHint: true,

@@ -835,7 +835,7 @@ export function resolveVideoPostInfo(
 export function resolvePhotoPostInfo(
   input: PhotoPostInput, creator: CreatorInfo, defaults: PostDefaults,
 ): ResolvedPostInfo;                        // CC-E1–E4
-/** The photo DRAFT `post_info` (TOOLS.md § 3.12) — title + description only,
+/** The photo DRAFT `post_info` (TOOLS.md § 3.13) — title + description only,
  *  `derived: []`. Not `resolvePhotoPostInfo` with optional arguments: a draft
  *  carries no privacy level and no toggles (the user picks those in the app),
  *  and must not grow defaults. It takes no `CreatorInfo` because the draft
@@ -2064,6 +2064,51 @@ export function readMerged(opts?: JournalOptions & { limit?: number }): Promise<
 export function foldedAttemptsCached(opts?: JournalOptions): Promise<readonly JournalAttempt[]>;
 ```
 
+## mcp/schedule.ts
+
+The local publish queue (TOOLS.md § 2.10). `schedule.json` beside the env
+file, `{ v: 1, entries: [...] }`, mode `0600`, rewritten atomically under
+`withEnvLock` (`schedule.json.lock`). A missing file is an empty queue; a file
+that cannot be read or parsed throws `schedule_unreadable` (kind `config`) and
+is never overwritten.
+
+```ts
+export const SCHEDULE_VERSION = 1;
+export const SCHEDULE_MAX_PENDING = 50;
+export const SCHEDULE_MAX_HORIZON_MS: number;   // 30 days
+export const SCHEDULE_LATE_LIMIT_MS: number;    // 24 h
+export const SCHEDULE_RETENTION_MS: number;     // 30 days after updated_at
+export const SCHEDULE_ID_PATTERN: RegExp;       // sch_ + 26 Crockford base-32
+export type ScheduleStatus =
+  'pending' | 'running' | 'done' | 'failed' | 'cancelled' | 'expired';
+export const SCHEDULE_STATUSES: readonly ScheduleStatus[];
+export interface ScheduledEntry {
+  schedule_id: string; tool: string; profile: string; open_id: string;
+  args: Record<string, unknown>;   // control fields removed, account pinned
+  payload_digest: string; file_identity?: string; title_excerpt: string;
+  run_at: string; created_at: string; updated_at: string;  // ISO-8601 UTC
+  status: ScheduleStatus;
+  publish_id?: string;
+  error?: { code: string; message: string };
+}
+export interface ScheduleOptions {
+  path?: string; envFile?: string; env?: NodeJS.ProcessEnv; logger?: Logger;
+}
+export function scheduleOptionsFor(settings: Settings, logger: Logger): ScheduleOptions;
+export function resolveSchedulePath(opts?: ScheduleOptions): string;
+export function mintScheduleId(clock: Clock): string;
+export function readSchedule(opts?: ScheduleOptions): Promise<ScheduledEntry[]>;
+/** `change` runs with the lock held and must not wait on anything slow;
+ *  finished entries past retention are pruned on every write. */
+export function updateSchedule<T>(
+  clock: Clock, change: (entries: ScheduledEntry[]) => T, opts?: ScheduleOptions,
+): Promise<T>;
+/** Z or an explicit offset only; strictly future, within the horizon. */
+export function parseRunAt(
+  runAt: string, now: number,
+): { ok: true; at: number } | { ok: false; problem: string };
+```
+
 ## mcp/lifecycle.ts
 
 The credential-store watch behind `notifications/tools/list_changed` (CC-A7,
@@ -2496,7 +2541,7 @@ export interface AccountBlock {
   profile: string;
   /** From `creator_info`. Absent on the draft tools, which never run that
    *  pre-flight — a `video.upload`-only grant may not even carry the scope
-   *  (TOOLS.md § 3.10), so there is no honest value to put here. */
+   *  (TOOLS.md § 3.11), so there is no honest value to put here. */
   nickname?: string;
   open_id_masked: string;                  // `maskOpenId` (TOOLS.md § 2.5)
 }
@@ -2639,7 +2684,7 @@ export function stillProcessingAfterApplyHint(
 ): Hint;
 export function journalUnavailableNote(publishId: string | undefined): Hint;
 export function choosePrivacyHint(toolName: string, options: readonly string[]): Hint;
-/** Every successful draft apply (§ 3.10, § 3.12). Verbatim from TOOLS.md § 5.3,
+/** Every successful draft apply (§ 3.11, § 3.13). Verbatim from TOOLS.md § 5.3,
  *  which is the normative rendering: "Unopened drafts expire." */
 export function draftInboxHint(): Hint;
 /** The two normative § 2.6.1 consent lines, branded and plain. */
@@ -2788,17 +2833,17 @@ completed the upload: `classifyDispatch` records it as `send_ambiguous` with
 
 ## tools/publish-write.ts
 
-The video half of the write surface: `tiktok_post_video` (TOOLS.md § 3.9) and
-`tiktok_upload_video_draft` (§ 3.10). Both sources ship — `"url"`
+The video half of the write surface: `tiktok_post_video` (TOOLS.md § 3.10) and
+`tiktok_upload_video_draft` (§ 3.11). Both sources ship — `"url"`
 (`PULL_FROM_URL`) and `"file"` (`FILE_UPLOAD` through `api/upload.ts` under
 `TT_MEDIA_ROOT`) — and one `resolveSource` serves four consumers: what the
 preview shows, what the init sends, what the digest binds and what the journal
 records.
 
 ```ts
-/** The two result modes of § 3.9, from `tools/publish-common.ts`. */
+/** The two result modes of § 3.10, from `tools/publish-common.ts`. */
 export type PostVideoData = WritePreview | AppliedData;
-/** § 3.10: a draft has no `creator` block, no `consent_line` and no
+/** § 3.11: a draft has no `creator` block, no `consent_line` and no
  *  `plan_incomplete` mode, so its preview is the narrower `DraftPreview`. */
 export type UploadDraftData = DraftPreview | AppliedData;
 
@@ -2821,7 +2866,7 @@ both `mcp/define`'s strictness contract and every model reading the manifest
 depend on; the flat object plus the check is the same contract with a schema a
 client can actually render. `plan_id` is validated the same way, against
 `PLAN_ID_PATTERN` in the handler, because a `.refine()` would make the schema a
-`ZodEffects` and cost the same shape. TOOLS.md § 3.9 records both.
+`ZodEffects` and cost the same shape. TOOLS.md § 3.10 records both.
 
 **What the digest binds** (`mcp/plan`, § 2.6.2). Post:
 `{ post_info, post_mode: "DIRECT_POST", source_info }`. Draft:
@@ -2844,8 +2889,8 @@ one that failed is the next one.
 
 ## tools/publish-photos.ts
 
-The carousel half: `tiktok_post_photos` (TOOLS.md § 3.11) and
-`tiktok_upload_photos_draft` (§ 3.12). There is no `source` field and no
+The carousel half: `tiktok_post_photos` (TOOLS.md § 3.12) and
+`tiktok_upload_photos_draft` (§ 3.13). There is no `source` field and no
 `"file"` branch — the photo endpoints pull from URLs only — so both tools are
 `PULL_FROM_URL` and both go through `initPhotoPost`, which returns a
 `publish_id` and no upload URL.
@@ -2883,6 +2928,27 @@ frequently untitled with all its text in the description, and excerpting only
 the title would make every such journal line look identical to the person
 reading it. (The duplicate guard matches on `payload_digest`, not the title.)
 
+## tools/schedule.ts
+
+```ts
+export const RUN_AT_ARG: z.ZodOptional<z.ZodString>;  // the row every write tool carries
+export interface ScheduledData {
+  mode: 'scheduled'; schedule_id: string; run_at: string; status: 'pending';
+}
+export interface ScheduleRequest {
+  toolName: string; args: Record<string, unknown>; runAt: string;
+  planId: string | undefined; expectation: PlanExpectation; title: string;
+}
+/** Called by the four write tools after the plan checks, instead of the rate
+ *  bucket, duplicate guard and dispatch. Consumes the plan inside the
+ *  schedule lock; `schedule_full` and an invalid `run_at` leave it unspent. */
+export function schedulePlanned(
+  ctx: ToolCtx, req: ScheduleRequest,
+): Promise<ToolResult<ScheduledData>>;
+export const listScheduledTool: AnyToolSpec;    // TOOLS.md § 3.9
+export const cancelScheduledTool: AnyToolSpec;  // TOOLS.md § 3.14
+```
+
 ## tools/prompts.ts
 
 The prompt manifest (TOOLS.md § 7.1): the three write flows, each one `user`
@@ -2895,14 +2961,14 @@ they cannot drift apart. Every `tiktok_*` name in the text is checked against
 ```ts
 /** `tiktok_post_video_guided`. Arguments: `video` (required — local path or
  *  https URL), `title`, `privacy_level`, `account`. The § 4 item 1 flow with
- *  § 3.9's failure discipline, arguments interpolated as sentences. All three
+ *  § 3.10's failure discipline, arguments interpolated as sentences. All three
  *  prompts declare `requires: ['publish']` and render every user value
  *  JSON-quoted, so a quote or newline in it cannot inject a step. */
 export const postVideoGuidedPrompt: PromptSpec;
 
 /** `tiktok_post_photos_guided`. Arguments: `photo_urls` (required — one string,
  *  split on commas and whitespace, blanks dropped), `title`, `description`,
- *  `privacy_level`, `account`. The § 3.11 flow: creator info, preview with the
+ *  `privacy_level`, `account`. The § 3.12 flow: creator info, preview with the
  *  urls as an array and `photo_cover_index` 0 unless told otherwise, approval,
  *  apply, poll to PUBLISH_COMPLETE; `url_prefix_unverified` names
  *  `photo_urls[<i>]`. A value that names no URL renders a request for them and
@@ -2911,9 +2977,9 @@ export const postPhotosGuidedPrompt: PromptSpec;
 
 /** `tiktok_upload_draft_guided`. Arguments, all optional: `video`,
  *  `photo_urls`, `title`, `description`, `account` — exactly one of the two
- *  media. Four renders: a video ⇒ the § 3.10 flow (`tiktok_upload_video_draft`;
+ *  media. Four renders: a video ⇒ the § 3.11 flow (`tiktok_upload_video_draft`;
  *  a `title` and/or a `description` is stated as not sent — one sentence for
- *  either or both); photos ⇒ the § 3.12 flow (`tiktok_upload_photos_draft`,
+ *  either or both); photos ⇒ the § 3.13 flow (`tiktok_upload_photos_draft`,
  *  title and description passed when given); both ⇒ ask which one, no steps;
  *  neither ⇒ ask for one, no steps. The valid flows say not to call
  *  `tiktok_get_creator_info`, preview (always `mode: "plan"`), approval, apply,
@@ -3101,6 +3167,32 @@ decision — and the URL it prints carries no secret by construction (client key
 scopes, redirect URI, the CSRF `state` the browser is about to send anyway, and
 the PKCE challenge, which is public by design; the verifier and the client
 secret never enter it).
+
+## cli/run-queue.ts
+
+`tiktok-mcp-ai run-queue [--dry-run]`. Builds the server's `ServerRuntime`
+from the same env file and settings, ignoring the package selection; exits `1`
+without touching the queue when `TT_WRITE_MODE=deny` or `TT_PACKAGES_READONLY`
+(not under `--dry-run`). Exit `1` when any entry failed or expired or the
+queue could not be read, `2` on an unknown option, else `0`.
+
+```ts
+export function runQueueUsage(): string;
+export interface RunOutcome {
+  schedule_id: string; tool: string; profile: string;
+  status: 'done' | 'failed' | 'expired' | 'pending' | 'due';  // 'due' = dry run
+  publish_id?: string;
+  error?: { code: string; message: string };
+}
+export interface RunQueueOptions {
+  runtime: ServerRuntime; clock: Clock; schedule: ScheduleOptions;
+  tools?: readonly AnyToolSpec[]; dryRun?: boolean;
+}
+/** Claims due entries (pending → running, persisted before any network),
+ *  replays each as preview + apply, and records the outcome. */
+export function runQueue(opts: RunQueueOptions): Promise<RunOutcome[]>;
+export function runRunQueue(deps?: CliDeps): Promise<number>;
+```
 
 ## cli/doctor.ts (the check registry)
 
@@ -3493,3 +3585,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-24 | `core/settings`: additive `Settings.webhookPath?` (`TT_WEBHOOK_PATH`, `/` plus 1–127 URL-safe characters, not `/mcp`, rejected unless `TT_TRANSPORT=http`) and `Settings.webhookToleranceS` (`TT_WEBHOOK_TOLERANCE_S`, default 300, `30`–`3600`). New modules `api/webhook` (signature verification, event decoding) and `mcp/webhook` (event log `webhooks.ndjson`, identity, receiver, `webhookRouteFor`). `mcp/http`: additive `HttpTransportOptions.webhook?` — the exact path is bearer-exempt, POST only, 64 KiB cap. New tool `tiktok_list_webhook_events` (`publish` package, closed-world, TOOLS.md § 3.8); TOOLS.md §§ 3.8–3.12 renumber to 3.9–3.13, and `mcp/server`'s `ACCOUNT_IS_FILTER` includes the new tool. No existing signature changed | integrator |
 | 2026-10-24 | `core/oauth`: additive `forgetRevokedProfile` and `ForgetOutcome` — the local-only clear behind `authorization.removed`. `mcp/webhook`: `onEvent` may return a promise (still not awaited), plus `AUTHORIZATION_REMOVED`, `RevocationListenerOptions` and `revocationListener`, which `src/index.ts` passes to `webhookRouteFor` | integrator |
 | 2026-10-24 | Resource subscriptions (TOOLS.md § 7.4). New module `mcp/subscriptions` (`createSubscriptionHub`, `DEFAULT_SUBSCRIPTION_POLL_MS`). `mcp/resources`: additive `ResourceSpec.watch?` and `ResourceWatch`. `mcp/server`: additive `ServerOptions.clock?` / `subscriptionPollMs?` and `McpServerHandle.notifyResourcesUpdated`; the `resources` capability gains `subscribe: true`. `tools/resources`: the status resource declares a `watch`; new exports `settledPublishStatus`, `isPublishStatusOf`. `src/index.ts` passes `systemClock` and forwards a webhook event with a `publish_id` to every session | integrator |
+| 2026-10-27 | Scheduled publishing (TOOLS.md § 2.10). New modules `mcp/schedule` (store), `tools/schedule` (`RUN_AT_ARG`, `schedulePlanned`, `tiktok_list_scheduled`, `tiktok_cancel_scheduled`) and `cli/run-queue`. The four write tools: additive optional `run_at` and `ScheduledData` in their result union. `mcp/plan`: `run_at` joins the control fields. `mcp/server`'s `ACCOUNT_IS_FILTER` includes `tiktok_list_scheduled`. TOOLS.md §§ 3.9–3.13 renumber to 3.10–3.13 and 3.15; the new tools are §§ 3.9 and 3.14. No existing signature changed | integrator |

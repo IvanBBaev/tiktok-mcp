@@ -202,6 +202,7 @@ export function usageText(): string {
     `  ${CLI_NAME}                     start the MCP server on stdio`,
     `  ${CLI_NAME} login [options]     authorize a profile (OAuth 2.0 + PKCE)`,
     `  ${CLI_NAME} doctor              check the local configuration`,
+    `  ${CLI_NAME} run-queue [--dry-run]  publish scheduled posts that are due`,
     `  ${CLI_NAME} --help | --version`,
     '',
     `Run "${CLI_NAME} login --help" for the login options.`,
@@ -278,6 +279,10 @@ export async function runCli(
     case 'doctor': {
       const { runDoctor } = await import('./doctor.js');
       return await runDoctor(rest);
+    }
+    case 'run-queue': {
+      const { runRunQueue } = await import('./run-queue.js');
+      return await runRunQueue(rest);
     }
     case '--help':
     case '-h': {

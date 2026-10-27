@@ -137,12 +137,12 @@ const ORDER_RULE =
   'Work through these steps in order. Every rule below is also enforced by the ' +
   'tools, so do not shortcut it.';
 
-/** How `video` maps onto the flat `source` shape of the video tools (TOOLS.md § 3.9). */
+/** How `video` maps onto the flat `source` shape of the video tools (TOOLS.md § 3.10). */
 const VIDEO_MAPPING =
   'Map the video: if it starts with https://, pass source: "url" and video_url; ' +
   'otherwise pass source: "file" and file_path.';
 
-/** How the carousel maps onto `photo_urls` / `photo_cover_index` (TOOLS.md § 3.11). */
+/** How the carousel maps onto `photo_urls` / `photo_cover_index` (TOOLS.md § 3.12). */
 const CAROUSEL_MAPPING =
   'Pass photo_urls as an array in the order above and photo_cover_index 0 unless the ' +
   'user named another cover.';
@@ -180,7 +180,7 @@ const POLL_INBOX =
 const CAP_FAILURES =
   'daily_post_cap or active_user_cap — stop and tell the user it cannot be done today.';
 
-/** The cap of a draft (TOOLS.md § 3.10). */
+/** The cap of a draft (TOOLS.md § 3.11). */
 const DRAFT_CAP_FAILURE =
   'pending_share_cap — TikTok allows 5 unpublished API drafts per account per 24 h; ' +
   'stop and tell the user to publish or discard drafts in the TikTok app, or wait.';
@@ -227,7 +227,7 @@ function videoSituation(args: VideoGuidedArgs): string {
   ].join(' ');
 }
 
-/** The flow of TOOLS.md § 4 item 1 and § 3.9, step by step, tools named verbatim. */
+/** The flow of TOOLS.md § 4 item 1 and § 3.10, step by step, tools named verbatim. */
 const VIDEO_STEPS: readonly string[] = Object.freeze([
   'Call tiktok_get_creator_info to learn privacy_level_options, which toggles ' +
     '(comments, duet, stitch) the account disables, and max_video_post_duration_sec.',
@@ -316,7 +316,7 @@ function photosSituation(args: PhotosGuidedArgs, urls: readonly string[]): strin
   ].join(' ');
 }
 
-/** The flow of TOOLS.md § 3.11, step by step, tools named verbatim. */
+/** The flow of TOOLS.md § 3.12, step by step, tools named verbatim. */
 const PHOTOS_STEPS: readonly string[] = Object.freeze([
   'Call tiktok_get_creator_info to learn privacy_level_options and whether comments ' +
     'are disabled.',
@@ -382,14 +382,14 @@ const NO_MEDIA =
   'Neither a video nor photo URLs were given. Ask the user for one of them before ' +
   'calling any tool.';
 
-/** The step every draft flow opens with: no creator pre-flight (TOOLS.md § 3.10). */
+/** The step every draft flow opens with: no creator pre-flight (TOOLS.md § 3.11). */
 const NO_CREATOR_INFO =
   'Do NOT call tiktok_get_creator_info: a draft carries no privacy level or toggles, ' +
   'and a draft-only authorization (scope video.upload only) may lack the scope that ' +
   'call needs.';
 
 /**
- * The text a video draft cannot carry (TOOLS.md § 3.10), stated as not sent
+ * The text a video draft cannot carry (TOOLS.md § 3.11), stated as not sent
  * rather than dropped in silence: the model has to know the user finishes
  * the caption in the app, not that the argument was lost. One sentence per
  * case; empty when neither was given, so the situation reads the same as
@@ -419,7 +419,7 @@ function unsentTextSentence(args: PromptArgs): string {
   return '';
 }
 
-/** The video draft: the situation and the steps of TOOLS.md § 3.10. */
+/** The video draft: the situation and the steps of TOOLS.md § 3.11. */
 function videoDraft(video: string, args: PromptArgs): readonly PromptMessage[] {
   const situation =
     `Send a video to the user's TikTok drafts through this server. The video is ` +
@@ -436,7 +436,7 @@ function videoDraft(video: string, args: PromptArgs): readonly PromptMessage[] {
   ]);
 }
 
-/** The photo draft: the situation and the steps of TOOLS.md § 3.12. */
+/** The photo draft: the situation and the steps of TOOLS.md § 3.13. */
 function photosDraft(
   urls: readonly string[],
   args: PromptArgs,

@@ -192,6 +192,18 @@ await connectTransport(server);
   client subscribed to that status resource hears of it at once.
   `tiktok_list_webhook_events` reads the log back; it is a closed-world tool
   like the publish journal.
+- **Scheduled publishing** (`src/mcp/schedule.ts` store, `src/tools/schedule.ts`
+  tools, `src/cli/run-queue.ts` runner; TOOLS.md § 2.10). An apply with
+  `run_at` runs the plan checks, then consumes the plan inside the schedule
+  lock and stores the approved arguments (control fields stripped, `account`
+  pinned), payload digest, `open_id` and file identity in `schedule.json`. The
+  runner is a separate process: it builds the same `ServerRuntime` as the
+  server, claims due entries (`pending` → `running`, persisted before any
+  network), and for each one calls the tool's own handler twice — a preview,
+  then an apply with the fresh `plan_id` — after checking the fresh plan's
+  digest, `open_id` and file identity against the stored ones. Publishing
+  therefore goes through the one write path (journal, duplicate guard, rate
+  bucket) and never through a stored token.
 
 ## 4. Tool definition pattern (`src/mcp/define.ts`)
 

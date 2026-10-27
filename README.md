@@ -1,6 +1,6 @@
 # tiktok-mcp-ai — Unofficial TikTok MCP Server
 
-| [![npm version](https://img.shields.io/npm/v/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![npm downloads](https://img.shields.io/npm/dm/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![node](https://img.shields.io/node/v/tiktok-mcp-ai?style=flat-square&logo=node.js&logoColor=white&label=node)](https://nodejs.org) | [![tools](https://img.shields.io/badge/tools-13-blue?style=flat-square)](https://ivanbbaev.github.io/tiktok-mcp/#tools) | [![License: MIT](https://img.shields.io/npm/l/tiktok-mcp-ai?style=flat-square&color=blue&label=license)](LICENSE) |
+| [![npm version](https://img.shields.io/npm/v/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![npm downloads](https://img.shields.io/npm/dm/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![node](https://img.shields.io/node/v/tiktok-mcp-ai?style=flat-square&logo=node.js&logoColor=white&label=node)](https://nodejs.org) | [![tools](https://img.shields.io/badge/tools-15-blue?style=flat-square)](https://ivanbbaev.github.io/tiktok-mcp/#tools) | [![License: MIT](https://img.shields.io/npm/l/tiktok-mcp-ai?style=flat-square&color=blue&label=license)](LICENSE) |
 | :--: | :--: | :--: | :--: | :--: |
 | [![CI](https://img.shields.io/github/actions/workflow/status/IvanBBaev/tiktok-mcp/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/IvanBBaev/tiktok-mcp/actions/workflows/ci.yml) | [![coverage](https://img.shields.io/codecov/c/github/IvanBBaev/tiktok-mcp/main?style=flat-square&logo=codecov&logoColor=white&label=coverage)](https://codecov.io/gh/IvanBBaev/tiktok-mcp) | [![last commit](https://img.shields.io/github/last-commit/IvanBBaev/tiktok-mcp?style=flat-square&logo=github&logoColor=white)](https://github.com/IvanBBaev/tiktok-mcp/commits/main) | [![MCP](https://img.shields.io/badge/MCP-server-orange?style=flat-square)](https://modelcontextprotocol.io) | [![Known Vulnerabilities](https://snyk.io/test/npm/tiktok-mcp-ai/badge.svg)](https://snyk.io/test/npm/tiktok-mcp-ai) |
 
@@ -112,6 +112,11 @@ model can poll `tiktok_get_publish_status` for the terminal state.
   `tiktok_list_publish_journal`. A same-payload duplicate within 10 minutes — or
   one still being sent by another call — is refused (`possible_duplicate`)
   unless you pass `force`.
+- **Local scheduled publishing**: apply an approved preview with `run_at` and
+  the request is queued on this machine instead of sent; `tiktok-mcp-ai
+  run-queue` (cron/launchd) publishes it when due, after checking that nothing
+  changed since the approval. `tiktok_list_scheduled` and
+  `tiktok_cancel_scheduled` manage the queue.
 - **OAuth 2.0 (Login Kit) with PKCE**: a one-time interactive
   `npx tiktok-mcp-ai login` stores a refresh token — never a password. TikTok's
   hex `code_challenge` deviation from RFC 7636 is handled correctly.
@@ -430,7 +435,7 @@ read token cannot post. See [Security notes](#security-notes) for the full model
 ### Command-line interface
 
 The published `tiktok-mcp-ai` binary (run it directly, or via
-`npx tiktok-mcp-ai`) has three invocations. All connection settings come from
+`npx tiktok-mcp-ai`) has four invocations. All connection settings come from
 environment variables / the env file (see
 [Environment variables](#environment-variables)); the subcommands operate on the
 active profile (`--profile <name>`, else `TT_LOCK_PROFILE`, else
@@ -441,6 +446,7 @@ active profile (`--profile <name>`, else `TT_LOCK_PROFILE`, else
 | `tiktok-mcp-ai` | Starts the MCP server. The transport (`stdio` default, or `http`) is chosen by `TT_TRANSPORT`; runs until `SIGINT`/`SIGTERM` — or, on stdio, until the client closes stdin, which is how an MCP client ends the session. On a signal, calls still in flight get up to 10 s to answer before the server closes (either transport), and a request arriving meanwhile is refused as shutting down (HTTP `503`, stdio JSON-RPC `-32000`); a closed stdin ends the stdio session at once, even mid-drain. | `0` clean shutdown · `1` fatal startup error |
 | `tiktok-mcp-ai login` | One-time OAuth authorization-code + PKCE login: opens the browser, captures the loopback redirect (or manual paste), stores a refresh token. `--revoke` disconnects an account; `--purge-journal` also deletes journal data. | `0` success · `1` login/revoke failed (including `--manual` when stdin ends before a paste) · `2` usage error (bad flags, an invalid `--profile`) |
 | `tiktok-mcp-ai doctor` | Offline + online health check: env file located, client key present, token validity/expiry, one `user/info` probe, granted scopes vs. enabled packages, the publish journal, npx-cache staleness. `--offline` skips the probe; `--json` prints the report as one JSON document. | `0` healthy (warnings allowed) · `1` a check failed · `2` usage error (unknown option, `--profile` without a value, an invalid profile name) |
+| `tiktok-mcp-ai run-queue` | Publishes the scheduled posts that are due (approved with `run_at`, see [Scheduled publishing](docs/CONFIGURATION.md#schedule)): each is previewed again, checked against what was approved and applied through the ordinary write path. Run it from cron or launchd every few minutes — TikTok has no scheduling, so nothing posts while this machine is off. `--dry-run` lists what is due without publishing. | `0` nothing failed · `1` an entry failed or expired, or publishing is disabled · `2` usage error |
 
 ## Develop
 
@@ -481,10 +487,12 @@ summarized to their first sentence; the full text an agent sees is in
 | `publish` | `tiktok_get_publish_status` | yes | Check — and by default briefly wait on — the status of a publish attempt by publish_id. |
 | `publish` | `tiktok_list_publish_journal` | yes | Read this server's local, append-only journal of publish attempts: timestamp, account, tool, title excerpt, publish_id, and outcome. |
 | `publish` | `tiktok_list_webhook_events` | yes | Read the events TikTok pushed to this server's webhook receiver, newest first: event name (e.g. |
+| `publish` | `tiktok_list_scheduled` | yes | List this server's local publish schedule: publishes queued with run_at, newest run_at last. |
 | `publish-write` | `tiktok_post_video` | no | Post a video DIRECTLY to the authenticated account's TikTok profile — it goes live without further user action once TikTok finishes processing. |
 | `publish-write` | `tiktok_upload_video_draft` | no | Upload a video to the user's TikTok INBOX as a draft — the user must open the TikTok app notification, edit, and publish it themselves; nothing goes live from this call. |
 | `publish-write` | `tiktok_post_photos` | no | Post a photo carousel DIRECTLY to the user's TikTok profile — it goes live once processing completes. |
 | `publish-write` | `tiktok_upload_photos_draft` | no | Send a photo carousel to the user's TikTok INBOX as a draft — the user finishes and publishes it in the TikTok app; nothing goes live from this call. |
+| `publish-write` | `tiktok_cancel_scheduled` | no | Cancel a pending scheduled publish (from tiktok_list_scheduled) before the runner reaches it. |
 | `analytics` | `tiktok_get_video_analytics` | yes | Compute engagement analytics over the authenticated user's PUBLIC videos. |
 
 <!-- GENERATED:TOOLS:END -->

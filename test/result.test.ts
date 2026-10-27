@@ -943,6 +943,11 @@ const ERROR_MESSAGE_HOLES: ReadonlyMap<string, string> = new Map([
     'the journalled publish_id through hintToken, or the empty string — the ' +
       'same clause an absent id already drops',
   ],
+  [
+    'entry.status',
+    "this server's own schedule status vocabulary, read from its own file",
+  ],
+  ['String(SCHEDULE_MAX_PENDING)', 'a server constant: the pending-entry cap'],
 ]);
 
 interface MessageHole {

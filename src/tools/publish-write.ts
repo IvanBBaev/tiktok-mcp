@@ -1,6 +1,6 @@
 /**
- * The video half of the write surface: `tiktok_post_video` (TOOLS.md § 3.9) and
- * `tiktok_upload_video_draft` (§ 3.10).
+ * The video half of the write surface: `tiktok_post_video` (TOOLS.md § 3.10) and
+ * `tiktok_upload_video_draft` (§ 3.11).
  *
  * These are the tools that can create something a user cannot undo from here —
  * posts are neither editable nor deletable through the API, and a draft has
@@ -12,7 +12,7 @@
  *     `post_info` from it, and posts `DIRECT_POST`.
  *   - `tiktok_upload_video_draft` sends no `post_info` at all and never calls
  *     `creator_info` — a `video.upload`-only grant may not carry the scope for
- *     it (§ 3.10) — so it has no `creator` block and no consent line.
+ *     it (§ 3.11) — so it has no `creator` block and no consent line.
  *
  * Both accept the same two byte sources, and that is the other thing this file
  * owns: `source: "url"` hands TikTok a verified URL to pull, `source: "file"`
@@ -86,6 +86,7 @@ import {
   type WritePreview,
 } from './publish-common.js';
 import { auditRestrictionsNote } from './publish.js';
+import { RUN_AT_ARG, schedulePlanned, type ScheduledData } from './schedule.js';
 
 const TOOL_NAME = 'tiktok_post_video';
 const DRAFT_TOOL_NAME = 'tiktok_upload_video_draft';
@@ -99,15 +100,15 @@ const POST_MODE = 'DIRECT_POST';
 const DRAFT_POST_MODE = 'MEDIA_UPLOAD';
 
 // ---------------------------------------------------------------------------
-// Result shapes (TOOLS.md § 3.9, § 3.10)
+// Result shapes (TOOLS.md § 3.10, § 3.11)
 // ---------------------------------------------------------------------------
 
-export type PostVideoData = WritePreview | AppliedData;
+export type PostVideoData = WritePreview | AppliedData | ScheduledData;
 
-export type UploadDraftData = DraftPreview | AppliedData;
+export type UploadDraftData = DraftPreview | AppliedData | ScheduledData;
 
 // ---------------------------------------------------------------------------
-// The byte source, shared by both tools (TOOLS.md § 3.9 input rows)
+// The byte source, shared by both tools (TOOLS.md § 3.10 input rows)
 // ---------------------------------------------------------------------------
 
 /** The two source fields, as both tools' schemas expose them. */
@@ -167,7 +168,7 @@ const VIDEO_URL_DESCRIPTION =
  * The source the caller chose, once the cross-field rules have been checked —
  * one field, present, instead of two that are optional apart.
  *
- * This is the discrimination § 3.9 describes, expressed where it can be
+ * This is the discrimination § 3.10 describes, expressed where it can be
  * expressed. The schema cannot carry it: a `z.discriminatedUnion` produces a
  * JSON Schema with no top-level object shape, which both `mcp/define`'s
  * strictness probe and the models reading the manifest depend on, so the flat
@@ -386,7 +387,7 @@ function videoSender(
 }
 
 // ---------------------------------------------------------------------------
-// Input (TOOLS.md § 3.9)
+// Input (TOOLS.md § 3.10)
 // ---------------------------------------------------------------------------
 
 const DESCRIPTION =
@@ -498,6 +499,7 @@ const POST_VIDEO_INPUT = toolInput({
         'tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical ' +
         'attempt did not create a post.',
     ),
+  run_at: RUN_AT_ARG,
 });
 
 type PostVideoInput = z.infer<typeof POST_VIDEO_INPUT>;
@@ -664,7 +666,8 @@ async function executePost(
 
   // Step 2 — an empty bucket refuses before any network, and before the plan is
   // touched; the token itself is only taken at step 7.
-  const refused = checkWriteBucket(ctx);
+  // Scheduling spends no token: the runner takes one when the entry falls due.
+  const refused = args.run_at === undefined ? checkWriteBucket(ctx) : undefined;
   if (refused !== undefined) return refused;
 
   // Step 3 — the same code path the preview ran, against live creator state and
@@ -710,6 +713,18 @@ async function executePost(
   };
 
   // Steps 5–7.
+  // § 2.10 — queue the approved request instead of publishing it now.
+  if (args.run_at !== undefined) {
+    return await schedulePlanned(ctx, {
+      toolName: TOOL_NAME,
+      args,
+      runAt: args.run_at,
+      planId,
+      expectation,
+      title: args.title ?? '',
+    });
+  }
+
   const guard = await runPlanGuards(ctx, planId, expectation, args.force === true);
   if (guard !== undefined) return guard;
 
@@ -735,7 +750,7 @@ async function executePost(
 }
 
 // ---------------------------------------------------------------------------
-// tiktok_post_video (§ 3.9)
+// tiktok_post_video (§ 3.10)
 // ---------------------------------------------------------------------------
 
 export const postVideoTool = defineTool<PostVideoInput, PostVideoData>({
@@ -776,7 +791,7 @@ export const postVideoTool = defineTool<PostVideoInput, PostVideoData>({
 });
 
 // ---------------------------------------------------------------------------
-// tiktok_upload_video_draft (TOOLS.md § 3.10)
+// tiktok_upload_video_draft (TOOLS.md § 3.11)
 // ---------------------------------------------------------------------------
 
 const DRAFT_DESCRIPTION =
@@ -819,6 +834,7 @@ const UPLOAD_DRAFT_INPUT = toolInput({
         'tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical ' +
         'attempt did not create a draft.',
     ),
+  run_at: RUN_AT_ARG,
 });
 
 type UploadDraftInput = z.infer<typeof UPLOAD_DRAFT_INPUT>;
@@ -845,7 +861,7 @@ async function previewDraft(
     openId,
     source.value.fileIdentity,
   );
-  // No creator_info on a draft (§ 3.10), so the platform maximum stands in.
+  // No creator_info on a draft (§ 3.11), so the platform maximum stands in.
   const media = await previewMedia(source.value);
 
   return {
@@ -879,7 +895,8 @@ async function executeDraft(
   const { api } = ctx;
 
   // Step 2.
-  const refused = checkWriteBucket(ctx);
+  // Scheduling spends no token: the runner takes one when the entry falls due.
+  const refused = args.run_at === undefined ? checkWriteBucket(ctx) : undefined;
   if (refused !== undefined) return refused;
 
   // Step 3 — for a draft the whole of "re-resolve" is the source: there is no
@@ -899,6 +916,18 @@ async function executeDraft(
   };
 
   // Steps 5–7.
+  // § 2.10 — queue the approved request instead of publishing it now.
+  if (args.run_at !== undefined) {
+    return await schedulePlanned(ctx, {
+      toolName: DRAFT_TOOL_NAME,
+      args,
+      runAt: args.run_at,
+      planId,
+      expectation,
+      title: '',
+    });
+  }
+
   const guard = await runPlanGuards(ctx, planId, expectation, args.force === true);
   if (guard !== undefined) return guard;
 
@@ -936,12 +965,12 @@ export const uploadVideoDraftTool = defineTool<UploadDraftInput, UploadDraftData
   description: DRAFT_DESCRIPTION,
   package: 'publish-write',
   // NOT video.publish: the whole point of this tool is that it works on a
-  // draft-only grant (§ 3.10).
+  // draft-only grant (§ 3.11).
   scopes: ['video.upload'],
   annotations: {
     readOnlyHint: false,
     // Nothing goes live, but the draft has left for the user's inbox and this
-    // server cannot retract it — and it has spent pending-share quota (§ 3.10).
+    // server cannot retract it — and it has spent pending-share quota (§ 3.11).
     destructiveHint: true,
     idempotentHint: false,
     openWorldHint: true,

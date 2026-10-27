@@ -425,6 +425,42 @@
       }
     },
     {
+      "package": "publish",
+      "scopes": [],
+      "name": "tiktok_list_scheduled",
+      "title": "List scheduled publishes",
+      "description": "List this server's local publish schedule: publishes queued with run_at, newest run_at last. Statuses: \"pending\" (waiting for its time), \"running\" (a runner is applying it — if it stays there, check tiktok_list_publish_journal), \"done\" (publish_id set), \"failed\" (error says why; nothing was retried), \"cancelled\", \"expired\" (the runner reached it more than 24 h late). Local file only — no network call.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "description": "Filter to one profile. Omit for all profiles.",
+            "type": "string"
+          },
+          "status": {
+            "description": "Filter to one status. Omit for all.",
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "done",
+              "failed",
+              "cancelled",
+              "expired"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "List scheduled publishes",
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
       "package": "publish-write",
       "scopes": [
         "video.publish"
@@ -514,6 +550,10 @@
           "force": {
             "description": "Override the duplicate guard. Set true only after verifying via tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical attempt did not create a post.",
             "type": "boolean"
+          },
+          "run_at": {
+            "description": "Schedule instead of publishing now: an ISO-8601 date-time with Z or an offset, up to 30 days ahead. Only on the apply call (with plan_id). The approved request is queued locally and published by `tiktok-mcp-ai run-queue`, which must run on THIS machine at or after that time (cron/launchd) — TikTok has no scheduling of its own.",
+            "type": "string"
           }
         },
         "required": [
@@ -574,6 +614,10 @@
           "force": {
             "description": "Override the duplicate guard. Set true only after verifying via tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical attempt did not create a draft.",
             "type": "boolean"
+          },
+          "run_at": {
+            "description": "Schedule instead of publishing now: an ISO-8601 date-time with Z or an offset, up to 30 days ahead. Only on the apply call (with plan_id). The approved request is queued locally and published by `tiktok-mcp-ai run-queue`, which must run on THIS machine at or after that time (cron/launchd) — TikTok has no scheduling of its own.",
+            "type": "string"
           }
         },
         "required": [
@@ -672,6 +716,10 @@
           "force": {
             "description": "Override the duplicate guard. Set true only after verifying via tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical attempt did not create a post.",
             "type": "boolean"
+          },
+          "run_at": {
+            "description": "Schedule instead of publishing now: an ISO-8601 date-time with Z or an offset, up to 30 days ahead. Only on the apply call (with plan_id). The approved request is queued locally and published by `tiktok-mcp-ai run-queue`, which must run on THIS machine at or after that time (cron/launchd) — TikTok has no scheduling of its own.",
+            "type": "string"
           }
         },
         "required": [
@@ -740,6 +788,10 @@
           "force": {
             "description": "Override the duplicate guard. Set true only after verifying via tiktok_list_publish_journal and tiktok_get_publish_status that the earlier identical attempt did not create a draft.",
             "type": "boolean"
+          },
+          "run_at": {
+            "description": "Schedule instead of publishing now: an ISO-8601 date-time with Z or an offset, up to 30 days ahead. Only on the apply call (with plan_id). The approved request is queued locally and published by `tiktok-mcp-ai run-queue`, which must run on THIS machine at or after that time (cron/launchd) — TikTok has no scheduling of its own.",
+            "type": "string"
           }
         },
         "required": [
@@ -753,6 +805,38 @@
         "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": true
+      }
+    },
+    {
+      "package": "publish-write",
+      "scopes": [],
+      "name": "tiktok_cancel_scheduled",
+      "title": "Cancel a scheduled publish",
+      "description": "Cancel a pending scheduled publish (from tiktok_list_scheduled) before the runner reaches it. Local only: nothing was sent to TikTok, so nothing is undone there. An entry that is already running, done or failed cannot be cancelled — a post that exists stays.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "account": {
+            "description": "Profile name from the server configuration. Omit to use the default profile. Unknown names fail locally without contacting TikTok.",
+            "type": "string",
+            "minLength": 1
+          },
+          "schedule_id": {
+            "type": "string",
+            "description": "The schedule_id returned by the apply call with run_at."
+          }
+        },
+        "required": [
+          "schedule_id"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "title": "Cancel a scheduled publish",
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       }
     },
     {

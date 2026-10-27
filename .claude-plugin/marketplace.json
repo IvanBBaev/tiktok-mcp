@@ -5,7 +5,7 @@
     {
       "name": "tiktok-mcp-ai",
       "source": "./",
-      "description": "Unofficial TikTok MCP server — 13 tools over the Display API and Content Posting API, with plan-then-execute write safety. Add with: /plugin marketplace add IvanBBaev/tiktok-mcp"
+      "description": "Unofficial TikTok MCP server — 15 tools over the Display API and Content Posting API, with plan-then-execute write safety. Add with: /plugin marketplace add IvanBBaev/tiktok-mcp"
     }
   ]
 }

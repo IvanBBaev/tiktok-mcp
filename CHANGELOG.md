@@ -14,6 +14,16 @@ plumbing stay in the commit history where they belong.
 
 ### Added
 
+- **Local scheduled publishing.** The four write tools accept `run_at` on the
+  apply call: the approved request is queued in `schedule.json` beside the env
+  file instead of being sent, and the new `tiktok-mcp-ai run-queue` command
+  (run by cron or launchd on the same machine) publishes it when due, through
+  a fresh preview that must match the approval. Two new tools,
+  `tiktok_list_scheduled` (`publish`, closed-world) and
+  `tiktok_cancel_scheduled` (`publish-write`, local only), read and cancel the
+  queue. TikTok has no scheduling of its own, so nothing posts while the
+  machine is off; an entry reached more than 24 h late expires unposted. See
+  TOOLS.md § 2.10 and CONFIGURATION.md § Schedule.
 - **Webhook receiver (`TT_WEBHOOK_PATH`).** On the HTTP transport, TikTok can
   now push events — publish completed, failed, publicly available,
   authorization removed — to a path of your choice. Deliveries are verified by

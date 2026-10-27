@@ -343,7 +343,7 @@ api p13-direct POST /v2/post/publish/content/init/ \
 
 **Record:** whether the draft opens in the app with the title and description
 pre-filled, and whether the direct post carries music. **Lands in:**
-[TOOLS.md § 3.10 and § 3.11](../TOOLS.md) — a dead field is dropped from the
+[TOOLS.md § 3.11 and § 3.12](../TOOLS.md) — a dead field is dropped from the
 schema or documented as ignored; the tool schemas freeze after this probe.
 
 ## 5. Destructive probe (P-5)

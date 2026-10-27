@@ -1,5 +1,5 @@
 /**
- * `tiktok_get_video_analytics` (TOOLS.md § 3.13).
+ * `tiktok_get_video_analytics` (TOOLS.md § 3.15).
  *
  * The tool is a walk plus a pure computation, and the tests follow that split.
  * The walk cases pin the policies that keep an aggregate honest: a `since`

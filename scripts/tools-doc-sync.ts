@@ -28,7 +28,7 @@
  *    the same failure wearing a copy-paste mask;
  *  - **order and numbering**: the n-th section is `3.<n>` and names the n-th
  *    manifest tool. The document cross-references itself by number ("as § 3.8",
- *    "rows as § 3.10") and § 1's table is numbered in the same order, so a
+ *    "rows as § 3.11") and § 1's table is numbered in the same order, so a
  *    section inserted out of order silently re-points every reference to it;
  *  - the **Package** and **Scopes** lines against `package` / `scopes` /
  *    `scopesAnyOf`. Only the *leading* scope claim is read — everything after
@@ -71,7 +71,7 @@
  *    `enum \`A \| B\``, bare `enum`); normalizing them would be guesswork, and
  *    a guess that usually works is the worst kind of check;
  *  - the reverse direction of a **prose-form** input schema. Three sections
- *    (§ 3.5, § 3.9, § 3.11) state their schema as a sentence rather than a
+ *    (§ 3.5, § 3.10, § 3.12) state their schema as a sentence rather than a
  *    table, so the gate can only assert that every property is named there. The
  *    sentence's other code spans are values, section references and field names
  *    of *other* payloads (`false`, `SEND_TO_USER_INBOX`, `post_info`), and no

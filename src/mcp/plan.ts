@@ -30,6 +30,7 @@ export const CONTROL_FIELDS: readonly string[] = Object.freeze([
   'plan_id',
   'force',
   'wait_for_completion',
+  'run_at',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {

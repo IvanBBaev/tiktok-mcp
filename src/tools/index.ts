@@ -28,6 +28,7 @@ import {
 } from './publish.js';
 import { postPhotosTool, uploadPhotosDraftTool } from './publish-photos.js';
 import { postVideoTool, uploadVideoDraftTool } from './publish-write.js';
+import { cancelScheduledTool, listScheduledTool } from './schedule.js';
 import { getUserInfoTool } from './user.js';
 import { listVideosTool, queryVideosTool } from './video.js';
 import { listWebhookEventsTool } from './webhooks.js';
@@ -50,6 +51,7 @@ export const PACKAGES: readonly ToolPackageSpec[] = Object.freeze([
       getPublishStatusTool,
       listPublishJournalTool,
       listWebhookEventsTool,
+      listScheduledTool,
     ]),
   },
   {
@@ -59,6 +61,7 @@ export const PACKAGES: readonly ToolPackageSpec[] = Object.freeze([
       uploadVideoDraftTool,
       postPhotosTool,
       uploadPhotosDraftTool,
+      cancelScheduledTool,
     ]),
   },
   { name: 'analytics', tools: Object.freeze([getVideoAnalyticsTool]) },

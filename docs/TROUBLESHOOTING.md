@@ -267,6 +267,12 @@ slow** — that creates a second post.
 | `publish_not_found` | TikTok has no record of that `publish_id` — expired status window, or another app's id. | Look for the attempt in `tiktok_list_publish_journal` and for the result in `tiktok_list_videos`. |
 | `journal_unreadable` | The local journal file exists but cannot be read or parsed. | Check permissions on `journal.ndjson` beside the env file. Publishing keeps working; only the journal read fails. |
 | `webhook_log_unreadable` | The local webhook event log exists but cannot be read. | Check permissions on `webhooks.ndjson` (and `webhooks.ndjson.1`) beside the env file. The receiver keeps logging while the file can be appended to; only `tiktok_list_webhook_events` fails. |
+| `schedule_full` | An apply with `run_at` found 50 entries already pending. The plan is still unspent. | Cancel some with `tiktok_cancel_scheduled`, apply now without `run_at`, or let the runner work through the queue. |
+| `schedule_unreadable` | `schedule.json` beside the env file exists but cannot be read or parsed. It is never rewritten while it cannot be read, so no entry is lost. | Check its permissions; restore it from a backup if it was edited by hand. |
+| `schedule_not_found`, `schedule_not_cancellable` | The `schedule_id` is unknown (or another profile's, under `TT_LOCK_PROFILE`), or the entry already left `pending`. | `tiktok_list_scheduled` shows each entry's status; a `running` or `done` one may already be posted — check `tiktok_list_publish_journal`. |
+| `schedule_expired` | The runner reached the entry more than 24 h after its `run_at` — the machine was off or asleep, or `run-queue` was not installed. Nothing was posted. | Install the runner (CONFIGURATION.md § Schedule) and schedule again. |
+| `payload_changed`, `account_changed`, `file_changed` | At run time the fresh preview no longer matched what was approved: the request resolves differently (e.g. creator settings changed), the profile is logged in to another TikTok account, or the media file was replaced. Nothing was posted. | Preview and approve again, now or with a new `run_at`. |
+| `schedule_replay_failed` | The runner could not replay the entry at all — the tool no longer exists in this version, or its preview/apply answered unexpectedly. Nothing was retried. | Check `tiktok_list_publish_journal` for that title before scheduling again. |
 
 ## Webhooks
 

@@ -737,7 +737,7 @@ common case of touching one thing.
   is what the model reads, TOOLS.md is what the reviewer reads, and the
   disagreement is invisible in both. Checked: the section ⇄ tool bijection in
   both directions, and duplicates; section order and numbering, because the
-  document cross-references itself as "§ 3.9"; the Package and Scopes lines —
+  document cross-references itself as "§ 3.10"; the Package and Scopes lines —
   only the *leading* scope claim, since § 3.2 goes on to name scopes that are
   not required and a scan that swallowed those would report a correct section as
   drifted; the four hints; the normative description paragraph by paragraph,
@@ -758,7 +758,7 @@ common case of touching one thing.
   (prose about handler behaviour, with nothing in the manifest to compare it
   to); `Type` cells spelling a union or an enum, which the repo writes three
   different ways; the reverse direction of the three sections that state their
-  schema as a sentence rather than a table (§ 3.5, § 3.10, § 3.12 — their other
+  schema as a sentence rather than a table (§ 3.5, § 3.11, § 3.13 — their other
   code spans are values and constants, and no filter admits `file_path` while
   rejecting `false`); `annotations.title`; and everything the manifest does not
   carry — Output, Errors, Hints. Pinned in `test/tools-doc-sync.test.ts` against

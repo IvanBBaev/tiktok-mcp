@@ -308,6 +308,52 @@ sync a directory (Windows) it is skipped with a debug log.
 (it is the only audit trail for "did it post?"); purging requires the
 explicit `--purge-journal` flag (rationale: SYNTHESIS § 2.10).
 
+### Schedule
+
+Scheduled publishing (TOOLS.md § 2.10) has no variables of its own. An apply
+call with `run_at` queues the approved request in `schedule.json` **beside the
+resolved env file** (created `0600` in a `0700` directory, rewritten
+atomically under its own lock, `schedule.json.lock`); `tiktok-mcp-ai
+run-queue` publishes what is due. TikTok has no server-side scheduling, so
+**the runner is the scheduler**: install it on the machine that holds the env
+file, and expect nothing to post while that machine is off or asleep. An entry
+the runner reaches more than 24 h late expires unposted; at most 50 entries
+may be pending; finished entries are pruned after 30 days.
+
+The runner reads the same env file and settings as the server, but ignores the
+package selection (`TT_TOOL_PACKAGES` usually lives in the MCP client's
+config, which cron never sees); `TT_WRITE_MODE=deny` or `TT_PACKAGES_READONLY`
+in its environment stops it, leaving entries pending. It always applies
+through a fresh preview and plan, whatever `TT_WRITE_MODE` says.
+
+Run it every few minutes. cron (`crontab -e`):
+
+```cron
+*/5 * * * * /usr/local/bin/npx -y tiktok-mcp-ai run-queue >> "$HOME/.tiktok-mcp/run-queue.log" 2>&1
+```
+
+launchd (`~/Library/LaunchAgents/ai.tiktok-mcp.run-queue.plist`, then
+`launchctl load` it):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ai.tiktok-mcp.run-queue</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/local/bin/npx</string><string>-y</string><string>tiktok-mcp-ai</string><string>run-queue</string></array>
+  <key>StartInterval</key><integer>300</integer>
+</dict>
+</plist>
+```
+
+launchd runs a missed interval once on wake, which is what makes a slept-through
+slot publish late rather than never. If the env file is not at the default
+location, set `TT_ENV_FILE` in the job's environment. `run-queue --dry-run`
+lists what is due without publishing; the exit code is `1` when an entry
+failed or expired, so a wrapper can alert on it.
+
 ### Env-file lock
 
 | Variable | Default | Description |

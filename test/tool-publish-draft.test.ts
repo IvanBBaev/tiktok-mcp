@@ -1,5 +1,5 @@
 /**
- * `tiktok_upload_video_draft` (TOOLS.md § 3.10) — the draft half of the two-step
+ * `tiktok_upload_video_draft` (TOOLS.md § 3.11) — the draft half of the two-step
  * write contract of § 2.6.
  *
  * The draft tool shares its pipeline with `tiktok_post_video`, so this file does
@@ -412,10 +412,10 @@ function oneLine(lines: readonly JournalLine[], type: string): JournalLine {
 }
 
 // ---------------------------------------------------------------------------
-// preview — source: "url" (TOOLS.md § 3.10, § 2.6.1)
+// preview — source: "url" (TOOLS.md § 3.11, § 2.6.1)
 // ---------------------------------------------------------------------------
 
-test('§ 3.10: a url preview mints a plan and states the draft action with no creator block', async () => {
+test('§ 3.11: a url preview mints a plan and states the draft action with no creator block', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () =>
@@ -431,7 +431,7 @@ test('§ 3.10: a url preview mints a plan and states the draft action with no cr
     assert.deepEqual(preview.payload.source, { type: 'url', url: VIDEO_URL });
     assert.equal(urlSource(preview.payload.source).url, VIDEO_URL);
 
-    // § 3.10: no pre-flight means there is nothing honest to put in a `creator`
+    // § 3.11: no pre-flight means there is nothing honest to put in a `creator`
     // block, and a draft carries no caption or privacy level to consent to.
     assert.ok(!('creator' in preview));
     assert.ok(!('consent_line' in preview));
@@ -448,7 +448,7 @@ test('§ 3.10: a url preview mints a plan and states the draft action with no cr
   });
 });
 
-test('§ 3.10: neither the draft preview nor the draft apply reads creator_info', async () => {
+test('§ 3.11: neither the draft preview nor the draft apply reads creator_info', async () => {
   await withCtx({}, async (ctx, box) => {
     const stub = fakeApi();
     await withFetch(stub, async () => {
@@ -465,7 +465,7 @@ test('§ 3.10: neither the draft preview nor the draft apply reads creator_info'
       assert.equal(applied.mode, 'applied');
     });
 
-    // The whole point of § 3.10: a video.upload-only grant may not carry the
+    // The whole point of § 3.11: a video.upload-only grant may not carry the
     // scope for creator_info, so the tool may never depend on it.
     assert.equal(countPath(stub, CREATOR_PATH), 0);
     assert.deepEqual(paths(stub), [INBOX_INIT_PATH]);
@@ -480,7 +480,7 @@ test('§ 3.10: neither the draft preview nor the draft apply reads creator_info'
 // apply — source: "url" (TOOLS.md § 2.6.3, § 5.3)
 // ---------------------------------------------------------------------------
 
-test('§ 3.10: applying a url plan posts source_info to the inbox init and journals the attempt', async () => {
+test('§ 3.11: applying a url plan posts source_info to the inbox init and journals the attempt', async () => {
   await withCtx({}, async (ctx, box) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () => {
@@ -597,7 +597,7 @@ test('§ 2.6.3 step 3: a file that vanished after the preview refuses the apply,
   });
 });
 
-test('§ 3.10: a plan_id that is not this server’s shape is refused before any request', async () => {
+test('§ 3.11: a plan_id that is not this server’s shape is refused before any request', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () =>
@@ -629,7 +629,7 @@ test('TT_WRITE_MODE=apply uploads the draft with no plan and journals the empty 
 // local validation — nothing leaves the process (TOOLS.md § 3.0)
 // ---------------------------------------------------------------------------
 
-test('§ 3.10 / CC-D10: a video_url outside every verified prefix is refused before any request', async () => {
+test('§ 3.11 / CC-D10: a video_url outside every verified prefix is refused before any request', async () => {
   await withCtx({}, async (ctx) => {
     const stub = fakeApi();
     const result = await withFetch(stub, async () =>
@@ -679,7 +679,7 @@ test('§ 5.1: both draft refusals name the operator step, not just the cause', a
   });
 });
 
-test('§ 3.10: the two byte sources are mutually exclusive and each one requires its own field', async () => {
+test('§ 3.11: the two byte sources are mutually exclusive and each one requires its own field', async () => {
   await withCtx({}, async (ctx, box) => {
     const clip = join(box.media, 'clip.mp4');
     await writeClip(clip);
@@ -713,10 +713,10 @@ test('§ 3.10: the two byte sources are mutually exclusive and each one requires
 });
 
 // ---------------------------------------------------------------------------
-// preview — source: "file" (TOOLS.md § 3.10, § 2.6.1)
+// preview — source: "file" (TOOLS.md § 3.11, § 2.6.1)
 // ---------------------------------------------------------------------------
 
-test('§ 3.10 / § 2.6.1: a file preview shows the resolved path, the size and the chunk plan', async () => {
+test('§ 3.11 / § 2.6.1: a file preview shows the resolved path, the size and the chunk plan', async () => {
   await withCtx({}, async (ctx, box) => {
     const clip = join(box.media, 'clip.mp4');
     const size = await writeClip(clip);
@@ -753,7 +753,7 @@ test('§ 3.10 / § 2.6.1: a file preview shows the resolved path, the size and t
 // apply — source: "file" (TIKTOK-API.md §§ 4.6–4.8)
 // ---------------------------------------------------------------------------
 
-test('§ 3.10 / CC-D6: applying a file plan declares FILE_UPLOAD and PUTs every planned chunk', async () => {
+test('§ 3.11 / CC-D6: applying a file plan declares FILE_UPLOAD and PUTs every planned chunk', async () => {
   await withCtx({}, async (ctx, box) => {
     const clip = join(box.media, 'clip.mp4');
     const size = await writeClip(clip);
@@ -906,10 +906,10 @@ test('§ 2.6.5: a second identical apply is refused, and the same plan_id still 
 });
 
 // ---------------------------------------------------------------------------
-// wait_for_completion (TOOLS.md § 2.7, § 3.10)
+// wait_for_completion (TOOLS.md § 2.7, § 3.11)
 // ---------------------------------------------------------------------------
 
-test('§ 2.7 / § 3.10: wait_for_completion polls until the terminal SEND_TO_USER_INBOX', async () => {
+test('§ 2.7 / § 3.11: wait_for_completion polls until the terminal SEND_TO_USER_INBOX', async () => {
   await withCtx({}, async (ctx, box, clock) => {
     const stub = fakeApi({
       status: (n) =>
