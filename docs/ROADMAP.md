@@ -116,6 +116,139 @@ reshapes the profile model (a second auth provider).
 - Not planned: Research API (academic only), Data Portability API (EEA/UK,
   low value here), mobile kits (Share Kit, Green Screen Kit).
 
+## Parallel work queue
+The open items below can run at the same time, each on its own branch, without
+getting in each other's way. Each item is a heading
+`#### <ID> — <title>`, and the line under it says what it waits for and where it
+stands: `Deps <ids> · Status <todo|done|blocked: …> · Est <h>`. The claim script of
+the `%-start-on-roadmap` workflow reads these lines from the committed `main`.
+
+### How an item runs
+- **One item per branch.** The branch is `wp/<ID>` (the branch name is the claim).
+  Its worktree lives at `~/Development/_branches/tiktok-mcp-<id>`. Never work on two
+  items in one branch.
+- **Stay in your files.** Each item lists the files it **owns** (only this item
+  edits them) and the **shared** files it may touch under the rules below. If you
+  need a file outside both lists, stop and add it to the item here first. Do that
+  in its own commit on `main`.
+- **Finish with a rebase, never a merge commit.** Rebase on `main`, run
+  `npm run check`, then fast-forward `main`. Remove the worktree and delete the branch.
+  The last commit of the branch flips only this item's `Status` line to `done`
+  (`Status done YYYY-MM-DD`). The other items' lines sit apart from it, so two
+  branches never conflict on the roadmap.
+- **One commit per item. No secrets, no harness files** (`CLAUDE.md`,
+  `WORKLOG.md`, `.claude/`, `docs/ai/`).
+
+### Shared files — how to edit them without conflicts
+Several items touch these files. Each rule keeps a rebase conflict trivial: you keep
+both sides, or you regenerate the file.
+
+| File | Rule |
+|---|---|
+| `CHANGELOG.md` | Add **one** bullet at the **end** of the right `[Unreleased]` group. On conflict, keep both bullets. |
+| `docs/CONTRACTS.md` change log | Add **one** row at the **end** of the table. On conflict, keep both rows in date order. |
+| `docs/TOOLS.md` | A new tool takes the **next free** section number (today § 3.17). Never renumber existing sections in a parallel item. |
+| `src/tools/index.ts` | Add the import or registration as a new line. Never reorder existing lines. |
+| `README.md`, `server.json`, manifest snapshot, `.env.example` | Generated: after the rebase, run `npm run build && npm run sync:write && npm run docs:env`. Never merge these by hand. |
+| `package.json`, `package-lock.json` | Only **H2** changes dependencies. No other item in this queue may add one. If one must, it waits for H2 to be `done`. On a lockfile conflict, take `main`'s lockfile and rerun `npm install`. |
+| `src/core/settings.ts`, `docs/CONFIGURATION.md`, `scripts/gen-env-example.ts`, `test/settings.test.ts` | Settings hotspot: at most one live item adds a `TT_*` setting. None of the items below needs one. |
+| `src/core/http.ts` | Only **A11** edits it (the egress allowlist). H1 uses the existing seams (`outboundLookup`, `LookupFn`) and must not change this file. |
+| `docs/SECURITY.md` | H1 edits only § DNS resolve-and-pin. A11 edits only the egress host list. |
+
+### Which items can run together
+H1, H2 and A11 share no owned file, so all three can run at once. Merge order does
+not matter; H2 first keeps the lockfile out of the others' rebases. B1, B2-SPIKE and
+B2 wait for the owner, and B3 waits for B2.
+
+#### H1 — Pin the login and doctor requests to the vetted DNS answer
+Deps — · Status todo · Est 3 h
+
+- **Scope:** close the gap that SECURITY.md § DNS resolve-and-pin documents. The
+  `login` CLI's token exchange (`exchangeCode`, whose seams already take `lookup`)
+  and its user-info call, plus every outbound request `doctor` makes, get
+  `outboundLookup(settings.dnsPin, process.env, dns.lookup)` at the CLI
+  composition root. This is the same switch `src/index.ts` and `cli/run-queue.ts`
+  use, so `TT_DNS_PIN=0` and the environment-proxy exception behave the same.
+- **Owns:** `src/cli/login.ts`, `src/cli/doctor.ts`, and their tests under `test/`
+  (login and doctor suites, plus `test/dns-pin.test.ts` for new cases).
+- **Shared:** `docs/SECURITY.md` (only § DNS resolve-and-pin: drop the
+  "login and doctor stay unpinned" note and move it to History), `CHANGELOG.md`,
+  and a `docs/CONTRACTS.md` row only if an exported signature changes.
+- **Acceptance:**
+  - A test proves that the login exchange and a doctor probe pass a pinned
+    dispatcher when the pin is on, and none with `TT_DNS_PIN=0`.
+  - `npm run check` is green, with coverage at or above the gate.
+
+#### H2 — Clear the open npm audit findings
+Deps — · Status todo · Est 0.5 h
+
+- **Scope:** `npm audit fix` without `--force` for body-parser (high), fast-uri and
+  qs (moderate), all transitive and pre-existing.
+- **Owns:** `package-lock.json`. Touch `package.json` only if a range has to move.
+- **Shared:** `CHANGELOG.md` (a `Security` bullet).
+- **Acceptance:**
+  - `npm audit` reports 0 vulnerabilities.
+  - `npm run check` is green.
+  - The lockfile diff touches only the advised packages and their own dependencies.
+
+#### A11 — Embed tool over oEmbed (`tiktok_get_embed`)
+Deps — · Status todo · Est 5 h
+
+- **Scope:** a read-only tool that returns TikTok's oEmbed answer (embed HTML,
+  title, author, thumbnail) for a public video URL. It needs no user token.
+- **Package:** the tool ships in its own tool package `embed`, so it can be
+  dropped if TikTok deprecates oEmbed.
+- **Validation:**
+  - The input URL is checked against TikTok's public video URL shapes.
+  - The answer is size-capped and treated as untrusted content.
+- **Owns:** `src/api/embed.ts`, `src/tools/embed.ts`, `test/embed.test.ts`.
+- **Shared:**
+  - `src/core/http.ts`: add the oEmbed host to the egress allowlist, with a test.
+  - `docs/SECURITY.md`: egress host list.
+  - `src/tools/index.ts`.
+  - `docs/TOOLS.md`: § 3.17.
+  - Generated files: README, `server.json`, manifest.
+  - `docs/CONTRACTS.md` row and `CHANGELOG.md`.
+- **Acceptance:**
+  - The tool is listed only when the `embed` package is enabled.
+  - A non-TikTok or non-https URL is refused before any request.
+  - The host guard admits exactly the oEmbed endpoint.
+  - `npm run check` is green.
+
+#### B1 — Commercial Content API package (`adlib`)
+Deps — · Status blocked: owner approval (optional 1.4) · Est 12 h
+
+- **Scope:** ad search, ad details and advertiser search over a client-credentials
+  token kept separate from user OAuth. EU-only data.
+- **Before anyone starts:** the owner must approve the item and the new auth mode.
+
+#### B2-SPIKE — Can an individual developer get Business API access?
+Deps — · Status blocked: owner (apply for the app in the TikTok developer portal) · Est 2 h
+
+- **Scope:** apply for access, record the outcome and limits in
+  `docs/probes/PROBE-LOG.md`, and give a GO or NO-GO for B2.
+
+#### B2 — Business Accounts package
+Deps B2-SPIKE · Status todo · Est 30 h
+
+- **Scope:** a second OAuth provider per profile (`business_id` = `open_id`) and
+  these tools:
+  - list, reply to and hide comments on owned videos, with plan/apply and
+    `plan_token` for destructive operations;
+  - account and video insights;
+  - mentions.
+- **Release:** it reshapes the profile model, so it ships as **2.0**.
+- **Coordination:** it owns the settings and config hotspot while it is live.
+  Start no other settings item next to it.
+
+#### B3 — `comment.update` webhook drives resource updates
+Deps B2 · Status todo · Est 3 h
+
+- **Scope:** route `comment.update` events through the existing webhook receiver
+  and subscription hub (1.2 work, done) to comment resources.
+- **Owns:** a new handler module next to `mcp/webhook`.
+- **Shared:** `src/index.ts` wiring.
+
 ## Explicit non-goals
 - No ads management, no scraping or
   unofficial endpoints, no multi-tenant hosted deployment, no token brokering
