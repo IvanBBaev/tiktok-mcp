@@ -192,7 +192,7 @@ Deps — · Status done 2026-10-28 · Est 0.5 h
   - The lockfile diff touches only the advised packages and their own dependencies.
 
 #### A11 — Embed tool over oEmbed (`tiktok_get_embed`)
-Deps — · Status todo · Est 5 h
+Deps — · Status done 2026-10-28 · Est 5 h
 
 - **Scope:** a read-only tool that returns TikTok's oEmbed answer (embed HTML,
   title, author, thumbnail) for a public video URL. It needs no user token.
