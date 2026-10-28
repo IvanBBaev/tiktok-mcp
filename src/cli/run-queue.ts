@@ -22,8 +22,10 @@
  * question for the journal (`tiktok_list_publish_journal`), not for a retry.
  */
 
+import { lookup as dnsLookup } from 'node:dns';
 import { createApiContext } from '../api/context.js';
 import { systemClock, type Clock } from '../core/clock.js';
+import { outboundLookup } from '../core/http.js';
 import {
   listProfiles,
   readEnvFile,
@@ -350,6 +352,8 @@ async function buildRuntime(
   // Every apply is preview-then-plan here, whatever TT_WRITE_MODE says: the
   // plan is what the runner checks against the approval.
   const runSettings: Settings = { ...settings, writeMode: 'plan' };
+  // Resolve-and-pin, as the server does (SECURITY.md § DNS resolve-and-pin).
+  const lookup = outboundLookup(settings.dnsPin, processEnv, dnsLookup);
   const runtime: ServerRuntime = {
     settings: runSettings,
     log,
@@ -372,7 +376,14 @@ async function buildRuntime(
     },
     createContext: (profile: string) =>
       Promise.resolve(
-        createApiContext({ profile, settings: runSettings, log, clock, env: processEnv }),
+        createApiContext({
+          profile,
+          settings: runSettings,
+          log,
+          clock,
+          env: processEnv,
+          ...(lookup === undefined ? {} : { lookup }),
+        }),
       ),
   };
   return { runtime, settings, envFilePath };

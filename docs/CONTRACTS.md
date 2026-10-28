@@ -228,6 +228,7 @@ export interface Settings {
   journalMaxBytes: number;     // TT_JOURNAL_MAX_BYTES, default 5_242_880
   chunkRetries: number;        // TT_CHUNK_RETRIES, default 3
   maxConcurrent: number;       // TT_MAX_CONCURRENT, default 4 (1..64)
+  dnsPin: boolean;             // TT_DNS_PIN, default true
   mediaRoot?: string;          // TT_MEDIA_ROOT (fail-closed for FILE_UPLOAD)
   redirectPort?: number;       // TT_REDIRECT_PORT (optional pin, CC-A8)
   webhookPath?: string;        // TT_WEBHOOK_PATH (http only; not /mcp)
@@ -497,7 +498,7 @@ export interface TtRequestOptions {
   timeoutMs?: number;             // per attempt, default 30_000 (TT_TIMEOUT_MS)
   signal?: AbortSignal;
   clock?: Clock;
-  lookup?: LookupFn;              // injectable DNS seam (SYNTHESIS § 2.6)
+  lookup?: LookupFn;              // DNS seam: pre-flight + pin (SECURITY.md § DNS resolve-and-pin)
   // ---- additive options (Wave-B approved deviation) ----
   maxAttempts?: number;           // read class only, default 3; clamped to >= 1
   budgetMs?: number;              // whole call incl. backoff, default timeoutMs * maxAttempts
@@ -696,6 +697,7 @@ export interface ApiContext {
   log: Logger;
   clock: Clock;
   getAccessToken(opts?: AccessTokenOptions): Promise<string>;  // wraps ensureFreshAccessToken
+  lookup?: LookupFn;           // DNS seam handed to every ttRequest / putChunk
 }
 
 export interface CreateApiContextOptions {
@@ -706,6 +708,7 @@ export interface CreateApiContextOptions {
   env?: NodeJS.ProcessEnv;     // test seam for the credential read
   /** Token resolver; defaults to `ensureFreshAccessToken`. Test seam. */
   refresh?: (profile: string, deps: RefreshDeps) => Promise<string>;
+  lookup?: LookupFn;           // the composition root passes outboundLookup(...)
 }
 export function createApiContext(opts: CreateApiContextOptions): ApiContext;
 
@@ -3602,3 +3605,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-24 | Resource subscriptions (TOOLS.md § 7.4). New module `mcp/subscriptions` (`createSubscriptionHub`, `DEFAULT_SUBSCRIPTION_POLL_MS`). `mcp/resources`: additive `ResourceSpec.watch?` and `ResourceWatch`. `mcp/server`: additive `ServerOptions.clock?` / `subscriptionPollMs?` and `McpServerHandle.notifyResourcesUpdated`; the `resources` capability gains `subscribe: true`. `tools/resources`: the status resource declares a `watch`; new exports `settledPublishStatus`, `isPublishStatusOf`. `src/index.ts` passes `systemClock` and forwards a webhook event with a `publish_id` to every session | integrator |
 | 2026-10-27 | Scheduled publishing (TOOLS.md § 2.10). New modules `mcp/schedule` (store), `tools/schedule` (`RUN_AT_ARG`, `schedulePlanned`, `tiktok_list_scheduled`, `tiktok_cancel_scheduled`) and `cli/run-queue`. The four write tools: additive optional `run_at` and `ScheduledData` in their result union. `mcp/plan`: `run_at` joins the control fields. `mcp/server`'s `ACCOUNT_IS_FILTER` includes `tiktok_list_scheduled`. TOOLS.md §§ 3.9–3.13 renumber to 3.10–3.13 and 3.15; the new tools are §§ 3.9 and 3.14. No existing signature changed | integrator |
 | 2026-10-27 | Batch publishing (TOOLS.md § 2.11). New module `tools/publish-batch` (`tiktok_publish_batch`, TOOLS.md § 3.15; `tiktok_get_video_analytics` renumbers to § 3.16). `mcp/define`: additive optional `ToolCtx.call`, set by `mcp/server`'s `callTool`. No existing signature changed | integrator |
+| 2026-10-28 | DNS resolve-and-pin (SECURITY.md § DNS resolve-and-pin). `core/http`: new exports `pinnedAgent`, `pinnedLookup` and `outboundLookup`; with `lookup` set, each attempt passes an undici `Agent` pinned to the vetted answers as `fetch`'s `dispatcher`. `api/context`: additive `ApiContext.lookup?` and `CreateApiContextOptions.lookup?`, forwarded to `ttRequest` and the upload `putChunk`. `core/settings`: additive `Settings.dnsPin` (`TT_DNS_PIN`, default on). No existing signature changed | integrator |

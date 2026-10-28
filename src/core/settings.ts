@@ -204,6 +204,7 @@ export interface Settings {
   maxRetries: number;
   chunkRetries: number;
   maxConcurrent: number;
+  dnsPin: boolean;
   publishRpm: number;
   fetchAllCap: number;
   resultCharBudget: number;
@@ -668,6 +669,7 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     maxRetries: c.withDefault('TT_MAX_RETRIES', decimalInt({ min: 0, max: 10 }), 3),
     chunkRetries: c.withDefault('TT_CHUNK_RETRIES', decimalInt({ min: 0, max: 10 }), 3),
     maxConcurrent: c.withDefault('TT_MAX_CONCURRENT', decimalInt({ min: 1, max: 64 }), 4),
+    dnsPin: c.withDefault('TT_DNS_PIN', flag(), true),
     publishRpm: c.withDefault('TT_PUBLISH_RPM', decimalInt({ min: 1 }), 6),
     fetchAllCap: c.withDefault('TT_FETCH_ALL_CAP', decimalInt({ min: 1 }), 200),
     resultCharBudget: c.withDefault(

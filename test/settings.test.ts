@@ -69,6 +69,7 @@ test('an empty environment yields exactly the documented defaults', () => {
     timeoutMs: 30_000,
     uploadTimeoutMs: 120_000,
     maxConcurrent: 4,
+    dnsPin: true,
     maxRetries: 3,
     chunkRetries: 3,
     publishRpm: 6,

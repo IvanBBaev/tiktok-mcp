@@ -171,14 +171,32 @@ from every sink):
   and the tool description states the domain-verification requirement
   (CC-D10).
 
-### DNS resolve-and-pin: deferred out of v1 (accepted risk)
+### DNS resolve-and-pin
 
-Resolving the upload host and pinning the connection to verified-public IPs
-is **deferred out of v1** (decision: SYNTHESIS § 2.6). It would require
-custom dispatcher surgery in the HTTP client and introduce live-DNS behavior
-that cannot be tested deterministically in CI, on the hottest data path.
+Every outbound API request and upload chunk PUT resolves its allowlisted
+hostname **once**, refuses the request if any answer is non-routable (the
+pre-flight below), and then **pins the connection to exactly the vetted
+answers**: each attempt gets its own undici `Agent` whose connect-time
+`lookup` returns those addresses and never consults a resolver. A resolver
+that answers differently the second time (DNS rebinding) is never asked a
+second time. TLS is untouched — the certificate is still validated against
+the URL's hostname, so a pin cannot launder a wrong host. The agent is
+destroyed when the attempt settles.
 
-**Compensating controls** (what stands in its place):
+The production `lookup` is `node:dns` `lookup`, wired at the composition roots
+(the server entry and `run-queue`). It is on by default and controlled by
+`TT_DNS_PIN` (CONFIGURATION.md). It is **off automatically under Node's
+environment proxy** (`NODE_USE_ENV_PROXY` set plus any `HTTPS_PROXY` /
+`HTTP_PROXY`, either case): there the proxy resolves the name, a pin would
+route around the proxy, and the local resolver may not know the name at all —
+so those requests go through the proxy unpinned.
+
+**Not pinned:** the OAuth token exchange in `login` and the requests `doctor`
+makes. Both run interactively at the operator's terminal against the fixed
+`open.tiktokapis.com`, and keep the compensating controls below.
+
+**Compensating controls** (still in force, and the only layer when the pin is
+off):
 
 - TLS certificate validation against the allowlisted hostname on an
   https-only connection — a rebound private IP cannot present a valid
@@ -190,12 +208,14 @@ that cannot be tested deterministically in CI, on the hottest data path.
   bytes.
 
 **Residual risk, stated honestly:** an attacker who controls DNS resolution
-for an allowlisted `tiktokapis.com` name can route the connection to a server
-they control; TLS validation then blocks them unless they also hold a valid
-certificate for that name (CA compromise). This combined attacker is accepted
-for v1.
+for an allowlisted `tiktokapis.com` name *and* answers with a public address
+they control can still route the connection there; TLS validation then blocks
+them unless they also hold a valid certificate for that name (CA compromise).
+With the pin off (`TT_DNS_PIN=0`, or behind an environment proxy) the
+time-of-check gap between the pre-flight and the HTTP client's own resolution
+returns as well.
 
-**Pre-flight resolution check** (defense in depth, not a pin): when a
+**Pre-flight resolution check** (resolve-and-pin, step one): when a
 `lookup` is injected, the allowlisted hostname is resolved first and the
 request is refused (`egress_blocked`) if **any** answer is non-routable. IPv6
 answers are normalized to their eight groups before classification, so
@@ -220,23 +240,15 @@ non-canonical spellings (`0:0:0:0:0:0:0:1`, `::ffff:7f00:1`) are caught. Refused
   `2002::/16` is judged by the IPv4 it embeds (above).
 - Any answer that is not an IP literal.
 
-A TOCTOU gap remains between this resolution and the HTTP client's own, which
-is why the deferral above still stands.
-
-**Obligations that survive the deferral:** `core/http` exposes an
-**injectable `lookup` seam** from day one (`TtRequestOptions.lookup`), so a
-future flip to resolve-and-pin is a contained change. Probe **P-15**, the v1.x
-engineering spike, has been run (2026-08-31, offline): it reproduced the gap —
-a pre-flight that vets one address while the connection reaches another — and
-showed that a `lookup`-shaped pin closes it without weakening TLS identity (the
-certificate is still validated against the hostname, and a trusted certificate
-for the wrong name is still rejected) and at no measurable per-request cost,
-since the pre-flight already pays the resolution. What keeps it out of v1 is
-reach, not cost: `fetch` accepts a pin only through an undici dispatcher that
-stock Node exposes nowhere but an undocumented global symbol, created lazily
-and resolving to a different class under proxy environment variables. The
-deferral above therefore rests on measurement rather than assumption; the run
-is recorded in `docs/probes/PROBE-LOG.md` § P-15.
+**History.** v1 shipped the pre-flight and the injectable `lookup` seam
+(`TtRequestOptions.lookup`) with the pin deferred. Probe **P-15** (2026-08-31,
+offline) reproduced the gap — a pre-flight that vets one address while the
+connection reaches another — and showed that a `lookup`-shaped pin closes it
+without weakening TLS identity and at no measurable per-request cost. What
+held it back was reach: stock Node exposes `fetch`'s dispatcher only through an
+undocumented global. The pin now ships with `undici` as a direct dependency,
+whose `Agent` is passed to the global `fetch` as its documented `dispatcher`
+option. The run is recorded in `docs/probes/PROBE-LOG.md` § P-15.
 
 ### Local file confinement (`TT_MEDIA_ROOT`)
 

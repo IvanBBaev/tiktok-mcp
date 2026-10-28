@@ -122,6 +122,11 @@ newest last.
   is rewritten to record the spike as run and the deferral as evidence-backed;
   the decision itself is unchanged. `none` for every other document, and
   nothing under `src/` changes as a result.
+- **Follow-up (2026-10-28):** the pin shipped. The reach problem is solved by
+  depending on `undici` directly and passing its `Agent` as the documented
+  `dispatcher` option of the global `fetch`, instead of the undocumented global
+  symbol; under Node's environment proxy the pin is off. SECURITY.md §
+  "DNS resolve-and-pin" now describes the shipped behavior.
 
 ## Index
 

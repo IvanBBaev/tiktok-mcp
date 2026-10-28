@@ -302,6 +302,13 @@ export const SECTIONS: readonly Section[] = [
         render: 'default',
       },
       {
+        name: 'TT_DNS_PIN',
+        comment: [
+          'Resolve each outbound host once, refuse private answers, pin the connection to them.',
+        ],
+        render: 'default',
+      },
+      {
         name: 'TT_PUBLISH_RPM',
         comment: ['Local token bucket for publish inits, per profile.'],
         render: 'default',

@@ -828,6 +828,7 @@ async function putChunkWithRetries(
         timeoutMs: ctx.settings.uploadTimeoutMs,
         chunkRetries: 0,
         maxConcurrent: ctx.settings.maxConcurrent,
+        ...(ctx.lookup === undefined ? {} : { lookup: ctx.lookup }),
         clock: ctx.clock,
         logger: ctx.log,
         random: opts.random,

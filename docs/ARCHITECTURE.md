@@ -381,11 +381,13 @@ non-envelope 206/201 responses).
    is banned**. https only, port 443 only, no userinfo, `redirect: "error"`
    (CC-B6). Widening the grammar is a spec edit, never a runtime relaxation.
    Chunk PUTs carry **no `Authorization` header** — the `upload_token` in the URL
-   is the credential and a registered secret. DNS resolve-and-pin is deferred out
-   of v1 (rationale: SYNTHESIS § 2.6); `core/http` exposes an injectable `lookup`
-   seam so a future flip is a contained change. With a `lookup` injected, a
-   pre-flight refuses any non-routable answer (normalized IPv6, embedded IPv4
-   classified — the range list is SECURITY.md § DNS resolve-and-pin).
+   is the credential and a registered secret. DNS resolve-and-pin: with a
+   `lookup` injected (the composition roots inject `node:dns` unless
+   `TT_DNS_PIN=0` or an environment proxy resolves), a pre-flight refuses any
+   non-routable answer (normalized IPv6, embedded IPv4 classified — the range
+   list is SECURITY.md § DNS resolve-and-pin), and the attempt's connection is
+   pinned to the vetted answers through a per-attempt undici `Agent`, so `fetch`
+   never resolves the name a second time.
 2. **Auth injection** (`core/oauth.ts`): resolves the active profile's access
    token; if it expires within the skew window (`TT_TOKEN_REFRESH_SKEW_S`) a refresh
    is performed first under the § 7 protocol. A 401 or `access_token_invalid`

@@ -266,6 +266,7 @@ test('a token rotated in the env file after startup is the one later tool calls 
           HOME: sandbox.dir,
           TT_ENV_FILE: envFile,
           TT_LOG_LEVEL: 'debug',
+          TT_DNS_PIN: '0',
         },
       },
     );

@@ -25,7 +25,7 @@ import {
   resolveEnvFilePath,
 } from '../core/config.js';
 import { isTikTokError, TikTokError } from '../core/errors.js';
-import { ttRequest, type RetryClass } from '../core/http.js';
+import { ttRequest, type LookupFn, type RetryClass } from '../core/http.js';
 import type { Logger } from '../core/log.js';
 import { ensureFreshAccessToken, type RefreshDeps } from '../core/oauth.js';
 import type { Settings } from '../core/settings.js';
@@ -61,6 +61,12 @@ export interface ApiContext {
    * registered secret: never log it, never put it in a result or an error.
    */
   getAccessToken(opts?: AccessTokenOptions): Promise<string>;
+
+  /**
+   * DNS seam for resolve-and-pin (SECURITY.md § DNS resolve-and-pin), handed
+   * to every API request and upload PUT. Absent ⇒ `fetch` resolves unpinned.
+   */
+  lookup?: LookupFn;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +88,8 @@ export interface CreateApiContextOptions {
    * has any business exercising.
    */
   refresh?: (profile: string, deps: RefreshDeps) => Promise<string>;
+  /** See {@link ApiContext.lookup}; the composition root passes `outboundLookup(...)`. */
+  lookup?: LookupFn;
 }
 
 /**
@@ -103,6 +111,7 @@ export function createApiContext(opts: CreateApiContextOptions): ApiContext {
     settings: opts.settings,
     log,
     clock,
+    ...(opts.lookup === undefined ? {} : { lookup: opts.lookup }),
     getAccessToken: async (tokenOpts?: AccessTokenOptions): Promise<string> =>
       await refresh(opts.profile, {
         clock,
@@ -223,6 +232,7 @@ export async function apiRequest<T>(
       // `TT_CHUNK_RETRIES`: one attempt plus up to that many retries.
       maxAttempts: 1 + ctx.settings.maxRetries,
       maxConcurrent: ctx.settings.maxConcurrent,
+      ...(ctx.lookup === undefined ? {} : { lookup: ctx.lookup }),
       ...(opts.body === undefined ? {} : { body: opts.body }),
       ...(opts.signal === undefined ? {} : { signal: opts.signal }),
     });

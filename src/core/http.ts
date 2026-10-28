@@ -49,7 +49,10 @@
  *   Field names are restricted to `core/redact`'s allowlist.
  */
 
+import type { LookupAddress } from 'node:dns';
+import type { LookupFunction } from 'node:net';
 import { isIPv4, isIPv6 } from 'node:net';
+import { Agent } from 'undici';
 import { systemClock, type Clock } from './clock.js';
 import { isTikTokError, TikTokError, type ErrorKind } from './errors.js';
 import { silentLogger, type Logger } from './log.js';
@@ -144,7 +147,11 @@ export interface TtRequestOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   clock?: Clock;
-  /** DNS seam (SECURITY.md § 2.6). When present, addresses are pre-flighted. */
+  /**
+   * DNS seam (SECURITY.md § DNS resolve-and-pin). When present, the hostname is
+   * resolved through it, every answer is vetted, and the connection is pinned
+   * to the vetted answers. Absent ⇒ `fetch` resolves on its own, unvetted.
+   */
   lookup?: LookupFn;
 
   // ---- additive options (documented deviations from CONTRACTS.md) ----
@@ -812,48 +819,43 @@ function isPrivateV6(h: readonly number[]): boolean {
 }
 
 /**
- * Honors the injectable `lookup` seam.
+ * Resolve-and-pin, step one: honors the injectable `lookup` seam.
  *
- * Node's global `fetch` (undici) exposes no per-request `lookup`/connect hook,
- * and adding a dependency to get one is out of scope, so full resolve-and-pin
- * stays deferred exactly as SECURITY.md § 2.6 says. What this does instead —
- * and all it claims to do — is a **pre-flight resolution check**: when a
- * `lookup` is injected, the allowlisted hostname is resolved and the request is
- * refused if *any* answer is a loopback/private/link-local/multicast address.
- * There is a TOCTOU gap between this resolution and undici's own (a rebinding
- * attacker with control over an allowlisted name's DNS could still win it), so
- * this is defense in depth on top of the allowlist and TLS, not a pin.
+ * When a `lookup` is injected, the allowlisted hostname is resolved through it
+ * and the request is refused if *any* answer is a loopback/private/link-local/
+ * multicast address. The vetted answers are returned so the attempt can pin
+ * its connection to them ({@link pinnedAgent}) — `fetch` then never resolves
+ * the name a second time, which closes the rebinding gap between this check and
+ * the connect (probe P-15).
  *
- * With no `lookup` injected (the v1 default) nothing extra happens and no
- * second resolution is spent.
+ * With no `lookup` injected nothing extra happens, no resolution is spent and
+ * `undefined` comes back: `fetch` resolves on its own.
  */
 async function preflightDns(
   hostname: string,
   lookup: LookupFn | undefined,
   logger: Logger,
   fields: Record<string, unknown>,
-): Promise<void> {
-  if (lookup === undefined) return;
-  const addresses = await new Promise<readonly { address: string; family: number }[]>(
-    (resolve, reject) => {
-      lookup(hostname, { all: true }, (error, result) => {
-        if (error !== null) {
-          reject(
-            new TikTokError({
-              kind: 'network',
-              code: 'network_error',
-              message: `Could not resolve ${hostname}: ${cap(error.message, 120)}`,
-              retryable: true,
-              remediation: 'Check DNS/network connectivity and call again.',
-              cause: error,
-            }),
-          );
-          return;
-        }
-        resolve(result);
-      });
-    },
-  );
+): Promise<readonly LookupAddress[] | undefined> {
+  if (lookup === undefined) return undefined;
+  const addresses = await new Promise<readonly LookupAddress[]>((resolve, reject) => {
+    lookup(hostname, { all: true }, (error, result) => {
+      if (error !== null) {
+        reject(
+          new TikTokError({
+            kind: 'network',
+            code: 'network_error',
+            message: `Could not resolve ${hostname}: ${cap(error.message, 120)}`,
+            retryable: true,
+            remediation: 'Check DNS/network connectivity and call again.',
+            cause: error,
+          }),
+        );
+        return;
+      }
+      resolve(result);
+    });
+  });
   for (const entry of addresses) {
     if (isPrivateAddress(entry.address)) {
       logger.warn('egress blocked', { ...fields, hostname, reason: 'private_address' });
@@ -863,6 +865,61 @@ async function preflightDns(
       );
     }
   }
+  return addresses;
+}
+
+/**
+ * Resolve-and-pin, step two: an undici dispatcher whose connect-time `lookup`
+ * answers with `addresses` — the answers {@link preflightDns} already vetted —
+ * and never consults a resolver. TLS is untouched: the certificate is still
+ * validated against the URL's hostname, so a pin cannot launder a wrong host
+ * (P-15 § 4). One agent per attempt, destroyed when the attempt settles.
+ *
+ * Exported for the loopback test that proves `fetch` honors the pin.
+ */
+export function pinnedAgent(addresses: readonly LookupAddress[]): Agent {
+  return new Agent({ connect: { lookup: pinnedLookup(addresses) } });
+}
+
+/**
+ * A `net` lookup that never resolves: it answers every query with the vetted
+ * `addresses`, in the `all` shape when asked for it (`autoSelectFamily`) and as
+ * the first address otherwise.
+ */
+export function pinnedLookup(addresses: readonly LookupAddress[]): LookupFunction {
+  const [first] = addresses;
+  return (_hostname, options, callback) => {
+    // An empty answer never gets here: the resolver reports it as an error.
+    if (options.all === true) callback(null, [...addresses]);
+    else callback(null, first?.address ?? '', first?.family ?? 4);
+  };
+}
+
+/**
+ * The DNS seam the composition root hands to `core/http`: `node:dns`'s
+ * `lookup` when resolve-and-pin is on, `undefined` when it is off.
+ *
+ * It is also off under Node's built-in environment proxy
+ * (`NODE_USE_ENV_PROXY` plus a `*_PROXY` variable). There the proxy resolves
+ * the name, a pin would route around the proxy, and the local resolver may not
+ * even know the name — so the request goes through the proxy unpinned, exactly
+ * as it did before resolve-and-pin existed.
+ */
+export function outboundLookup(
+  enabled: boolean,
+  env: NodeJS.ProcessEnv,
+  lookup: LookupFn,
+): LookupFn | undefined {
+  if (!enabled) return undefined;
+  const useEnvProxy = env['NODE_USE_ENV_PROXY'];
+  const proxied =
+    useEnvProxy !== undefined &&
+    useEnvProxy !== '' &&
+    useEnvProxy !== '0' &&
+    ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'].some(
+      (key) => (env[key] ?? '') !== '',
+    );
+  return proxied ? undefined : lookup;
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,13 +1095,14 @@ async function performRequest(
   target: URL,
   spec: RequestSpec,
   ctx: FailureContext & { signal?: AbortSignal; maxConcurrent?: number },
+  pin: readonly LookupAddress[] | undefined,
 ): Promise<RawResponse> {
-  if (ctx.maxConcurrent === undefined) return await sendOnce(target, spec, ctx);
+  if (ctx.maxConcurrent === undefined) return await sendOnce(target, spec, ctx, pin);
   // The queue wait is outside the attempt's timeout window: a slot not yet
   // granted is not a slow server.
   const release = await acquireHostSlot(target.hostname, ctx.maxConcurrent, ctx.signal);
   try {
-    return await sendOnce(target, spec, ctx);
+    return await sendOnce(target, spec, ctx, pin);
   } finally {
     release();
   }
@@ -1054,6 +1112,7 @@ async function sendOnce(
   target: URL,
   spec: RequestSpec,
   ctx: FailureContext & { signal?: AbortSignal },
+  pin: readonly LookupAddress[] | undefined,
 ): Promise<RawResponse> {
   const callerSignal = ctx.signal;
   if (callerSignal?.aborted === true) throw callerSignal.reason;
@@ -1093,13 +1152,16 @@ async function sendOnce(
   // is reached only by a return or an unwinding throw — every arm of the inner
   // `catch` throws, and there is no fall-through edge into the cleanup. The
   // `finally` body itself runs on every call.
+  const dispatcher = pin === undefined ? undefined : pinnedAgent(pin);
   try {
     try {
       const response = await globalThis.fetch(target, {
         ...spec,
         redirect: 'error',
         signal: controller.signal,
-      });
+        // Not in the DOM `RequestInit`; Node's `fetch` reads it (P-15 § 3).
+        ...(dispatcher === undefined ? {} : { dispatcher }),
+      } as RequestInit);
       const bodyText = await response.text();
       return { status: response.status, headers: response.headers, bodyText };
     } catch (error) {
@@ -1111,6 +1173,7 @@ async function sendOnce(
     stopTimer.abort();
     await timer;
     detachCallerAbort();
+    await dispatcher?.destroy();
   }
 }
 
@@ -1422,8 +1485,8 @@ export async function ttRequest<T>(opts: TtRequestOptions): Promise<T> {
         timeout_ms: timeoutMs,
       });
       try {
-        await preflightDns(target.hostname, opts.lookup, logger, fields);
-        const raw = await performRequest(target, spec, ctx);
+        const pin = await preflightDns(target.hostname, opts.lookup, logger, fields);
+        const raw = await performRequest(target, spec, ctx, pin);
         logger.debug('tiktok response', {
           ...fields,
           attempt: attemptNo,
@@ -1508,8 +1571,8 @@ export async function oauthRequest<T>(opts: OauthRequestOptions): Promise<T> {
   };
 
   logger.debug('tiktok oauth request', { ...fields, timeout_ms: timeoutMs });
-  await preflightDns(target.hostname, opts.lookup, logger, fields);
-  const raw = await performRequest(target, spec, ctx);
+  const pin = await preflightDns(target.hostname, opts.lookup, logger, fields);
+  const raw = await performRequest(target, spec, ctx, pin);
   logger.debug('tiktok oauth response', { ...fields, status: raw.status });
 
   const parsed = parseJsonBody(raw.bodyText);
@@ -1663,8 +1726,8 @@ export async function putChunk(opts: PutChunkOptions): Promise<ChunkPutResult> {
       logger.debug('chunk put', { ...fields, attempt: attemptNo, timeout_ms: timeoutMs });
       let raw: RawResponse;
       try {
-        await preflightDns(target.hostname, opts.lookup, logger, fields);
-        raw = await performRequest(target, spec, ctx);
+        const pin = await preflightDns(target.hostname, opts.lookup, logger, fields);
+        raw = await performRequest(target, spec, ctx, pin);
       } catch (error) {
         return outcomeFromThrow<ChunkPutResult>(error);
       }

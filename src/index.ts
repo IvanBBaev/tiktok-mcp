@@ -62,6 +62,12 @@ async function startServer(): Promise<void> {
   const { PROMPTS } = await import('./tools/prompts.js');
   const { RESOURCES, isPublishStatusOf } = await import('./tools/resources.js');
   const { createApiContext } = await import('./api/context.js');
+  const { outboundLookup } = await import('./core/http.js');
+  const { lookup: dnsLookup } = await import('node:dns');
+  // Resolve-and-pin (SECURITY.md § DNS resolve-and-pin): every API request and
+  // upload PUT is resolved, vetted and pinned — unless TT_DNS_PIN=0 or Node's
+  // environment proxy is in effect.
+  const lookup = outboundLookup(settings.dnsPin, process.env, dnsLookup);
 
   const version = await packageVersion();
 
@@ -136,6 +142,7 @@ async function startServer(): Promise<void> {
               log,
               clock: systemClock,
               env: process.env,
+              ...(lookup === undefined ? {} : { lookup }),
             }),
           ),
       },

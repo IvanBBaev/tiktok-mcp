@@ -14,6 +14,14 @@ plumbing stay in the commit history where they belong.
 
 ### Added
 
+- **DNS resolve-and-pin for outbound requests.** API calls and upload chunk
+  PUTs now resolve the TikTok hostname once, refuse any private or reserved
+  answer, and pin the connection to the vetted addresses, so a DNS-rebinding
+  resolver cannot redirect the connection after the check. TLS validation is
+  unchanged. The new `TT_DNS_PIN` setting is on by default; `0` turns it off.
+  It is off automatically under Node's environment proxy
+  (`NODE_USE_ENV_PROXY` plus `HTTPS_PROXY`/`HTTP_PROXY`). `undici` is a new
+  runtime dependency. See SECURITY.md § DNS resolve-and-pin.
 - **Consent dialog for writes (MCP elicitation).** When the MCP client
   supports form elicitation, applying a `plan_id` first asks the user in a
   client-side dialog. The dialog shows the action, account, title excerpt,

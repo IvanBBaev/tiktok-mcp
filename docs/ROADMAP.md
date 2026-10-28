@@ -95,7 +95,8 @@ reshapes the profile model (a second auth provider).
 - **1.1 — read-side value, hardening:** computed analytics over the video list
   (engagement rates, top posts, period aggregates, local snapshots for trends —
   the Display API keeps no history); media pre-flight checks before upload;
-  DNS resolve-and-pin for `PULL_FROM_URL` (P-15); a per-host outbound semaphore.
+  DNS resolve-and-pin for outbound API and upload requests (P-15 — **shipped
+  2026-10-28**, `TT_DNS_PIN`); a per-host outbound semaphore.
 - **1.2 — push instead of poll:** a webhook receiver (`TikTok-Signature`
   HMAC-SHA256 verification, timestamp tolerance, dedupe for at-least-once
   delivery) for `post.publish.*` and `authorization.removed`; revocation marks

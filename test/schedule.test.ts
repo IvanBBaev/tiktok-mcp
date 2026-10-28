@@ -808,6 +808,7 @@ test('run-queue command: --help, a bad flag, and an empty schedule', async () =>
       TT_ENV_FILE: join(h.dir, '.tiktok-mcp.env'),
       TT_CLIENT_KEY: 'test-client-key',
       TT_CLIENT_SECRET: 'test-secret',
+      TT_DNS_PIN: '0',
     };
     const code = await runRunQueue({ argv: [], env, clock: h.clock, ...io.deps });
     assert.equal(code, 0, io.err.join(''));
@@ -834,6 +835,7 @@ test('run-queue command: publishes, reports each entry, and exits 1 on a failure
       TT_CLIENT_KEY: 'test-client-key',
       TT_CLIENT_SECRET: 'test-secret',
       TT_VERIFIED_URL_PREFIXES: VERIFIED_PREFIX,
+      TT_DNS_PIN: '0',
     };
     const due = await scheduleDraft(h, HOUR);
     await h.clock.advance(HOUR + 1);
