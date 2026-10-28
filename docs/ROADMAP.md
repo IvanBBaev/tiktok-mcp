@@ -180,7 +180,7 @@ Deps — · Status done 2026-10-28 · Est 3 h
   - `npm run check` is green, with coverage at or above the gate.
 
 #### H2 — Clear the open npm audit findings
-Deps — · Status todo · Est 0.5 h
+Deps — · Status done 2026-10-28 · Est 0.5 h
 
 - **Scope:** `npm audit fix` without `--force` for body-parser (high), fast-uri and
   qs (moderate), all transitive and pre-existing.
