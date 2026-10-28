@@ -91,6 +91,11 @@ plumbing stay in the commit history where they belong.
   (container, codec, resolution, frame rate, duration and the limits broken),
   with a `note` hint when TikTok would likely reject the file. It never
   refuses and is not repeated at apply time.
+- **`login` and `doctor` are DNS-pinned too.** The login token exchange,
+  its display-name read and `login --revoke`, plus the `doctor` API probe and
+  the token refresh it may trigger, now resolve, vet and pin like every other
+  outbound request. The same `TT_DNS_PIN` switch and environment-proxy
+  exception apply. See SECURITY.md § DNS resolve-and-pin.
 
 ## [1.0.0] - 2026-10-23
 

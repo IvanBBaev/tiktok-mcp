@@ -184,16 +184,14 @@ the URL's hostname, so a pin cannot launder a wrong host. The agent is
 destroyed when the attempt settles.
 
 The production `lookup` is `node:dns` `lookup`, wired at the composition roots
-(the server entry and `run-queue`). It is on by default and controlled by
+(the server entry, `run-queue`, `login` and `doctor`). In `login` it covers the
+token exchange, the display-name read and `--revoke`; in `doctor` it covers
+the API probe and the token refresh the probe may trigger. It is on by default and controlled by
 `TT_DNS_PIN` (CONFIGURATION.md). It is **off automatically under Node's
 environment proxy** (`NODE_USE_ENV_PROXY` set plus any `HTTPS_PROXY` /
 `HTTP_PROXY`, either case): there the proxy resolves the name, a pin would
 route around the proxy, and the local resolver may not know the name at all —
 so those requests go through the proxy unpinned.
-
-**Not pinned:** the OAuth token exchange in `login` and the requests `doctor`
-makes. Both run interactively at the operator's terminal against the fixed
-`open.tiktokapis.com`, and keep the compensating controls below.
 
 **Compensating controls** (still in force, and the only layer when the pin is
 off):
@@ -249,6 +247,10 @@ held it back was reach: stock Node exposes `fetch`'s dispatcher only through an
 undocumented global. The pin now ships with `undici` as a direct dependency,
 whose `Agent` is passed to the global `fetch` as its documented `dispatcher`
 option. The run is recorded in `docs/probes/PROBE-LOG.md` § P-15.
+The first pinned release left the `login` token exchange and the `doctor`
+requests unpinned, on the grounds that both run interactively at the
+operator's terminal against the fixed `open.tiktokapis.com`; roadmap item H1
+closed that gap with the same `TT_DNS_PIN` switch.
 
 ### Local file confinement (`TT_MEDIA_ROOT`)
 

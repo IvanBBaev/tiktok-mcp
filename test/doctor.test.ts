@@ -15,6 +15,7 @@
  */
 
 import assert from 'node:assert/strict';
+import type { LookupAddress } from 'node:dns';
 import {
   appendFile,
   chmod,
@@ -30,6 +31,8 @@ import { join, resolve } from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 
+import { Agent } from 'undici';
+
 import {
   DOCTOR_CHECKS,
   doctorUsage,
@@ -41,17 +44,13 @@ import {
   runDoctor,
   type Check,
   type DoctorContext,
+  type DoctorDeps,
   type DoctorReport,
   type Finding,
 } from '../src/cli/doctor.js';
-import {
-  cliIo,
-  EXIT_FAILURE,
-  EXIT_OK,
-  EXIT_USAGE,
-  type CliDeps,
-} from '../src/cli/index.js';
+import { cliIo, EXIT_FAILURE, EXIT_OK, EXIT_USAGE } from '../src/cli/index.js';
 import { DEFAULT_STALE_MS, envLockDir } from '../src/core/env-lock.js';
+import type { LookupFn } from '../src/core/http.js';
 import { createLogger } from '../src/core/log.js';
 import { resetTokenCache } from '../src/core/oauth.js';
 import { registerSecret } from '../src/core/redact.js';
@@ -67,6 +66,7 @@ import {
   scriptFetch,
   ttEnvelope,
   withFetch,
+  type FetchStub,
   type MockClock,
 } from './helpers.js';
 
@@ -131,11 +131,38 @@ interface Run {
   readonly err: string;
 }
 
+/**
+ * A DNS seam that always answers `answer`. Every `run` gets a public answer, so
+ * resolve-and-pin (on by default) never consults the real resolver.
+ */
+function fixedLookup(
+  answer: readonly LookupAddress[] = [{ address: '23.55.60.1', family: 4 }],
+): LookupFn {
+  const impl = (
+    _hostname: string,
+    _options: unknown,
+    callback: (error: null, addresses: readonly LookupAddress[]) => void,
+  ): void => {
+    callback(null, answer);
+  };
+  return impl as unknown as LookupFn;
+}
+
+/** Wraps a fetch stub and keeps the `dispatcher` each request was given. */
+function dispatcherSpy(inner: FetchStub): { fetch: FetchStub; seen: unknown[] } {
+  const seen: unknown[] = [];
+  const spy: FetchStub = async (input, init) => {
+    seen.push((init as { dispatcher?: unknown } | undefined)?.dispatcher);
+    return await inner(input, init);
+  };
+  return { fetch: spy, seen };
+}
+
 /** One full `runDoctor` invocation with both streams captured. */
 async function run(
   f: Fixture,
   argv: readonly string[] = ['--offline'],
-  over: CliDeps = {},
+  over: DoctorDeps = {},
   env: Record<string, string> = {},
 ): Promise<Run> {
   const stdout: string[] = [];
@@ -148,6 +175,7 @@ async function run(
     stdout: (chunk) => stdout.push(chunk),
     stderr: (chunk) => stderr.push(chunk),
     isTTY: false,
+    lookup: fixedLookup(),
     ...over,
   });
   return { code, out: stdout.join(''), err: stderr.join('') };
@@ -2253,4 +2281,86 @@ test('resolveModulePath answers a file: URL and degrades on anything else', () =
   assert.equal(resolveModulePath('https://example.invalid/doctor.js'), '');
   // No argument at all is the production call.
   assert.ok(resolveModulePath().endsWith('doctor.js'), resolveModulePath());
+});
+
+// ---------------------------------------------------------------------------
+// DNS resolve-and-pin (SECURITY.md § DNS resolve-and-pin)
+// ---------------------------------------------------------------------------
+
+test('the probe and the refresh it triggers are pinned to the vetted answer', async () => {
+  const f = await fixture();
+  try {
+    // A stale access token: the probe refreshes first, then reads.
+    await writeEnvFile(
+      f,
+      authorizedLines({
+        TT_TOKEN_EXPIRES_AT: new Date(BASELINE_NOW_MS - 60_000).toISOString(),
+      }),
+    );
+    const spy = dispatcherSpy(
+      scriptFetch([
+        new Response(
+          JSON.stringify({
+            access_token: 'act.doctor.new',
+            expires_in: 86_400,
+            open_id: 'open-id-doctor-1234',
+            refresh_expires_in: 31_536_000,
+            refresh_token: 'rft.doctor.new',
+            scope: 'user.info.basic',
+            token_type: 'Bearer',
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+        ttEnvelope({ user: { open_id: 'open-id-doctor-1234', display_name: 'Ada' } }),
+      ]),
+    );
+
+    const r = await withFetch(spy.fetch, async () => run(f, []));
+
+    assert.equal(
+      row(r.out, 'api probe'),
+      "[ ok ] api probe: TikTok accepted Ada's token",
+    );
+    assert.equal(spy.seen.length, 2, 'the refresh and the read');
+    for (const dispatcher of spy.seen) {
+      assert.ok(dispatcher instanceof Agent, 'each request carries a pinned agent');
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('TT_DNS_PIN=0 leaves the probe unpinned', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    const spy = dispatcherSpy(
+      scriptFetch([ttEnvelope({ user: { open_id: 'open-id-doctor-1234' } })]),
+    );
+
+    const r = await withFetch(spy.fetch, async () => run(f, [], {}, { TT_DNS_PIN: '0' }));
+
+    assert.equal(r.code, EXIT_OK);
+    assert.deepEqual(spy.seen, [undefined]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a private DNS answer fails the probe before any request', async () => {
+  const f = await fixture();
+  try {
+    await writeEnvFile(f, authorizedLines());
+    const spy = dispatcherSpy(scriptFetch([]));
+
+    const r = await withFetch(spy.fetch, async () =>
+      run(f, [], { lookup: fixedLookup([{ address: '127.0.0.1', family: 4 }]) }),
+    );
+
+    assert.equal(r.code, EXIT_FAILURE);
+    assert.equal(spy.seen.length, 0, 'nothing was sent');
+    assert.match(row(r.out, 'api probe') ?? '', /non-routable address 127\.0\.0\.1/);
+  } finally {
+    await f.cleanup();
+  }
 });

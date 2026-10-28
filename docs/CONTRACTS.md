@@ -3122,9 +3122,13 @@ export function packageVersion(): Promise<string>;
  *  for neither. Returns the intended exit code. */
 export function runCli(argv: readonly string[], deps?: CliDeps): Promise<number>;
 
-// cli/login.ts, cli/doctor.ts — one entry point each, same deps type:
-export function runLogin(deps?: CliDeps): Promise<number>;
-export function runDoctor(deps?: CliDeps): Promise<number>;
+// cli/login.ts, cli/doctor.ts — one entry point each. Both deps types are
+// CliDeps plus `lookup?: LookupFn`, the resolver the resolve-and-pin switch
+// hands out (`node:dns` lookup by default; SECURITY.md § DNS resolve-and-pin):
+export interface LoginDeps extends CliDeps { lookup?: LookupFn }
+export interface DoctorDeps extends CliDeps { lookup?: LookupFn }
+export function runLogin(deps?: LoginDeps): Promise<number>;
+export function runDoctor(deps?: DoctorDeps): Promise<number>;
 
 // cli/login.ts — the scope tables, exported for the drift gate in
 // test/manifest.test.ts (TOOLS.md § 2, scope column):
@@ -3230,7 +3234,7 @@ export interface Finding {
 
 /** Everything the checks read, resolved once before the first one runs. */
 export interface DoctorContext {
-  readonly deps: CliDeps;
+  readonly deps: DoctorDeps;
   readonly io: CliIo;
   readonly platform: NodeJS.Platform;
   readonly modulePath: string;              // where this build is loaded from (npx cache?)
@@ -3245,6 +3249,7 @@ export interface DoctorContext {
   readonly credentials?: ProfileCredentials;
   readonly credentialsError?: unknown;
   readonly offline: boolean;
+  readonly lookup?: LookupFn;               // outboundLookup(...); absent when the pin is off
 }
 
 export interface Check {
@@ -3606,3 +3611,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-27 | Scheduled publishing (TOOLS.md § 2.10). New modules `mcp/schedule` (store), `tools/schedule` (`RUN_AT_ARG`, `schedulePlanned`, `tiktok_list_scheduled`, `tiktok_cancel_scheduled`) and `cli/run-queue`. The four write tools: additive optional `run_at` and `ScheduledData` in their result union. `mcp/plan`: `run_at` joins the control fields. `mcp/server`'s `ACCOUNT_IS_FILTER` includes `tiktok_list_scheduled`. TOOLS.md §§ 3.9–3.13 renumber to 3.10–3.13 and 3.15; the new tools are §§ 3.9 and 3.14. No existing signature changed | integrator |
 | 2026-10-27 | Batch publishing (TOOLS.md § 2.11). New module `tools/publish-batch` (`tiktok_publish_batch`, TOOLS.md § 3.15; `tiktok_get_video_analytics` renumbers to § 3.16). `mcp/define`: additive optional `ToolCtx.call`, set by `mcp/server`'s `callTool`. No existing signature changed | integrator |
 | 2026-10-28 | DNS resolve-and-pin (SECURITY.md § DNS resolve-and-pin). `core/http`: new exports `pinnedAgent`, `pinnedLookup` and `outboundLookup`; with `lookup` set, each attempt passes an undici `Agent` pinned to the vetted answers as `fetch`'s `dispatcher`. `api/context`: additive `ApiContext.lookup?` and `CreateApiContextOptions.lookup?`, forwarded to `ttRequest` and the upload `putChunk`. `core/settings`: additive `Settings.dnsPin` (`TT_DNS_PIN`, default on). No existing signature changed | integrator |
+| 2026-10-28 | DNS pin for `login` and `doctor` (roadmap H1). `cli/login`: new `LoginDeps` (`CliDeps` plus `lookup?`), and `runLogin` takes it. `cli/doctor`: new `DoctorDeps` (same shape), `runDoctor` takes it, and `DoctorContext` gains `lookup?` (`deps` is now `DoctorDeps`). Both pass `outboundLookup(settings.dnsPin, env, deps.lookup ?? dns.lookup)` to the token exchange, the display-name read, `--revoke`, the API probe and its refresh. Additive: every existing caller still compiles | integrator |

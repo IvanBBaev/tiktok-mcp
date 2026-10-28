@@ -32,6 +32,7 @@
  */
 
 import { timingSafeEqual } from 'node:crypto';
+import { lookup as dnsLookup } from 'node:dns';
 import { rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { dirname, join } from 'node:path';
@@ -49,7 +50,7 @@ import {
 } from '../core/config.js';
 import { withEnvLock } from '../core/env-lock.js';
 import { isTikTokError, TikTokError } from '../core/errors.js';
-import { ttRequest } from '../core/http.js';
+import { outboundLookup, ttRequest, type LookupFn } from '../core/http.js';
 import { createLogger, type Logger } from '../core/log.js';
 import { boundPortOf } from '../core/net.js';
 import {
@@ -803,10 +804,9 @@ function describeAccount(credentials: ProfileCredentials): string {
  */
 async function probeDisplayName(
   tokens: TokenSet,
-  settings: Settings,
-  clock: Clock,
-  logger: Logger,
+  ctx: LoginContext,
 ): Promise<string | undefined> {
+  const { settings, clock, logger, lookup } = ctx;
   if (!tokens.scopes.includes(BASIC_SCOPE)) return undefined;
   try {
     const data = await ttRequest<{ user?: { display_name?: unknown } }>({
@@ -818,6 +818,7 @@ async function probeDisplayName(
       timeoutMs: settings.timeoutMs,
       clock,
       logger,
+      ...(lookup === undefined ? {} : { lookup }),
     });
     const name = data.user?.display_name;
     return typeof name === 'string' && name !== '' ? name : undefined;
@@ -918,10 +919,25 @@ interface LoginContext {
   readonly clock: Clock;
   readonly logger: Logger;
   readonly existing: ProfileCredentials;
+  /**
+   * The DNS seam every outbound request of this run gets (SECURITY.md § DNS
+   * resolve-and-pin): `undefined` when `TT_DNS_PIN=0` or Node's environment
+   * proxy owns resolution.
+   */
+  readonly lookup: LookupFn | undefined;
+}
+
+/**
+ * `login`'s process seams: the shared {@link CliDeps} plus the resolver the
+ * resolve-and-pin switch hands out when it is on (`node:dns`'s `lookup` by
+ * default). A test injects a fixed answer so no real resolver is consulted.
+ */
+export interface LoginDeps extends CliDeps {
+  lookup?: LookupFn;
 }
 
 async function resolveContext(
-  deps: CliDeps,
+  deps: LoginDeps,
   profileFlag?: string,
 ): Promise<LoginContext> {
   const processEnv = deps.env ?? process.env;
@@ -951,7 +967,10 @@ async function resolveContext(
       existing = { clientKey: app.clientKey, clientSecret: app.clientSecret };
     }
   }
-  return { envFilePath, env, settings, profile, clock, logger, existing };
+  // The same switch the server entry and `run-queue` use, so `TT_DNS_PIN=0` and
+  // the environment-proxy exception behave identically here.
+  const lookup = outboundLookup(settings.dnsPin, env, deps.lookup ?? dnsLookup);
+  return { envFilePath, env, settings, profile, clock, logger, existing, lookup };
 }
 
 /** `login --revoke` (AUTH.md § 4): tokens go, the journal stays unless asked. */
@@ -968,6 +987,7 @@ async function runRevoke(
     settings: ctx.settings,
     timeoutMs: ctx.settings.timeoutMs,
     rename: deps.rename,
+    ...(ctx.lookup === undefined ? {} : { lookup: ctx.lookup }),
   });
   if (!outcome.cleared) {
     // The tokens are still on disk. Saying "cleared" here would send the user
@@ -1143,6 +1163,7 @@ async function authorize(
       timeoutMs: ctx.settings.timeoutMs,
       clock: ctx.clock,
       logger: ctx.logger,
+      ...(ctx.lookup === undefined ? {} : { lookup: ctx.lookup }),
     });
     return { ok: true, tokens };
   } finally {
@@ -1212,7 +1233,7 @@ async function persist(
  * @returns The intended exit code: 0 on success, 2 for a usage error, 1 for a
  *   login that ran and failed.
  */
-export async function runLogin(deps: CliDeps = {}): Promise<number> {
+export async function runLogin(deps: LoginDeps = {}): Promise<number> {
   const io = cliIo(deps);
   const parsed = parseLoginArgs(deps.argv ?? []);
   if (!parsed.ok) {
@@ -1236,12 +1257,7 @@ export async function runLogin(deps: CliDeps = {}): Promise<number> {
     if (!result.ok) return EXIT_FAILURE;
 
     await persist(ctx, result.tokens, deps);
-    const displayName = await probeDisplayName(
-      result.tokens,
-      ctx.settings,
-      ctx.clock,
-      ctx.logger,
-    );
+    const displayName = await probeDisplayName(result.tokens, ctx);
     io.out(
       summary(
         ctx.profile,

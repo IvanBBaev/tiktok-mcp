@@ -14,10 +14,13 @@
  */
 
 import assert from 'node:assert/strict';
+import type { LookupAddress } from 'node:dns';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { get as httpGet } from 'node:http';
 import path from 'node:path';
 import { test } from 'node:test';
+
+import { Agent } from 'undici';
 
 import {
   EXIT_FAILURE,
@@ -44,7 +47,9 @@ import {
   resolveScopes,
   runLogin,
   spawnDetached,
+  type LoginDeps,
 } from '../src/cli/login.js';
+import type { LookupFn } from '../src/core/http.js';
 import type { Logger } from '../src/core/log.js';
 import { resetTokenCache } from '../src/core/oauth.js';
 import { loadSettings, type Settings } from '../src/core/settings.js';
@@ -54,14 +59,15 @@ import {
   scriptFetch,
   ttEnvelope,
   withFetch,
+  type FetchStub,
   type MockClock,
   type RecordedCall,
-  type RecordingFetchStub,
 } from './helpers.js';
 
 const TOKEN_URL = 'https://open.tiktokapis.com/v2/oauth/token/';
 const REVOKE_URL = 'https://open.tiktokapis.com/v2/oauth/revoke/';
 const USER_INFO_URL = 'https://open.tiktokapis.com/v2/user/info/?fields=display_name';
+const ROUTABLE: readonly LookupAddress[] = [{ address: '23.55.60.1', family: 4 }];
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -129,8 +135,33 @@ async function writeAuthorizedEnvFile(f: Fixture): Promise<void> {
   );
 }
 
+/**
+ * A DNS seam that always answers with public addresses. Every harness run gets
+ * it, so resolve-and-pin (on by default) never consults the real resolver.
+ */
+function fixedLookup(answer: readonly LookupAddress[] = ROUTABLE): LookupFn {
+  const impl = (
+    _hostname: string,
+    _options: unknown,
+    callback: (error: null, addresses: readonly LookupAddress[]) => void,
+  ): void => {
+    callback(null, answer);
+  };
+  return impl as unknown as LookupFn;
+}
+
+/** Wraps a fetch stub and keeps the `dispatcher` each request was given. */
+function dispatcherSpy(inner: FetchStub): { fetch: FetchStub; seen: unknown[] } {
+  const seen: unknown[] = [];
+  const spy: FetchStub = async (input, init) => {
+    seen.push((init as { dispatcher?: unknown } | undefined)?.dispatcher);
+    return await inner(input, init);
+  };
+  return { fetch: spy, seen };
+}
+
 interface Harness {
-  readonly deps: CliDeps;
+  readonly deps: LoginDeps;
   out(): string;
   err(): string;
   /** The authorize URL this run printed, parsed. Fails if nothing was printed. */
@@ -143,7 +174,7 @@ interface Harness {
   readonly opened: string[];
 }
 
-function harness(f: Fixture, over: CliDeps = {}): Harness {
+function harness(f: Fixture, over: LoginDeps = {}): Harness {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const questions: string[] = [];
@@ -173,6 +204,7 @@ function harness(f: Fixture, over: CliDeps = {}): Harness {
         return Promise.resolve();
       },
       randomBytes: (size) => new Uint8Array(size).fill(7),
+      lookup: fixedLookup(),
       ...over,
     },
     out: () => stdout.join(''),
@@ -278,8 +310,8 @@ async function untilAuthorized(h: Harness): Promise<string> {
  */
 async function loginWithCallback(
   f: Fixture,
-  stub: RecordingFetchStub,
-  over: CliDeps = {},
+  stub: FetchStub,
+  over: LoginDeps = {},
   query: (state: string) => string = (state) => `code=the-code&state=${state}`,
 ): Promise<{ code: number; h: Harness }> {
   const listener = fakeListen();
@@ -1340,6 +1372,9 @@ test('a login given only the two stream seams still completes', async () => {
     set('TT_CLIENT_KEY', 'test-client-key');
     set('TT_CLIENT_SECRET', 'test-client-secret');
     set('TT_LOG_LEVEL', 'error');
+    // The resolver is the one default left out: with the pin on, the real
+    // `node:dns` would be asked for open.tiktokapis.com.
+    set('TT_DNS_PIN', '0');
 
     const stdout: string[] = [];
     const stderr: string[] = [];
@@ -1739,4 +1774,77 @@ test('the opener in force is the injected one, and the process default otherwise
   const injected = (): Promise<void> => Promise.resolve();
   assert.equal(openBrowserOf({ openBrowser: injected }), injected);
   assert.equal(openBrowserOf({}), defaultOpenBrowser);
+});
+
+// ---------------------------------------------------------------------------
+// DNS resolve-and-pin (SECURITY.md § DNS resolve-and-pin)
+// ---------------------------------------------------------------------------
+
+test('the code exchange and the display-name probe are pinned to the vetted answer', async () => {
+  const f = await fixture();
+  try {
+    const spy = dispatcherSpy(
+      scriptFetch([tokenResponse(), ttEnvelope({ user: { display_name: 'Ada' } })]),
+    );
+    const { code } = await loginWithCallback(f, spy.fetch);
+    assert.equal(code, EXIT_OK);
+    assert.equal(spy.seen.length, 2, 'the exchange and the probe');
+    for (const dispatcher of spy.seen) {
+      assert.ok(dispatcher instanceof Agent, 'each request carries a pinned agent');
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('TT_DNS_PIN=0 leaves the login requests unpinned', async () => {
+  const f = await fixture();
+  try {
+    const spy = dispatcherSpy(
+      scriptFetch([tokenResponse(), ttEnvelope({ user: { display_name: 'Ada' } })]),
+    );
+    const { code } = await loginWithCallback(f, spy.fetch, {
+      env: appEnv(f, { TT_DNS_PIN: '0' }),
+    });
+    assert.equal(code, EXIT_OK);
+    assert.deepEqual(spy.seen, [undefined, undefined]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('a private DNS answer refuses the code exchange before any request', async () => {
+  const f = await fixture();
+  try {
+    const spy = dispatcherSpy(scriptFetch([]));
+    const { code, h } = await loginWithCallback(f, spy.fetch, {
+      lookup: fixedLookup([{ address: '10.0.0.7', family: 4 }]),
+    });
+    assert.equal(code, EXIT_FAILURE);
+    assert.equal(spy.seen.length, 0, 'nothing was sent');
+    assert.match(h.err(), /non-routable address 10\.0\.0\.7/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('--revoke is pinned as well', async () => {
+  const f = await fixture();
+  try {
+    await writeAuthorizedEnvFile(f);
+    const spy = dispatcherSpy(
+      scriptFetch([
+        new Response('{}', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ]),
+    );
+    const h = harness(f, { argv: ['--revoke'] });
+    assert.equal(await withFetch(spy.fetch, async () => await runLogin(h.deps)), EXIT_OK);
+    assert.equal(spy.seen.length, 1);
+    assert.ok(spy.seen[0] instanceof Agent);
+  } finally {
+    await f.cleanup();
+  }
 });

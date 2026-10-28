@@ -32,6 +32,7 @@
  *   which stays honest while packages are still filling in.
  */
 
+import { lookup as dnsLookup } from 'node:dns';
 import { chmod, readdir, stat } from 'node:fs/promises';
 import { basename, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,7 +52,9 @@ import {
 } from '../core/config.js';
 import { DEFAULT_STALE_MS, canonicalPath, envLockDir } from '../core/env-lock.js';
 import { isTikTokError } from '../core/errors.js';
+import { outboundLookup, type LookupFn } from '../core/http.js';
 import { createLogger, type Logger } from '../core/log.js';
+import { ensureFreshAccessToken } from '../core/oauth.js';
 import {
   DEFAULT_PROFILE,
   isLoopbackHost,
@@ -130,8 +133,17 @@ function hasCode(err: unknown, code: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** Everything the checks read, resolved once before the first one runs. */
+/**
+ * `doctor`'s process seams: the shared {@link CliDeps} plus the resolver the
+ * resolve-and-pin switch hands out when it is on (`node:dns`'s `lookup` by
+ * default). A test injects a fixed answer so no real resolver is consulted.
+ */
+export interface DoctorDeps extends CliDeps {
+  lookup?: LookupFn;
+}
+
 export interface DoctorContext {
-  readonly deps: CliDeps;
+  readonly deps: DoctorDeps;
   readonly io: CliIo;
   readonly platform: NodeJS.Platform;
   /**
@@ -165,6 +177,12 @@ export interface DoctorContext {
   readonly credentialsError?: unknown;
   /** `--offline`: no check may touch the network. */
   readonly offline: boolean;
+  /**
+   * The DNS seam every outbound request gets (SECURITY.md § DNS
+   * resolve-and-pin). Absent when `TT_DNS_PIN=0`, when Node's environment
+   * proxy owns resolution, or when the settings could not be loaded.
+   */
+  readonly lookup?: LookupFn;
 }
 
 /**
@@ -654,12 +672,21 @@ const probeCheck: Check = {
       ];
     }
 
+    const { lookup } = ctx;
     const api = createApiContext({
       profile: ctx.profile,
       settings: ctx.settings,
       log: ctx.logger,
       clock: ctx.clock,
       env: ctx.env,
+      ...(lookup === undefined
+        ? {}
+        : {
+            lookup,
+            // The token refresh the probe may trigger is pinned as well.
+            refresh: async (profile, refreshDeps) =>
+              await ensureFreshAccessToken(profile, { ...refreshDeps, lookup }),
+          }),
     });
     try {
       const user = await getUserInfo(api, ['open_id', 'display_name']);
@@ -1224,7 +1251,7 @@ export function resolveModulePath(url: string = import.meta.url): string {
  * and reporting the other thirteen checks around them is the entire point.
  */
 async function createContext(
-  deps: CliDeps,
+  deps: DoctorDeps,
   io: CliIo,
   flags: DoctorFlags,
 ): Promise<DoctorContext> {
@@ -1248,6 +1275,13 @@ async function createContext(
   const profile = normalizeProfileName(
     flags.profile ?? settings?.lockProfile ?? settings?.activeProfile ?? DEFAULT_PROFILE,
   );
+
+  // The same switch the server entry and `run-queue` use, so `TT_DNS_PIN=0` and
+  // the environment-proxy exception behave identically here.
+  const lookup =
+    settings === undefined
+      ? undefined
+      : outboundLookup(settings.dnsPin, env, deps.lookup ?? dnsLookup);
 
   let credentials: ProfileCredentials | undefined;
   let credentialsError: unknown;
@@ -1273,6 +1307,7 @@ async function createContext(
     ...(credentials === undefined ? {} : { credentials }),
     ...(credentialsError === undefined ? {} : { credentialsError }),
     offline: flags.offline,
+    ...(lookup === undefined ? {} : { lookup }),
   };
 }
 
@@ -1285,7 +1320,7 @@ async function createContext(
  *   code does not depend on `--json`: the flag changes the rendering, not the
  *   verdict.
  */
-export async function runDoctor(deps: CliDeps = {}): Promise<number> {
+export async function runDoctor(deps: DoctorDeps = {}): Promise<number> {
   const io = cliIo(deps);
   const parsed = parseDoctorArgs(deps.argv ?? []);
   if (!parsed.ok) {
