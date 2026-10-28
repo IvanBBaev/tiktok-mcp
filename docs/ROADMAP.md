@@ -161,7 +161,7 @@ not matter; H2 first keeps the lockfile out of the others' rebases. B1, B2-SPIKE
 B2 wait for the owner, and B3 waits for B2.
 
 #### H1 — Pin the login and doctor requests to the vetted DNS answer
-Deps — · Status todo · Est 3 h
+Deps — · Status done 2026-10-28 · Est 3 h
 
 - **Scope:** close the gap that SECURITY.md § DNS resolve-and-pin documents. The
   `login` CLI's token exchange (`exchangeCode`, whose seams already take `lookup`)
