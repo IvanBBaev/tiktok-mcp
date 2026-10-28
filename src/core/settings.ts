@@ -73,7 +73,11 @@ export type ElicitationMode = (typeof ELICITATION_MODES)[number];
 export const TRANSPORTS = ['stdio', 'http'] as const;
 export type Transport = (typeof TRANSPORTS)[number];
 
-/** The six tool packages (TOOLS.md § 1 — 13 tools / 6 packages). */
+/**
+ * The seven tool packages (TOOLS.md § 1). `embed` is opt-in: it wraps TikTok's
+ * public oEmbed endpoint rather than the authenticated API, so it is part of
+ * `all` but not of `core`, and dropping it never touches another package.
+ */
 export const TOOL_PACKAGES = [
   'auth',
   'user',
@@ -81,6 +85,7 @@ export const TOOL_PACKAGES = [
   'publish',
   'publish-write',
   'analytics',
+  'embed',
 ] as const;
 export type ToolPackage = (typeof TOOL_PACKAGES)[number];
 

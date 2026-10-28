@@ -96,6 +96,12 @@ plumbing stay in the commit history where they belong.
   the token refresh it may trigger, now resolve, vet and pin like every other
   outbound request. The same `TT_DNS_PIN` switch and environment-proxy
   exception apply. See SECURITY.md § DNS resolve-and-pin.
+- **`tiktok_get_embed` — TikTok's official embed snippet for a public video.**
+  A new opt-in `embed` package (in `all`, not in `core`) reads TikTok's public
+  oEmbed endpoint: no login, no scope, no token sent. The video URL is checked
+  locally (https, a TikTok host, `/@user/video/<id>`) before any request; the
+  answer is size-capped and treated as untrusted. A new `oembed` egress class
+  admits exactly `https://www.tiktok.com/oembed`. See TOOLS.md § 3.17.
 
 ### Security
 

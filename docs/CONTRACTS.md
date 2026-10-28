@@ -1142,7 +1142,7 @@ hand-curated; only its "N tools" claim is compared).
 
 ```ts
 export interface ToolPackageSpec { name: PackageName; tools: readonly AnyToolSpec[] }
-export const PACKAGES: readonly ToolPackageSpec[];   // frozen, all six packages
+export const PACKAGES: readonly ToolPackageSpec[];   // frozen, all seven packages
 /** Every tool of every package, in manifest order. */
 export function allTools(packages?: readonly ToolPackageSpec[]): readonly AnyToolSpec[];
 
@@ -3612,3 +3612,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-27 | Batch publishing (TOOLS.md § 2.11). New module `tools/publish-batch` (`tiktok_publish_batch`, TOOLS.md § 3.15; `tiktok_get_video_analytics` renumbers to § 3.16). `mcp/define`: additive optional `ToolCtx.call`, set by `mcp/server`'s `callTool`. No existing signature changed | integrator |
 | 2026-10-28 | DNS resolve-and-pin (SECURITY.md § DNS resolve-and-pin). `core/http`: new exports `pinnedAgent`, `pinnedLookup` and `outboundLookup`; with `lookup` set, each attempt passes an undici `Agent` pinned to the vetted answers as `fetch`'s `dispatcher`. `api/context`: additive `ApiContext.lookup?` and `CreateApiContextOptions.lookup?`, forwarded to `ttRequest` and the upload `putChunk`. `core/settings`: additive `Settings.dnsPin` (`TT_DNS_PIN`, default on). No existing signature changed | integrator |
 | 2026-10-28 | DNS pin for `login` and `doctor` (roadmap H1). `cli/login`: new `LoginDeps` (`CliDeps` plus `lookup?`), and `runLogin` takes it. `cli/doctor`: new `DoctorDeps` (same shape), `runDoctor` takes it, and `DoctorContext` gains `lookup?` (`deps` is now `DoctorDeps`). Both pass `outboundLookup(settings.dnsPin, env, deps.lookup ?? dns.lookup)` to the token exchange, the display-name read, `--revoke`, the API probe and its refresh. Additive: every existing caller still compiles | integrator |
+| 2026-10-28 | oEmbed tool (roadmap A11, TOOLS.md § 3.17). New modules `api/embed` (`parseVideoUrl`, `getEmbed`, `OEMBED_ENDPOINT`, `VIDEO_URL_MAX_CHARS`, `OEMBED_MAX_ANSWER_CHARS`, `VideoRef`, `EmbedAnswer`) and `tools/embed` (`tiktok_get_embed`). `core/http`: new `EgressKind` (`'api' \| 'upload' \| 'oembed'`), `assertAllowedUrl` takes it, and additive `TtRequestOptions.egress?` (`'api'` default, or `'oembed'`, which refuses a bearer). `core/settings`: `ToolPackage` gains `embed` (in `all`, not in `core`). Additive: every existing caller still compiles | integrator |

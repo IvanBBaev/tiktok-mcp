@@ -52,6 +52,7 @@ const PACKAGE_SCOPES: Readonly<Record<ToolPackage, readonly string[]>> = Object.
   publish: ['video.publish'],
   'publish-write': ['video.publish', 'video.upload'],
   analytics: ['video.list'],
+  embed: [],
 });
 
 /** Reason sentences for the `reauth` hint — server-owned templates (TOOLS.md § 5.2 rule 3). */
@@ -91,6 +92,7 @@ function packageMatrix(granted: readonly string[]): Record<ToolPackage, string> 
     publish: packageStatus('publish', granted),
     'publish-write': packageStatus('publish-write', granted),
     analytics: packageStatus('analytics', granted),
+    embed: packageStatus('embed', granted),
   };
 }
 

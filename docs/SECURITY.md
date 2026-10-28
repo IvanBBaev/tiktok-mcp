@@ -162,6 +162,14 @@ from every sink):
   logs, error messages, or tool results; where an `upload_url` must be shown
   at all, only `origin + path` is shown — never the query string. The
   `upload_url` is opaque: used as returned, never rebuilt, never persisted.
+- **oEmbed egress** (`oembed` class, opt-in `embed` package, TOOLS.md § 3.17):
+  exactly `https://www.tiktok.com/oembed` — host `www.tiktok.com`, path
+  `/oembed`, port 443, no userinfo, same parser and `redirect: "error"` as
+  above. The `api` and `upload` classes never reach that host and the `oembed`
+  class reaches nothing else. **No bearer is ever sent** to it: `ttRequest`
+  refuses a bearer on the `oembed` class before any request. The caller's
+  video URL is only a query parameter, rebuilt from the parsed username and id
+  — the server still never fetches a user-supplied URL.
 - **Allowlist widening happens only by spec edit** — never by loosening to a
   blanket suffix match. Probe **P-9** records the upload hosts actually
   observed across runs; a new observed shape widens the pattern here first.

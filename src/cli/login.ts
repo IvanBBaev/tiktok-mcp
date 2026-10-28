@@ -135,6 +135,7 @@ export const PACKAGE_SCOPES: Readonly<Record<ToolPackage, readonly string[]>> =
     publish: Object.freeze(['video.publish']),
     'publish-write': Object.freeze(['video.publish', 'video.upload']),
     analytics: Object.freeze(['video.list']),
+    embed: Object.freeze([]),
   });
 
 /**

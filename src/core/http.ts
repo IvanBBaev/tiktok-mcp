@@ -76,6 +76,14 @@ const UPLOAD_HOST = 'open-upload.tiktokapis.com';
  */
 const REGIONAL_UPLOAD_HOST_RE = /^upload\.[a-z0-9-]{1,16}\.tiktokapis\.com$/;
 
+/**
+ * TikTok's public oEmbed endpoint (TOOLS.md § 3.17). The `oembed` egress class
+ * admits exactly this host **and** exactly this path — nothing else on
+ * `www.tiktok.com` is reachable, and no other class reaches this host.
+ */
+const OEMBED_HOST = 'www.tiktok.com';
+const OEMBED_PATH = '/oembed';
+
 // ---------------------------------------------------------------------------
 // documented defaults (mirrors of CONFIGURATION.md — never read from settings)
 // ---------------------------------------------------------------------------
@@ -131,12 +139,19 @@ const UPSTREAM_TEXT_MAX = 200;
  */
 export type RetryClass = 'read' | 'init' | 'chunk';
 
+/**
+ * Egress class a URL is checked against (SECURITY.md § Egress control):
+ * `api` — the API host; `upload` — the API host plus the upload hosts;
+ * `oembed` — exactly `https://www.tiktok.com/oembed`.
+ */
+export type EgressKind = 'api' | 'upload' | 'oembed';
+
 /** Injectable DNS seam — shape-compatible with `node:dns`'s `lookup`. */
 export type LookupFn = typeof import('node:dns').lookup;
 
 export interface TtRequestOptions {
   method: 'GET' | 'POST';
-  /** Must pass `assertAllowedUrl(url, "api")`; rejected before any fetch. */
+  /** Must pass `assertAllowedUrl(url, egress)`; rejected before any fetch. */
   url: string;
   /** JSON request payload. `POST` only — a `GET` with a body is a caller bug. */
   body?: unknown;
@@ -176,12 +191,18 @@ export interface TtRequestOptions {
    * item 4). Absent ⇒ unbounded. See {@link acquireHostSlot}.
    */
   maxConcurrent?: number;
+  /**
+   * Egress class `url` is checked against; defaults to `api`. `oembed` is the
+   * public, unauthenticated oEmbed endpoint (A11): a `bearer` is refused there,
+   * so an access token can never reach `www.tiktok.com`.
+   */
+  egress?: 'api' | 'oembed';
 }
 
 /** Options `oauthRequest` accepts: no retry class — OAuth is never retried. */
 export type OauthRequestOptions = Omit<
   TtRequestOptions,
-  'retryClass' | 'maxConcurrent'
+  'retryClass' | 'maxConcurrent' | 'egress'
 > & {
   /**
    * Accept a **loopback** origin instead of the pinned API host.
@@ -380,7 +401,7 @@ function egressBlocked(reason: string, shownUrl: string): TikTokError {
       `(${reason}): ${shownUrl}. No request was sent. This is a bug or an attack — ` +
       `the allowlist is a spec-level decision and is never widened at runtime.`,
     remediation:
-      'Only https://open.tiktokapis.com and the documented upload hosts are reachable. ' +
+      'Only https://open.tiktokapis.com, the documented upload hosts and https://www.tiktok.com/oembed are reachable. ' +
       'If TikTok started issuing a new upload host, the host pattern in docs/TIKTOK-API.md § 4.7 must be updated first.',
   });
 }
@@ -608,9 +629,10 @@ function upstreamFailure(opts: {
 // allowlist
 // ---------------------------------------------------------------------------
 
-function hostAllowed(hostname: string, kind: 'api' | 'upload'): boolean {
+function hostAllowed(hostname: string, kind: EgressKind): boolean {
   // Exact matches only — `endsWith` would accept `eviltiktokapis.com`, and a
   // non-anchored regex would accept `open.tiktokapis.com.attacker.tld`.
+  if (kind === 'oembed') return hostname === OEMBED_HOST;
   if (hostname === API_HOST) return true;
   if (kind === 'api') return false;
   return hostname === UPLOAD_HOST || REGIONAL_UPLOAD_HOST_RE.test(hostname);
@@ -632,7 +654,9 @@ function hostAllowed(hostname: string, kind: 'api' | 'upload'): boolean {
  * - `kind: "api"` ⇒ host is exactly `open.tiktokapis.com`;
  *   `kind: "upload"` ⇒ host is exactly `open.tiktokapis.com`, exactly
  *   `open-upload.tiktokapis.com`, or matches
- *   `^upload\.[a-z0-9-]{1,16}\.tiktokapis\.com$` (TIKTOK-API § 4.7 rule 2).
+ *   `^upload\.[a-z0-9-]{1,16}\.tiktokapis\.com$` (TIKTOK-API § 4.7 rule 2);
+ *   `kind: "oembed"` ⇒ host is exactly `www.tiktok.com` and the path is
+ *   exactly `/oembed` (the query string carries the video URL).
  *
  * Host comparison uses `URL.hostname`, i.e. the parser's IDNA/percent-decoded,
  * lower-cased form: `HTTPS://OPEN.TIKTOKAPIS.COM` is the allowlisted host,
@@ -640,7 +664,7 @@ function hostAllowed(hostname: string, kind: 'api' | 'upload'): boolean {
  * rejected. A trailing-dot host (`open.tiktokapis.com.`) is a different name
  * and is rejected too.
  */
-function checkAllowedUrl(url: string, kind: 'api' | 'upload'): URL | TikTokError {
+function checkAllowedUrl(url: string, kind: EgressKind): URL | TikTokError {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -660,6 +684,9 @@ function checkAllowedUrl(url: string, kind: 'api' | 'upload'): URL | TikTokError
   if (!hostAllowed(parsed.hostname, kind)) {
     return egressBlocked(`host is not allowlisted for ${kind} calls`, shown);
   }
+  if (kind === 'oembed' && parsed.pathname !== OEMBED_PATH) {
+    return egressBlocked(`path is not the oEmbed endpoint ${OEMBED_PATH}`, shown);
+  }
   return parsed;
 }
 
@@ -669,7 +696,7 @@ function checkAllowedUrl(url: string, kind: 'api' | 'upload'): URL | TikTokError
  * `URL` so callers reuse the normalized form instead of re-parsing. The rules
  * are `checkAllowedUrl`'s, above.
  */
-export function assertAllowedUrl(url: string, kind: 'api' | 'upload'): URL {
+export function assertAllowedUrl(url: string, kind: EgressKind): URL {
   const verdict = checkAllowedUrl(url, kind);
   if (isTikTokError(verdict)) throw verdict;
   return verdict;
@@ -716,7 +743,7 @@ function guardOauthUrl(
 /** Guard + a log line that carries origin and path only (never the query). */
 function guardUrl(
   raw: string,
-  kind: 'api' | 'upload',
+  kind: EgressKind,
   logger: Logger,
   fields: Record<string, unknown>,
 ): URL {
@@ -1441,7 +1468,16 @@ export async function ttRequest<T>(opts: TtRequestOptions): Promise<T> {
     });
   }
 
-  const target = guardUrl(opts.url, 'api', logger, fields);
+  const egress = opts.egress ?? 'api';
+  if (egress === 'oembed' && opts.bearer !== undefined) {
+    throw new TikTokError({
+      kind: 'validation',
+      code: 'invalid_params',
+      message:
+        'Invalid arguments: bearer: the oEmbed endpoint is public — an access token is never sent to it. No request was sent to TikTok.',
+    });
+  }
+  const target = guardUrl(opts.url, egress, logger, fields);
   // Defense in depth: the credential store registers tokens too, but an error
   // built here must never be able to quote one (SECURITY.md § Redaction).
   if (opts.bearer !== undefined) registerSecret(opts.bearer);

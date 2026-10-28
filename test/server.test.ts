@@ -260,6 +260,7 @@ test('all enables every package including publish-write', () => {
     'publish',
     'publish-write',
     'analytics',
+    'embed',
   ]);
 });
 
@@ -275,14 +276,14 @@ test('TT_PACKAGES_DENY subtracts from the selection', () => {
     resolveEnabledPackages(
       settings({ TT_TOOL_PACKAGES: 'all', TT_PACKAGES_DENY: 'publish,publish-write' }),
     ),
-    ['auth', 'user', 'video', 'analytics'],
+    ['auth', 'user', 'video', 'analytics', 'embed'],
   );
 });
 
 test('TT_WRITE_MODE=deny removes publish-write even when it was selected', () => {
   assert.deepEqual(
     resolveEnabledPackages(settings({ TT_TOOL_PACKAGES: 'all', TT_WRITE_MODE: 'deny' })),
-    ['auth', 'user', 'video', 'publish', 'analytics'],
+    ['auth', 'user', 'video', 'publish', 'analytics', 'embed'],
   );
 });
 
@@ -291,7 +292,7 @@ test('TT_PACKAGES_READONLY=1 removes publish-write as well', () => {
     resolveEnabledPackages(
       settings({ TT_TOOL_PACKAGES: 'all', TT_PACKAGES_READONLY: '1' }),
     ),
-    ['auth', 'user', 'video', 'publish', 'analytics'],
+    ['auth', 'user', 'video', 'publish', 'analytics', 'embed'],
   );
 });
 

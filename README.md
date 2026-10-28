@@ -1,6 +1,6 @@
 # tiktok-mcp-ai — Unofficial TikTok MCP Server
 
-| [![npm version](https://img.shields.io/npm/v/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![npm downloads](https://img.shields.io/npm/dm/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![node](https://img.shields.io/node/v/tiktok-mcp-ai?style=flat-square&logo=node.js&logoColor=white&label=node)](https://nodejs.org) | [![tools](https://img.shields.io/badge/tools-16-blue?style=flat-square)](https://ivanbbaev.github.io/tiktok-mcp/#tools) | [![License: MIT](https://img.shields.io/npm/l/tiktok-mcp-ai?style=flat-square&color=blue&label=license)](LICENSE) |
+| [![npm version](https://img.shields.io/npm/v/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=npm)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![npm downloads](https://img.shields.io/npm/dm/tiktok-mcp-ai?style=flat-square&logo=npm&logoColor=white&label=downloads)](https://www.npmjs.com/package/tiktok-mcp-ai) | [![node](https://img.shields.io/node/v/tiktok-mcp-ai?style=flat-square&logo=node.js&logoColor=white&label=node)](https://nodejs.org) | [![tools](https://img.shields.io/badge/tools-17-blue?style=flat-square)](https://ivanbbaev.github.io/tiktok-mcp/#tools) | [![License: MIT](https://img.shields.io/npm/l/tiktok-mcp-ai?style=flat-square&color=blue&label=license)](LICENSE) |
 | :--: | :--: | :--: | :--: | :--: |
 | [![CI](https://img.shields.io/github/actions/workflow/status/IvanBBaev/tiktok-mcp/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/IvanBBaev/tiktok-mcp/actions/workflows/ci.yml) | [![coverage](https://img.shields.io/codecov/c/github/IvanBBaev/tiktok-mcp/main?style=flat-square&logo=codecov&logoColor=white&label=coverage)](https://codecov.io/gh/IvanBBaev/tiktok-mcp) | [![last commit](https://img.shields.io/github/last-commit/IvanBBaev/tiktok-mcp?style=flat-square&logo=github&logoColor=white)](https://github.com/IvanBBaev/tiktok-mcp/commits/main) | [![MCP](https://img.shields.io/badge/MCP-server-orange?style=flat-square)](https://modelcontextprotocol.io) | [![Known Vulnerabilities](https://snyk.io/test/npm/tiktok-mcp-ai/badge.svg)](https://snyk.io/test/npm/tiktok-mcp-ai) |
 
@@ -499,6 +499,7 @@ summarized to their first sentence; the full text an agent sees is in
 | `publish-write` | `tiktok_cancel_scheduled` | no | Cancel a pending scheduled publish (from tiktok_list_scheduled) before the runner reaches it. |
 | `publish-write` | `tiktok_publish_batch` | no | Publish up to 10 videos/photo posts in one approval — across several profiles or files. |
 | `analytics` | `tiktok_get_video_analytics` | yes | Compute engagement analytics over the authenticated user's PUBLIC videos. |
+| `embed` | `tiktok_get_embed` | yes | Get TikTok's official embed snippet for a public TikTok video: the embed HTML, title, author and thumbnail, from TikTok oEmbed. |
 
 <!-- GENERATED:TOOLS:END -->
 
