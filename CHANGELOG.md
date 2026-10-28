@@ -97,6 +97,15 @@ plumbing stay in the commit history where they belong.
   outbound request. The same `TT_DNS_PIN` switch and environment-proxy
   exception apply. See SECURITY.md § DNS resolve-and-pin.
 
+### Security
+
+- **Transitive dependencies patched against open advisories.** `body-parser`
+  2.4.0 (denial of service via trailing bytes after a compressed body,
+  GHSA-27r3-jxmh-p828), `fast-uri` 3.1.9 (URI scheme spoofing, path
+  equivalence, host confusion and scheme injection) and `qs` 6.17.0
+  (`stringify` denial of service, GHSA-6pq8-jhm2-2vcw). `npm audit` now
+  reports 0 vulnerabilities.
+
 ## [1.0.0] - 2026-10-23
 
 The first version published to npm, and the first stable one: from here on
