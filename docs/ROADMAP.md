@@ -216,7 +216,7 @@ Deps — · Status done 2026-10-28 · Est 5 h
   - `npm run check` is green.
 
 #### H3 — Pin the server's token refresh to the vetted DNS answer
-Deps — · Status todo · Est 1 h
+Deps — · Status done 2026-10-29 · Est 1 h
 
 - **Scope:** `createApiContext` already pins every API request when it gets a
   `lookup`, but the token refresh it triggers (`ensureFreshAccessToken`) runs
