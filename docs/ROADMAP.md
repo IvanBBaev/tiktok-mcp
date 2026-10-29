@@ -215,6 +215,23 @@ Deps — · Status done 2026-10-28 · Est 5 h
   - The host guard admits exactly the oEmbed endpoint.
   - `npm run check` is green.
 
+#### H3 — Pin the server's token refresh to the vetted DNS answer
+Deps — · Status todo · Est 1 h
+
+- **Scope:** `createApiContext` already pins every API request when it gets a
+  `lookup`, but the token refresh it triggers (`ensureFreshAccessToken`) runs
+  unpinned. Forward the context's `lookup` into the refresh deps, so the server,
+  `run-queue` and `doctor` pin the refresh without wiring of their own. Drop
+  `doctor`'s refresh wrapper, which becomes redundant.
+- **Owns:** `src/api/context.ts`, `src/cli/doctor.ts` (only the refresh wrapper),
+  `test/dns-pin.test.ts`.
+- **Shared:** `docs/SECURITY.md` (only § DNS resolve-and-pin), `CHANGELOG.md`,
+  and a `docs/CONTRACTS.md` row.
+- **Acceptance:**
+  - A test proves that a refresh triggered through an `ApiContext` with a
+    `lookup` receives that `lookup`, and that it gets none without one.
+  - `npm run check` is green.
+
 #### B1 — Commercial Content API package (`adlib`)
 Deps — · Status blocked: owner approval (optional 1.4) · Est 12 h
 
