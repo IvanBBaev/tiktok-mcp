@@ -166,6 +166,8 @@ Evidence: PRD-04, PRD-05, PRD-07, ARC-02.
 
 ## 5. Owner decisions (no agent can make these)
 
+The owner's answers, dated 2026-10-30, are in [`DECISIONS.md`](DECISIONS.md).
+
 1. **Q1 — First version:** 0.9.0 (recommended), or 1.0.0 published manually
    without provenance? Blocks `REL-R1`.
 2. **Q2 — Public posting:** is a public-posting product wanted at all? If yes,

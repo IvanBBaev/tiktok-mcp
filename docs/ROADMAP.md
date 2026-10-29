@@ -159,8 +159,9 @@ both sides, or you regenerate the file.
 
 ### Which items can run together
 H1, H2 and A11 share no owned file, so all three can run at once. Merge order does
-not matter; H2 first keeps the lockfile out of the others' rebases. B1, B2-SPIKE and
-B2 wait for the owner, and B3 waits for B2.
+not matter; H2 first keeps the lockfile out of the others' rebases. B2-SPIKE and
+B2 are frozen by the round-3 scope freeze (PRD-R1) until the 90-day review
+PRD-R8, and B3 waits for B2. B1 moved to the explicit non-goals.
 
 #### H1 — Pin the login and doctor requests to the vetted DNS answer
 Deps — · Status done 2026-10-28 · Est 3 h
@@ -234,21 +235,14 @@ Deps — · Status done 2026-10-29 · Est 1 h
     `lookup` receives that `lookup`, and that it gets none without one.
   - `npm run check` is green.
 
-#### B1 — Commercial Content API package (`adlib`)
-Deps ARC-R7 · Status blocked: owner approval (optional 1.4) · Est 12 h
-
-- **Scope:** ad search, ad details and advertiser search over a client-credentials
-  token kept separate from user OAuth. EU-only data.
-- **Before anyone starts:** the owner must approve the item and the new auth mode.
-
 #### B2-SPIKE — Can an individual developer get Business API access?
-Deps — · Status blocked: owner (apply for the app in the TikTok developer portal) · Est 2 h
+Deps — · Status blocked: frozen until PRD-R8 (round-3 scope freeze), then owner (apply in the TikTok developer portal) · Est 2 h
 
 - **Scope:** apply for access, record the outcome and limits in
   `docs/probes/PROBE-LOG.md`, and give a GO or NO-GO for B2.
 
 #### B2 — Business Accounts package
-Deps B2-SPIKE, ARC-R7 · Status todo · Est 30 h
+Deps B2-SPIKE, ARC-R7 · Status blocked: frozen until PRD-R8 (round-3 scope freeze) · Est 30 h
 
 - **Scope:** a second OAuth provider per profile (`business_id` = `open_id`) and
   these tools:
@@ -261,7 +255,7 @@ Deps B2-SPIKE, ARC-R7 · Status todo · Est 30 h
   Start no other settings item next to it.
 
 #### B3 — `comment.update` webhook drives resource updates
-Deps B2 · Status todo · Est 3 h
+Deps B2 · Status blocked: frozen until PRD-R8 (round-3 scope freeze) · Est 3 h
 
 - **Scope:** route `comment.update` events through the existing webhook receiver
   and subscription hub (1.2 work, done) to comment resources.
@@ -275,6 +269,9 @@ is blocked. Read these before claiming an item:
 - [`docs/reviews/round3/SYNTHESIS.md`](reviews/round3/SYNTHESIS.md): roles,
   scores, themes, resolved conflicts, owner decisions Q1–Q7 and the recommended
   order.
+- [`docs/reviews/round3/DECISIONS.md`](reviews/round3/DECISIONS.md): the owner
+  decisions Q1–Q7 and the answers to every report's open questions
+  (2026-10-30), plus the checklists for the steps only the owner can do.
 - The eight role reports in [`docs/reviews/round3/`](reviews/round3/). Each item
   below keeps its report ID, so `REL-R2` is detailed under that heading in
   `release-devops.md`, with full evidence and acceptance criteria.
@@ -298,6 +295,13 @@ branch per item, rebase and fast-forward, and the last commit flips the item's
 
 **Release-blocking** marks an item that must be `done` before the first tag.
 Merged items list the report IDs they absorb.
+
+**Scope freeze** (PRD-R1, decided 2026-10-30): no new tools, tool packages or
+`TT_*` settings until 90 days after the first npm publish, or until 3
+independent issues ask for the same feature. Fixes, hardening and removals stay
+allowed. The first version is **0.9.0**, and the project is positioned as a
+local-first tool for reading, inbox drafts and private test posts, not as a
+public-posting product (DECISIONS.md Q1, Q2).
 
 ### Round-3 shared-file rules
 These add to the table above.
@@ -477,11 +481,11 @@ Deps ARC-R1 · Status todo · Est 3 h
 - **Acceptance:** see `architecture.md` § ARC-R2.
 
 #### REL-R1 — Decide the first version and cut the changelog
-Deps — · Status blocked: owner (Q1, recommended 0.9.0) · Est 1.5 h
+Deps — · Status todo · Est 1.5 h
 
 - **Absorbs:** PRD-R3.
 - **Scope:** **Release-blocking.**
-  - Apply the owner's Q1 choice. The recommended path:
+  - Apply the owner's Q1 choice, 0.9.0 (DECISIONS.md Q1):
     1. Fold `[1.0.0]` and `[Unreleased]` into `[0.9.0] - <publish date>`.
     2. Say that 0.7.0, 0.8.0 and 1.0.0 were internal milestones that were never
        published.
@@ -493,7 +497,7 @@ Deps — · Status blocked: owner (Q1, recommended 0.9.0) · Est 1.5 h
   - `npm run check` is green.
 
 #### PRD-R1 — Declare a scope freeze and defer the B-track
-Deps — · Status blocked: owner (Q4) · Est 0.5 h
+Deps — · Status done 2026-10-30 · Est 0.5 h
 
 - **Scope:** **Release-blocking.**
   - Write a freeze: no new tools, tool packages or `TT_*` settings until 90
@@ -514,24 +518,43 @@ Deps PRD-R1 · Status todo · Est 2 h
   - publish-status subscriptions;
   - `tiktok_get_embed`.
 
-  The label goes in TOOLS.md, the tool descriptions and CHANGELOG. Add
-  `TT_EXPERIMENTAL=1` only if the owner chooses it in Q5.
+  The label goes in TOOLS.md, the tool descriptions and CHANGELOG. No
+  `TT_EXPERIMENTAL` setting: Q5 chose label only.
 - **Acceptance:** see `product.md` § PRD-R6.
 
 #### DX-R3 — Make the consent-dialog state visible and apply the chosen default
-Deps — · Status blocked: owner (Q3, consent default) · Est 3 h
+Deps — · Status todo · Est 3 h
 
 - **Scope:** **Release-blocking.**
   - Add `consent_dialog: active|unavailable|off` to `get_auth_status`.
   - Add a `note` hint on apply when no dialog ran.
   - Add a client support matrix to `CLIENTS.md`.
-  - Apply the `TT_ELICITATION` default that the owner chooses in Q3.
+  - Change the `TT_ELICITATION` default to `required` (DECISIONS.md Q3). The
+    `consent_unavailable` error names `TT_ELICITATION=auto` as the opt-out and
+    says what it gives up. Update CONFIGURATION.md, SECURITY.md, the README
+    and CHANGELOG.
 - **Acceptance:** see `mcp-ai-dx.md` § DX-R3.
+
+#### REL-R8 — Skip the Marketplace publish cleanly when VSCE_PAT is unset
+Deps — · Status todo · Est 0.5 h
+
+- **Scope:** **Release-blocking.** The VS Code extension is deferred (Q6), so
+  `VSCE_PAT` does not exist. Today `publish-vscode.yml` would fail the release
+  run.
+  - Expose `secrets.VSCE_PAT != ''` as a job-level env flag.
+  - When it is false, skip the Marketplace step and print a `::notice::` that
+    names DECISIONS.md § 4.5.
+  - Leave every other gate in the workflow unchanged.
+- **Owns:** `.github/workflows/publish-vscode.yml`.
+- **Acceptance:**
+  - `actionlint` (or the repo's workflow lint) passes.
+  - A `workflow_dispatch` run without the secret ends green with the notice.
+  - `npm run check` is green.
 
 ### Release-blocking owner steps and what follows them
 
 #### QA-R1 — Run the live-validation session against a TikTok sandbox app
-Deps — · Status blocked: owner (sandbox app + own account as target user, human at the keyboard) · Est 4 h
+Deps — · Status blocked: owner (sandbox app + own private account as target user, human at the keyboard; checklist in DECISIONS.md § 4.1) · Est 4 h
 
 - **Absorbs:** PLT-R4 and PRD-R2.
 - **Scope:** **Release-blocking** for any "posting works" claim. Run one
@@ -548,6 +571,7 @@ Deps — · Status blocked: owner (sandbox app + own account as target user, hum
   - Record P-1..P-14 in `docs/probes/PROBE-LOG.md`.
   - Capture the raw responses for QA-R2.
   - Note whether a draft works on a **public** account.
+  - P-10 is required. P-8 and P-9 may be deferred (DECISIONS.md Q7).
   - Every mismatch with the spec becomes its own fix item before the tag.
 - **Acceptance:** see `qa.md` § QA-R1 and `product.md` § PRD-R2.
 
@@ -569,11 +593,11 @@ Deps QA-R1, DX-R2, PLT-R3 · Status todo · Est 4 h
     reach: their own analytics, drafts in the inbox, and private test posts.
   - Add a box that says what TikTok lets an individual do.
   - Give an honest setup time and a sandbox-first fast path.
-  - Shape the text by Q2.
+  - Shape the text by Q2: a local-first tool, not a public-posting product.
 - **Acceptance:** see `product.md` § PRD-R5.
 
 #### REL-R3 — Owner bootstrap: Pages, first npm publish, npm settings and secrets
-Deps REL-R1, REL-R2, SEC-R8, LGL-R1, LGL-R5, QA-R1 · Status blocked: owner (G-4, G-14, npm 2FA, Q6) · Est 1 h
+Deps REL-R1, REL-R2, REL-R8, SEC-R8, LGL-R1, LGL-R5, QA-R1 · Status blocked: owner (G-4, G-14, npm login and 2FA; checklists in DECISIONS.md § 4.2–4.4) · Est 1 h
 
 - **Absorbs:** PRD-R4, plus IMPLEMENTATION-PLAN gates G-4 and G-14.
 - **Scope:** **Release-blocking.** Follow the runbook in `release-devops.md`
@@ -583,7 +607,9 @@ Deps REL-R1, REL-R2, SEC-R8, LGL-R1, LGL-R5, QA-R1 · Status blocked: owner (G-4
   3. Configure the trusted publisher. Select the "Publish" action and set
      "disallow tokens".
   4. Revoke the dormant `NPM_TOKEN`.
-  5. Create `VSCE_PAT`, or defer the extension (Q6).
+  5. The extension is deferred (Q6). The Marketplace step skips (REL-R8)
+     until the owner creates the publisher and `VSCE_PAT` (DECISIONS.md
+     § 4.5).
   6. Push the tag, then verify npm, the GitHub release, the MCP registry and
      the Marketplace.
 - **Acceptance:**
@@ -609,8 +635,9 @@ report.
 #### ARC-R3 — Gate CONTRACTS.md against the code
 Deps ARC-R2 · Status todo · Est 6 h
 
-- **Scope:** CONTRACTS.md is 3616 lines and has drifted. Generate it, or check
-  it, against the exported signatures.
+- **Scope:** CONTRACTS.md is 3616 lines and has drifted. Shrink it to the
+  invariants plus signatures generated from the exported types, and fail a
+  gate when they drift (DECISIONS.md, architecture Q2).
 
 #### ARC-R4 — Extract one executeWrite pipeline for the write tools
 Deps PLT-R2 · Status todo · Est 5 h
@@ -660,14 +687,17 @@ Deps — · Status todo · Est 2 h
 Deps — · Status todo · Est 3 h
 
 - **Scope:** `run-queue` runs `schedule.json` entries as already consented.
-  Sign them, or document the trust boundary.
+  Document the trust boundary: write access to the env directory equals
+  publish rights. No HMAC (DECISIONS.md, security Q1).
 
 #### SEC-R5 — Webhook receiver hardening
 Deps — · Status todo · Est 3 h
 
 - **Scope:**
   - Verify the signature before reading the env file.
-  - Verify the signature for every profile's app, not only the first.
+  - Verify the signature for every profile's app, not only the first. Each
+    profile may carry its own app, so this is a functional bug (DECISIONS.md,
+    security Q3).
 
 #### SEC-R6 — Bounded response bodies
 Deps ARC-R1 · Status todo · Est 2 h
@@ -681,6 +711,8 @@ Deps — · Status todo · Est 2 h
   - URL prefix checks
   - token length bounds
   - timeouts
+  - `TT_HTTP_INSECURE` stays, with its hardening (DECISIONS.md, security Q4)
+  - `doctor` warns once when an environment proxy disables the DNS pin
 
 #### PLT-R5 — Fix the photo body shape: top-level is_aigc and mode-specific fields
 Deps QA-R1 · Status todo · Est 2 h
@@ -705,10 +737,10 @@ Deps — · Status todo · Est 1 h
   drifts.
 
 #### PLT-R9 — Decide B1/B2 feasibility and record the access paths
-Deps — · Status blocked: owner (apply for Business API / Commercial Content API access) · Est 2 h
+Deps — · Status blocked: frozen until PRD-R8 (round-3 scope freeze) · Est 2 h
 
-- **Scope:** decide whether B1 and B2 are feasible and record the access paths.
-  Feeds B2-SPIKE.
+- **Scope:** decide whether B2 is feasible and record the access paths. B1 is a
+  non-goal. Feeds B2-SPIKE.
 
 #### LGL-R2 — Complete the data-deletion story
 Deps LGL-R1 · Status todo · Est 4 h
@@ -717,15 +749,21 @@ Deps LGL-R1 · Status todo · Est 4 h
   - a purge command
   - clean-up after token revocation
   - age-based retention
+  - an operator privacy-policy and terms template with the GDPR roles filled in
+    (DECISIONS.md, legal Q6)
 
 #### LGL-R4 — Tighten consent on the unattended and multi-post write paths
-Deps PLT-R3, DX-R3 · Status blocked: owner (Q3) · Est 5 h
+Deps PLT-R3, DX-R3 · Status todo · Est 5 h
 
 - **Scope:** tighten consent on the apply-mode, `auto` fallback, batch and
-  `run-queue` paths.
+  `run-queue` paths (DECISIONS.md Q3 and legal Q2–Q3):
+  - Cut the schedule horizon from 30 days to a fixed 7 days. This is a
+    constant, not a setting.
+  - Apply mode states that the operator's audit is a precondition for public
+    visibility.
 
 #### DX-R4 — Replace the duplicated generic outputSchema with per-tool data schemas
-Deps — · Status todo · Est 5 h
+Deps QA-R1 · Status todo · Est 5 h
 
 - **Scope:** the duplicated generic output schema is 28% of `tools/list`.
   Replace it with one data schema per tool.
@@ -766,7 +804,9 @@ Deps REL-R2 · Status todo · Est 3 h
 - **Scope:**
   - job timeouts and concurrency cancel;
   - run the test suite once, not three times on ubuntu/22;
-  - an honest Codecov upload, which fails silently today;
+  - an honest Codecov upload, which fails silently today: tokenless OIDC
+    (`use_oidc: true`), failing on upload errors on `main` (DECISIONS.md, QA
+    Q3);
   - a docs-only light path that keeps the sync gates;
   - decide whether the Node 26 leg becomes required.
 
@@ -790,12 +830,16 @@ Deps REL-R1 · Status todo · Est 2 h
   - Trim the tarball.
 
 #### REL-R7 — Harden the publish path with an environment and rulesets
-Deps REL-R3 · Status blocked: owner (Q6) · Est 1 h
+Deps REL-R3 · Status todo · Est 1 h
 
-- **Scope:**
-  - a protected `npm` environment;
-  - branch protection on `main`;
-  - a `v*` tag ruleset.
+- **Scope** (DECISIONS.md Q6), compatible with the direct-push,
+  fast-forward workflow:
+  - a protected `npm` environment, limited to `v*` tags and named in the npm
+    trusted-publisher configuration;
+  - protection on `main` that blocks force-pushes and deletion, with no
+    required pull requests;
+  - a `v*` tag ruleset: only the owner creates tags, and nobody updates or
+    deletes them.
 
 #### PRD-R7 — Define the 90-day success metrics and the feedback channel
 Deps REL-R3 · Status todo · Est 2 h
@@ -813,6 +857,12 @@ Deps REL-R3 · Status todo · Est 4 h
 - **Scope:** separate the user docs from the internal specs.
 
 ## Explicit non-goals
+- **B1, the Commercial Content API package (`adlib`)**: moved here by the
+  round-3 scope freeze (PRD-R1, 2026-10-30). It needs a separate
+  client-credentials auth mode for EU-only ad data, which is far from the
+  local-first product.
+- **A hosted public-posting service**: public posting needs an audited app
+  held by an operator who posts for others (DECISIONS.md Q2).
 - No ads management, no scraping or
   unofficial endpoints, no multi-tenant hosted deployment, no token brokering
   for third parties, no engagement automation (likes/follows) — both unsupported
