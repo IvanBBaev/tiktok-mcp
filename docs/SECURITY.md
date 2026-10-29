@@ -192,9 +192,11 @@ the URL's hostname, so a pin cannot launder a wrong host. The agent is
 destroyed when the attempt settles.
 
 The production `lookup` is `node:dns` `lookup`, wired at the composition roots
-(the server entry, `run-queue`, `login` and `doctor`). In `login` it covers the
-token exchange, the display-name read and `--revoke`; in `doctor` it covers
-the API probe and the token refresh the probe may trigger. It is on by default and controlled by
+(the server entry, `run-queue`, `login` and `doctor`). In the server and
+`run-queue` it covers every API request, upload PUT and the token refresh
+behind them (the `ApiContext` hands its `lookup` to the refresh); in `login` it
+covers the token exchange, the display-name read and `--revoke`; in `doctor` it
+covers the API probe and the token refresh the probe may trigger. It is on by default and controlled by
 `TT_DNS_PIN` (CONFIGURATION.md). It is **off automatically under Node's
 environment proxy** (`NODE_USE_ENV_PROXY` set plus any `HTTPS_PROXY` /
 `HTTP_PROXY`, either case): there the proxy resolves the name, a pin would
@@ -258,7 +260,9 @@ option. The run is recorded in `docs/probes/PROBE-LOG.md` § P-15.
 The first pinned release left the `login` token exchange and the `doctor`
 requests unpinned, on the grounds that both run interactively at the
 operator's terminal against the fixed `open.tiktokapis.com`; roadmap item H1
-closed that gap with the same `TT_DNS_PIN` switch.
+closed that gap with the same `TT_DNS_PIN` switch. The server's own token
+refresh stayed unpinned until roadmap item H3 forwarded the `ApiContext`'s
+`lookup` into it.
 
 ### Local file confinement (`TT_MEDIA_ROOT`)
 

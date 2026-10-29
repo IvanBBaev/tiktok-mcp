@@ -9,7 +9,8 @@
  *
  * 1. **The attempt carries a pin.** With a `lookup` seam, each `fetch` gets an
  *    undici dispatcher, and the dispatcher is destroyed once the attempt
- *    settles. Without the seam, `fetch` gets no dispatcher at all.
+ *    settles. Without the seam, `fetch` gets no dispatcher at all. An
+ *    `ApiContext` hands the same seam to the token refresh it triggers.
  * 2. **The pin really pins.** A real `fetch` to a hostname that cannot resolve
  *    (`.invalid`) reaches a loopback server through `pinnedAgent`. This is the
  *    only test that opens a socket, and it never leaves 127.0.0.1.
@@ -137,6 +138,26 @@ test('an ApiContext built with a lookup seam vets and pins every api request', a
     );
   });
   assert.equal(play.inits.length, 0, 'a private answer never opens a socket');
+});
+
+test('an ApiContext hands its lookup seam to the token refresh, and none without one', async () => {
+  const seen: (LookupFn | undefined)[] = [];
+  const lookup = fixedLookup(ROUTABLE);
+  for (const withLookup of [true, false]) {
+    const ctx = createApiContext({
+      profile: 'DEFAULT',
+      settings: loadSettings({}),
+      log: createLogger({ level: 'error' }),
+      clock: mockClock(),
+      refresh: (_profile, deps) => {
+        seen.push(deps.lookup);
+        return Promise.resolve('test-access-token-DEFAULT');
+      },
+      ...(withLookup ? { lookup } : {}),
+    });
+    await ctx.getAccessToken();
+  }
+  assert.deepEqual(seen, [lookup, undefined]);
 });
 
 // ---------------------------------------------------------------------------

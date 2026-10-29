@@ -64,7 +64,8 @@ export interface ApiContext {
 
   /**
    * DNS seam for resolve-and-pin (SECURITY.md § DNS resolve-and-pin), handed
-   * to every API request and upload PUT. Absent ⇒ `fetch` resolves unpinned.
+   * to every API request, upload PUT and the token refresh behind
+   * `getAccessToken`. Absent ⇒ `fetch` resolves unpinned.
    */
   lookup?: LookupFn;
 }
@@ -118,6 +119,7 @@ export function createApiContext(opts: CreateApiContextOptions): ApiContext {
         logger: log,
         settings: opts.settings,
         ...(env === undefined ? {} : { env }),
+        ...(opts.lookup === undefined ? {} : { lookup: opts.lookup }),
         ...(tokenOpts?.force === true ? { force: true } : {}),
       }),
   };

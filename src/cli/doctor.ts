@@ -54,7 +54,6 @@ import { DEFAULT_STALE_MS, canonicalPath, envLockDir } from '../core/env-lock.js
 import { isTikTokError } from '../core/errors.js';
 import { outboundLookup, type LookupFn } from '../core/http.js';
 import { createLogger, type Logger } from '../core/log.js';
-import { ensureFreshAccessToken } from '../core/oauth.js';
 import {
   DEFAULT_PROFILE,
   isLoopbackHost,
@@ -679,14 +678,8 @@ const probeCheck: Check = {
       log: ctx.logger,
       clock: ctx.clock,
       env: ctx.env,
-      ...(lookup === undefined
-        ? {}
-        : {
-            lookup,
-            // The token refresh the probe may trigger is pinned as well.
-            refresh: async (profile, refreshDeps) =>
-              await ensureFreshAccessToken(profile, { ...refreshDeps, lookup }),
-          }),
+      // The context pins the token refresh the probe may trigger as well.
+      ...(lookup === undefined ? {} : { lookup }),
     });
     try {
       const user = await getUserInfo(api, ['open_id', 'display_name']);

@@ -111,6 +111,10 @@ plumbing stay in the commit history where they belong.
   equivalence, host confusion and scheme injection) and `qs` 6.17.0
   (`stringify` denial of service, GHSA-6pq8-jhm2-2vcw). `npm audit` now
   reports 0 vulnerabilities.
+- **The server's token refresh is pinned to the vetted DNS answer.** The
+  refresh that `getAccessToken` triggers in the server and `run-queue` now
+  gets the same resolve-and-pin seam as the API requests it guards, under the
+  same `TT_DNS_PIN` switch. See SECURITY.md § DNS resolve-and-pin.
 
 ## [1.0.0] - 2026-10-23
 
