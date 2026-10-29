@@ -122,6 +122,8 @@ getting in each other's way. Each item is a heading
 `#### <ID> — <title>`, and the line under it says what it waits for and where it
 stands: `Deps <ids> · Status <todo|done|blocked: …> · Est <h>`. The claim script of
 the `%-start-on-roadmap` workflow reads these lines from the committed `main`.
+The round-3 review items are in [§ Round-3 release track](#round-3-release-track).
+The release-blocking ones go first.
 
 ### How an item runs
 - **One item per branch.** The branch is `wp/<ID>` (the branch name is the claim).
@@ -150,7 +152,7 @@ both sides, or you regenerate the file.
 | `docs/TOOLS.md` | A new tool takes the **next free** section number (today § 3.17). Never renumber existing sections in a parallel item. |
 | `src/tools/index.ts` | Add the import or registration as a new line. Never reorder existing lines. |
 | `README.md`, `server.json`, manifest snapshot, `.env.example` | Generated: after the rebase, run `npm run build && npm run sync:write && npm run docs:env`. Never merge these by hand. |
-| `package.json`, `package-lock.json` | Only **H2** changes dependencies. No other item in this queue may add one. If one must, it waits for H2 to be `done`. On a lockfile conflict, take `main`'s lockfile and rerun `npm install`. |
+| `package.json`, `package-lock.json` | Only **H2** (and in round 3 only **SEC-R8**) changes dependencies. No other item in this queue may add one. If one must, it waits for H2 to be `done`. On a lockfile conflict, take `main`'s lockfile and rerun `npm install`. |
 | `src/core/settings.ts`, `docs/CONFIGURATION.md`, `scripts/gen-env-example.ts`, `test/settings.test.ts` | Settings hotspot: at most one live item adds a `TT_*` setting. None of the items below needs one. |
 | `src/core/http.ts` | Only **A11** edits it (the egress allowlist). H1 uses the existing seams (`outboundLookup`, `LookupFn`) and must not change this file. |
 | `docs/SECURITY.md` | H1 edits only § DNS resolve-and-pin. A11 edits only the egress host list. |
@@ -233,7 +235,7 @@ Deps — · Status done 2026-10-29 · Est 1 h
   - `npm run check` is green.
 
 #### B1 — Commercial Content API package (`adlib`)
-Deps — · Status blocked: owner approval (optional 1.4) · Est 12 h
+Deps ARC-R7 · Status blocked: owner approval (optional 1.4) · Est 12 h
 
 - **Scope:** ad search, ad details and advertiser search over a client-credentials
   token kept separate from user OAuth. EU-only data.
@@ -246,7 +248,7 @@ Deps — · Status blocked: owner (apply for the app in the TikTok developer por
   `docs/probes/PROBE-LOG.md`, and give a GO or NO-GO for B2.
 
 #### B2 — Business Accounts package
-Deps B2-SPIKE · Status todo · Est 30 h
+Deps B2-SPIKE, ARC-R7 · Status todo · Est 30 h
 
 - **Scope:** a second OAuth provider per profile (`business_id` = `open_id`) and
   these tools:
@@ -265,6 +267,550 @@ Deps B2 · Status todo · Est 3 h
   and subscription hub (1.2 work, done) to comment resources.
 - **Owns:** a new handler module next to `mcp/webhook`.
 - **Shared:** `src/index.ts` wiring.
+
+## Round-3 release track
+The round-3 review (2026-10-29) asked whether the first public release can ship.
+It found that nothing has shipped or met the real API, and that the release path
+is blocked. Read these before claiming an item:
+- [`docs/reviews/round3/SYNTHESIS.md`](reviews/round3/SYNTHESIS.md): roles,
+  scores, themes, resolved conflicts, owner decisions Q1–Q7 and the recommended
+  order.
+- The eight role reports in [`docs/reviews/round3/`](reviews/round3/). Each item
+  below keeps its report ID, so `REL-R2` is detailed under that heading in
+  `release-devops.md`, with full evidence and acceptance criteria.
+
+The prefixes are:
+
+| Prefix | Report |
+|---|---|
+| ARC | `architecture.md` |
+| SEC | `security.md` |
+| QA | `qa.md` |
+| PLT | `tiktok-platform.md` |
+| DX | `mcp-ai-dx.md` |
+| PRD | `product.md` |
+| LGL | `legal-compliance.md` |
+| REL | `release-devops.md` |
+
+These items run under the same rules as the parallel work queue above: one
+branch per item, rebase and fast-forward, and the last commit flips the item's
+`Status` line.
+
+**Release-blocking** marks an item that must be `done` before the first tag.
+Merged items list the report IDs they absorb.
+
+### Round-3 shared-file rules
+These add to the table above.
+
+| File | Rule |
+|---|---|
+| Publish plan and consent (`src/api/publish.ts`, `src/mcp/consent.ts`, `src/tools/publish-*.ts`) | Serialised: PLT-R1 → SEC-R1 → PLT-R2. No other item edits these files while one of the three is live. |
+| `README.md` hand-written sections | DX-R2 first, then PRD-R5. PRD-R6 adds only the experimental labels. |
+| `package.json`, `package-lock.json` | Only SEC-R8 changes dependencies, and only REL-R6 changes the `version`, `types` or `files` fields. |
+| `docs/AUDIT.md`, `docs/SETUP-TIKTOK-APP.md` | Owned by PLT-R3. PRD-R5 edits these files only after PLT-R3 is `done`. |
+| `site/*` | LGL-R1 owns `privacy.html` and `terms.html`. LGL-R5 owns the styles and fonts. |
+| Test clock helpers (`test/helpers.ts` and the `runVirtual` copies) | Owned by REL-R2. Merge it first, because every other item's CI depends on it. |
+| Settings hotspot | DX-R3 changes only a default value. PRD-R6 adds `TT_EXPERIMENTAL` only if the owner chooses that in Q5. ARC-R7 is design-only. |
+
+### Release-blocking, codeable now
+
+#### REL-R2 — Make the virtual test clock deterministic
+Deps — · Status todo · Est 3 h
+
+- **Absorbs:** QA-R3.
+- **Scope:** **Release-blocking.**
+  - Replace the four copies of `runVirtual`, which add 500 ms per event-loop
+    turn, with one shared helper in `test/helpers.ts` that advances to the next
+    pending timer.
+  - Add a regression test. It injects extra idle event-loop turns before apply
+    and asserts that the plan survives its 600 s TTL. This was the cc-g7
+    `plan_not_found` failure on `main`.
+- **Owns:** `test/helpers.ts` and the suites that carry a copy of `runVirtual`.
+- **Acceptance:**
+  - No local `runVirtual` remains.
+  - `npm run check` is green locally and on CI three times in a row.
+
+#### ARC-R1 — Classify retry class by endpoint table, failing closed
+Deps — · Status todo · Est 4 h
+
+- **Scope:** **Release-blocking.**
+  - A `(method, path)` table decides the retry class: known reads → `read`,
+    chunk PUT → `chunk`, and every other non-GET, unknown ones included →
+    `init`.
+  - A caller may only make its class stricter.
+  - A 401 is replayed only for `read`.
+- **Owns:** the retry-class code in `src/core/http.ts` and its tests.
+- **Acceptance:** see `architecture.md` § ARC-R1.
+
+#### PLT-R1 — Default interaction toggles to off and fix the docs that misread the rule
+Deps — · Status todo · Est 2 h
+
+- **Scope:** **Release-blocking.**
+  - Comment, duet and stitch default to off (`src/api/publish.ts:379-399`).
+    TikTok's UX rules require the user to turn them on.
+  - Fix the docs that say otherwise.
+- **Acceptance:** see `tiktok-platform.md` § PLT-R1.
+
+#### SEC-R2 — Untrusted-content notice on upstream text, plus server instructions
+Deps — · Status todo · Est 2 h
+
+- **Scope:** **Release-blocking.**
+  - Every tool that returns upstream text gets a shared notice suffix. This is
+    what SECURITY.md already claims.
+  - Add MCP server `instructions`.
+  - Mark the oEmbed `html` field as non-renderable.
+  - DX-R5 keeps only the token-budget cut.
+- **Acceptance:** see `security.md` § SEC-R2.
+
+#### SEC-R8 — Dependency hygiene before the first release
+Deps — · Status todo · Est 1 h
+
+- **Absorbs:** REL-R5.
+- **Scope:** **Release-blocking.**
+  - Merge #37 now.
+  - Rebase #36 and #38. They are red only because their base predates the
+    audit fix. Then merge them or close them.
+  - Add a dependabot cooldown.
+  - Consider `--audit-level=moderate` for production dependencies.
+- **Owns:** `package.json`, `package-lock.json`, `.github/dependabot.yml`.
+- **Acceptance:**
+  - No dependabot PR is open.
+  - `npm audit` reports 0 vulnerabilities.
+  - `npm run check` is green.
+
+#### DX-R2 — Correct the README demo and stale facts, and guard them with a test
+Deps — · Status todo · Est 1.5 h
+
+- **Scope:** **Release-blocking.**
+  - Flatten the Quick demo JSON. Today the strict schema rejects `post_info`.
+  - Change "four write tools" to six.
+  - Qualify the `npx` claim until the package is published.
+  - Add `embed` to the package list.
+  - Add a test that validates every fenced tool-call JSON in `README.md` and
+    `docs/*.md` against the zod schemas.
+- **Acceptance:** see `mcp-ai-dx.md` § DX-R2.
+
+#### DX-R6 — Fix the first-run credential diagnostics
+Deps — · Status todo · Est 2 h
+
+- **Scope:** **Release-blocking.** Missing or invalid credentials on first start
+  produce one clear, actionable error.
+- **Acceptance:** see `mcp-ai-dx.md` § DX-R6.
+
+#### LGL-R1 — Make the privacy policy and terms describe the built system, and gate them
+Deps — · Status todo · Est 3 h
+
+- **Scope:** **Release-blocking.**
+  - `site/privacy.html` adds the missing data and egress:
+    - `schedule.json`
+    - `webhooks.ndjson`
+    - the lock artifacts
+    - the `run-queue` log
+    - the oEmbed egress
+    - the webhook receiver
+  - Replace "There is no controller" with an explicit roles section.
+  - Fix the stale version wording.
+  - Extend `scripts/site-sync.ts` so that `npm run sync` fails when a persisted
+    file or an egress host is missing from the policy.
+- **Acceptance:** see `legal-compliance.md` § LGL-R1.
+
+#### LGL-R5 — Remove TikTok trade dress and third-party fonts from the site and extension
+Deps — · Status todo · Est 3 h
+
+- **Scope:** **Release-blocking**, because the site goes live with the first
+  release.
+  - Drop the TikTok brand colours.
+  - Self-host the fonts instead of loading them from Google Fonts.
+  - Add "Unofficial" to the extension's display name.
+- **Acceptance:** see `legal-compliance.md` § LGL-R5.
+
+### Release-blocking, after another item
+
+#### SEC-R1 — Show the full payload in the consent dialog
+Deps PLT-R1 · Status todo · Est 4 h
+
+- **Scope:** **Release-blocking.** For every write tool (video, photos, batch,
+  schedule), `ConsentItem` carries and renders:
+  - the media source and size;
+  - the disclosure, brand-content and AIGC flags;
+  - the interaction toggles.
+- **Acceptance:** see `security.md` § SEC-R1.
+
+#### PLT-R2 — Add a content preview, processing notice and commercial-content labels
+Deps SEC-R1 · Status todo · Est 5 h
+
+- **Scope:** **Release-blocking.** The plan output gets the UX elements that
+  TikTok's audit checks: a content preview, the processing-time notice, and the
+  commercial-content labels and declarations.
+- **Acceptance:** see `tiktok-platform.md` § PLT-R2.
+
+#### PLT-R3 — Rewrite AUDIT.md against the live guidelines and add the operator compliance guide
+Deps PLT-R2, LGL-R1 · Status todo · Est 6 h
+
+- **Absorbs:** LGL-R3.
+- **Scope:** **Release-blocking.**
+  - Rewrite `docs/AUDIT.md` against the current guidelines. It still cites
+    0.8.0.
+  - Cite "Apps must not be for private or personal use" verbatim, with its URL
+    and access date, as rejection class 7.
+  - Add an operator guide to `docs/AUDIT.md` and `docs/SETUP-TIKTOK-APP.md`. It
+    covers:
+    - audit eligibility;
+    - a consent matrix;
+    - app naming;
+    - a privacy-policy template for the operator's own app.
+- **Owns:** `docs/AUDIT.md`, `docs/SETUP-TIKTOK-APP.md`.
+- **Acceptance:** both PLT-R3 in `tiktok-platform.md` and LGL-R3 in
+  `legal-compliance.md`.
+
+#### ARC-R2 — Resync ARCHITECTURE.md with the built system
+Deps ARC-R1 · Status todo · Est 3 h
+
+- **Scope:** **Release-blocking.** Bring these up to date:
+  - the module tree and the bootstrap;
+  - the package and tool lists (7 packages, 17 tools);
+  - the dependency count;
+  - § 6.3 on the retry class.
+
+  Record two decisions: the `wait_for_completion=false` reversal and the names
+  that replaced those in § 3.7.
+- **Acceptance:** see `architecture.md` § ARC-R2.
+
+#### REL-R1 — Decide the first version and cut the changelog
+Deps — · Status blocked: owner (Q1, recommended 0.9.0) · Est 1.5 h
+
+- **Absorbs:** PRD-R3.
+- **Scope:** **Release-blocking.**
+  - Apply the owner's Q1 choice. The recommended path:
+    1. Fold `[1.0.0]` and `[Unreleased]` into `[0.9.0] - <publish date>`.
+    2. Say that 0.7.0, 0.8.0 and 1.0.0 were internal milestones that were never
+       published.
+    3. Delete the false "first version published to npm" line.
+    4. Set every version field.
+  - 1.0.0 becomes the first CI-attested release, after the probes.
+- **Acceptance:**
+  - `release-guard --tag v<chosen>` exits 0. Today it fails for every tag.
+  - `npm run check` is green.
+
+#### PRD-R1 — Declare a scope freeze and defer the B-track
+Deps — · Status blocked: owner (Q4) · Est 0.5 h
+
+- **Scope:** **Release-blocking.**
+  - Write a freeze: no new tools, tool packages or `TT_*` settings until 90
+    days after the first npm publish, or until 3 independent issues ask for a
+    feature.
+  - Move B1 to non-goals.
+  - Freeze B2-SPIKE, B2 and B3 until PRD-R8.
+- **Acceptance:** see `product.md` § PRD-R1.
+
+#### PRD-R6 — Label the low-reach features experimental
+Deps PRD-R1 · Status todo · Est 2 h
+
+- **Scope:** **Release-blocking.** Mark these features **Experimental** and
+  exclude them from the compatibility policy:
+  - scheduling: `run_at`, `run-queue`, and the list and cancel tools;
+  - `tiktok_publish_batch`;
+  - the webhook receiver;
+  - publish-status subscriptions;
+  - `tiktok_get_embed`.
+
+  The label goes in TOOLS.md, the tool descriptions and CHANGELOG. Add
+  `TT_EXPERIMENTAL=1` only if the owner chooses it in Q5.
+- **Acceptance:** see `product.md` § PRD-R6.
+
+#### DX-R3 — Make the consent-dialog state visible and apply the chosen default
+Deps — · Status blocked: owner (Q3, consent default) · Est 3 h
+
+- **Scope:** **Release-blocking.**
+  - Add `consent_dialog: active|unavailable|off` to `get_auth_status`.
+  - Add a `note` hint on apply when no dialog ran.
+  - Add a client support matrix to `CLIENTS.md`.
+  - Apply the `TT_ELICITATION` default that the owner chooses in Q3.
+- **Acceptance:** see `mcp-ai-dx.md` § DX-R3.
+
+### Release-blocking owner steps and what follows them
+
+#### QA-R1 — Run the live-validation session against a TikTok sandbox app
+Deps — · Status blocked: owner (sandbox app + own account as target user, human at the keyboard) · Est 4 h
+
+- **Absorbs:** PLT-R4 and PRD-R2.
+- **Scope:** **Release-blocking** for any "posting works" claim. Run one
+  scripted session, which spends 2–3 inits:
+  1. `login`, then `doctor` green
+  2. auth status, user info, list videos, analytics
+  3. a FILE_UPLOAD draft that reaches the inbox
+  4. a `SELF_ONLY` post on a private account
+  5. publish status polled to completion
+  6. a duplicate execute with the same `plan_id`, which must be refused
+  7. `login --revoke`
+
+  Along the way:
+  - Record P-1..P-14 in `docs/probes/PROBE-LOG.md`.
+  - Capture the raw responses for QA-R2.
+  - Note whether a draft works on a **public** account.
+  - Every mismatch with the spec becomes its own fix item before the tag.
+- **Acceptance:** see `qa.md` § QA-R1 and `product.md` § PRD-R2.
+
+#### QA-R2 — Extend contract replay to inits, token and chunk PUT, behind one validating fake
+Deps QA-R1 · Status todo · Est 8 h
+
+- **Scope:** **Release-blocking.**
+  - Add a `raw` fixture kind, recorded in QA-R1.
+  - Replay the token, init and chunk PUT responses. Chunk PUTs answer 206, not
+    201.
+  - Merge the five `fakeApi` copies into one fake that validates requests.
+- **Acceptance:** see `qa.md` § QA-R2.
+
+#### PRD-R5 — Reposition README and setup around the reachable value
+Deps QA-R1, DX-R2, PLT-R3 · Status todo · Est 4 h
+
+- **Scope:** **Release-blocking.**
+  - Rewrite the README opening and the Quick demo around what the user can
+    reach: their own analytics, drafts in the inbox, and private test posts.
+  - Add a box that says what TikTok lets an individual do.
+  - Give an honest setup time and a sandbox-first fast path.
+  - Shape the text by Q2.
+- **Acceptance:** see `product.md` § PRD-R5.
+
+#### REL-R3 — Owner bootstrap: Pages, first npm publish, npm settings and secrets
+Deps REL-R1, REL-R2, SEC-R8, LGL-R1, LGL-R5, QA-R1 · Status blocked: owner (G-4, G-14, npm 2FA, Q6) · Est 1 h
+
+- **Absorbs:** PRD-R4, plus IMPLEMENTATION-PLAN gates G-4 and G-14.
+- **Scope:** **Release-blocking.** Follow the runbook in `release-devops.md`
+  (steps A–E):
+  1. Enable GitHub Pages (Source = GitHub Actions) and run `pages.yml`.
+  2. Do the manual first `npm publish`.
+  3. Configure the trusted publisher. Select the "Publish" action and set
+     "disallow tokens".
+  4. Revoke the dormant `NPM_TOKEN`.
+  5. Create `VSCE_PAT`, or defer the extension (Q6).
+  6. Push the tag, then verify npm, the GitHub release, the MCP registry and
+     the Marketplace.
+- **Acceptance:**
+  - `npm view tiktok-mcp-ai` shows the chosen version.
+  - The privacy and terms URLs return 200.
+  - All follower workflows are green.
+
+#### DX-R1 — Fix the plugin and extension launch path and their claims
+Deps REL-R3 · Status todo · Est 2 h
+
+- **Scope:** **Release-blocking** for announcing the plugin and extension.
+  - Change the copy to "10 tools by default, 17 with `TT_TOOL_PACKAGES=all`".
+  - Pass env through to the plugin.
+  - Add a `tiktokMcp.toolPackages` setting to the extension.
+  - Add a checklist step: announce only after `npm view` succeeds and the
+    homepage returns 200.
+- **Acceptance:** see `mcp-ai-dx.md` § DX-R1.
+
+### After the first release
+These items are not release-blocking. Each one is detailed under its ID in its
+report.
+
+#### ARC-R3 — Gate CONTRACTS.md against the code
+Deps ARC-R2 · Status todo · Est 6 h
+
+- **Scope:** CONTRACTS.md is 3616 lines and has drifted. Generate it, or check
+  it, against the exported signatures.
+
+#### ARC-R4 — Extract one executeWrite pipeline for the write tools
+Deps PLT-R2 · Status todo · Est 5 h
+
+- **Scope:** the write tools build plan, consent, journal and dispatch in
+  separate places. Give them one shared pipeline.
+
+#### ARC-R5 — Build the runtime in one composition module
+Deps — · Status todo · Est 3 h
+
+- **Scope:** wire the server, `run-queue` and `doctor` from one composition
+  module.
+
+#### ARC-R6 — Enforce the tools/ and cli/ boundaries in ESLint
+Deps — · Status todo · Est 2 h
+
+- **Scope:** add ESLint import zones for `src/tools/` and `src/cli/`.
+
+#### ARC-R7 — Design a provider-aware credential model before B1/B2
+Deps — · Status todo · Est 8 h
+
+- **Scope:** write an ADR, with a prototype, for credentials keyed by app and
+  provider. Today they are keyed by profile name. This is a hard prerequisite of
+  B1 and B2.
+
+#### ARC-R8 — Move the write-safety modules out of mcp/
+Deps ARC-R4 · Status todo · Est 4 h
+
+- **Scope:** move the write-safety modules out of `src/mcp/`.
+
+#### ARC-R9 — Split core/http.ts and cli/doctor.ts along their sections
+Deps ARC-R1 · Status todo · Est 5 h
+
+- **Scope:** split both files along their existing sections.
+
+#### ARC-R10 — Own mutable runtime state in a RuntimeState object
+Deps ARC-R5 · Status todo · Est 6 h
+
+- **Scope:** move the mutable runtime state into one `RuntimeState` object.
+
+#### SEC-R3 — Host/Origin gate on the OAuth callback listener
+Deps — · Status todo · Est 2 h
+
+- **Scope:** check the Host and Origin headers on the OAuth callback listener.
+
+#### SEC-R4 — Authenticate or document the schedule store
+Deps — · Status todo · Est 3 h
+
+- **Scope:** `run-queue` runs `schedule.json` entries as already consented.
+  Sign them, or document the trust boundary.
+
+#### SEC-R5 — Webhook receiver hardening
+Deps — · Status todo · Est 3 h
+
+- **Scope:**
+  - Verify the signature before reading the env file.
+  - Verify the signature for every profile's app, not only the first.
+
+#### SEC-R6 — Bounded response bodies
+Deps ARC-R1 · Status todo · Est 2 h
+
+- **Scope:** cap the size of every upstream response body.
+
+#### SEC-R7 — Small input and transport hardening
+Deps — · Status todo · Est 2 h
+
+- **Scope:**
+  - URL prefix checks
+  - token length bounds
+  - timeouts
+
+#### PLT-R5 — Fix the photo body shape: top-level is_aigc and mode-specific fields
+Deps QA-R1 · Status todo · Est 2 h
+
+- **Scope:** fix the photo request body. Needs the P-13 evidence from QA-R1.
+
+#### PLT-R6 — Harden webhook event parsing against TikTok's documented shapes
+Deps SEC-R5 · Status todo · Est 2 h
+
+- **Scope:** parse webhook events against TikTok's documented shapes, including
+  the `no_longer_publicaly_available` spelling.
+
+#### PLT-R7 — Mark oEmbed as deprecated upstream and add an Embed Player option
+Deps — · Status todo · Est 2 h
+
+- **Scope:** mark oEmbed as deprecated upstream and add an Embed Player option.
+
+#### PLT-R8 — Align the upload size cap and small doc drifts
+Deps — · Status todo · Est 1 h
+
+- **Scope:** align the upload size cap with TikTok's limit and fix the small doc
+  drifts.
+
+#### PLT-R9 — Decide B1/B2 feasibility and record the access paths
+Deps — · Status blocked: owner (apply for Business API / Commercial Content API access) · Est 2 h
+
+- **Scope:** decide whether B1 and B2 are feasible and record the access paths.
+  Feeds B2-SPIKE.
+
+#### LGL-R2 — Complete the data-deletion story
+Deps LGL-R1 · Status todo · Est 4 h
+
+- **Scope:**
+  - a purge command
+  - clean-up after token revocation
+  - age-based retention
+
+#### LGL-R4 — Tighten consent on the unattended and multi-post write paths
+Deps PLT-R3, DX-R3 · Status blocked: owner (Q3) · Est 5 h
+
+- **Scope:** tighten consent on the apply-mode, `auto` fallback, batch and
+  `run-queue` paths.
+
+#### DX-R4 — Replace the duplicated generic outputSchema with per-tool data schemas
+Deps — · Status todo · Est 5 h
+
+- **Scope:** the duplicated generic output schema is 28% of `tools/list`.
+  Replace it with one data schema per tool.
+
+#### DX-R5 — Cut the tools/list token budget
+Deps DX-R4, SEC-R2 · Status todo · Est 3 h
+
+- **Scope:** cut `tools/list` to at most 35 KB with all packages enabled. Today
+  it is 49.6 KB. SEC-R2 adds the server instructions.
+
+#### DX-R7 — Explain disabled packages and plan mismatches
+Deps — · Status todo · Est 2 h
+
+- **Scope:** explain disabled packages and plan mismatches in the error
+  messages.
+
+#### DX-R8 — Tighten schema bounds and error wording
+Deps — · Status todo · Est 1 h
+
+- **Scope:** tighten the schema bounds and the error wording.
+
+#### DX-R9 — Add a model-in-the-loop eval harness
+Deps DX-R5 · Status todo · Est 6 h
+
+- **Scope:** 10–20 scripted tasks run against a mocked TikTok. Run it on
+  demand, outside the default gate.
+
+#### DX-R10 — Smoke-test the live client matrix
+Deps REL-R3 · Status blocked: owner (client accounts and machines) · Est 2 h
+
+- **Scope:** smoke-test the server in each live client. This feeds the DX-R3
+  matrix.
+
+#### QA-R4 — Harden CI hygiene and cut its cost
+Deps REL-R2 · Status todo · Est 3 h
+
+- **Absorbs:** REL-R4.
+- **Scope:**
+  - job timeouts and concurrency cancel;
+  - run the test suite once, not three times on ubuntu/22;
+  - an honest Codecov upload, which fails silently today;
+  - a docs-only light path that keeps the sync gates;
+  - decide whether the Node 26 leg becomes required.
+
+#### QA-R5 — Add a nightly exploration profile for properties and protocol versions
+Deps QA-R4 · Status todo · Est 3 h
+
+- **Scope:** a nightly run with random seeds and the protocol-version matrix.
+
+#### QA-R6 — Measure assertion strength with a one-off mutation run on the money paths
+Deps — · Status todo · Est 4 h
+
+- **Scope:** run Stryker once on `http.ts`, `upload.ts`, `plan-store.ts` and
+  `oauth.ts`, and record the score.
+
+#### REL-R6 — Add a version-set script and tidy the tarball surface
+Deps REL-R1 · Status todo · Est 2 h
+
+- **Scope:**
+  - Add one script that sets the version everywhere.
+  - Add a `types` field for the 56 shipped `.d.ts` files.
+  - Trim the tarball.
+
+#### REL-R7 — Harden the publish path with an environment and rulesets
+Deps REL-R3 · Status blocked: owner (Q6) · Est 1 h
+
+- **Scope:**
+  - a protected `npm` environment;
+  - branch protection on `main`;
+  - a `v*` tag ruleset.
+
+#### PRD-R7 — Define the 90-day success metrics and the feedback channel
+Deps REL-R3 · Status todo · Est 2 h
+
+- **Scope:** define the metrics and add an issue template.
+
+#### PRD-R8 — Hold the 90-day review and decide B2 on evidence
+Deps PRD-R7 · Status blocked: 90 days after the first publish · Est 1 h
+
+- **Scope:** hold the review and decide B2 on the evidence.
+
+#### PRD-R9 — Docs diet: separate user docs from internal specs
+Deps REL-R3 · Status todo · Est 4 h
+
+- **Scope:** separate the user docs from the internal specs.
 
 ## Explicit non-goals
 - No ads management, no scraping or
