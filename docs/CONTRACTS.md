@@ -3355,9 +3355,13 @@ export function ttEnvelope(data: unknown, error?: { code: string; message: strin
 export interface MockClock extends Clock {
   advance(ms: number): Promise<void>;   // runs due sleeps deterministically
   pending(): number;                    // waiters still asleep
+  nextDeadline(): number | undefined;   // earliest waiter's deadline
   setNow(epochMs: number): void;        // the only backwards-step seam
 }
 export function mockClock(startEpochMs?: number): MockClock;
+/** Await `pending` while virtual time jumps to each pending sleep, but only
+ *  when nothing real is in flight. Fails after 20 s of wall-clock time. */
+export function runVirtual<T>(clock: MockClock, pending: Promise<T>): Promise<T>;
 export function fsSandbox(): Promise<{ dir: string; cleanup(): Promise<void> }>;
 
 /** Frozen baselines, so unrelated suites agree on "now" and on credentials
@@ -3614,3 +3618,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-28 | DNS pin for `login` and `doctor` (roadmap H1). `cli/login`: new `LoginDeps` (`CliDeps` plus `lookup?`), and `runLogin` takes it. `cli/doctor`: new `DoctorDeps` (same shape), `runDoctor` takes it, and `DoctorContext` gains `lookup?` (`deps` is now `DoctorDeps`). Both pass `outboundLookup(settings.dnsPin, env, deps.lookup ?? dns.lookup)` to the token exchange, the display-name read, `--revoke`, the API probe and its refresh. Additive: every existing caller still compiles | integrator |
 | 2026-10-28 | oEmbed tool (roadmap A11, TOOLS.md § 3.17). New modules `api/embed` (`parseVideoUrl`, `getEmbed`, `OEMBED_ENDPOINT`, `VIDEO_URL_MAX_CHARS`, `OEMBED_MAX_ANSWER_CHARS`, `VideoRef`, `EmbedAnswer`) and `tools/embed` (`tiktok_get_embed`). `core/http`: new `EgressKind` (`'api' \| 'upload' \| 'oembed'`), `assertAllowedUrl` takes it, and additive `TtRequestOptions.egress?` (`'api'` default, or `'oembed'`, which refuses a bearer). `core/settings`: `ToolPackage` gains `embed` (in `all`, not in `core`). Additive: every existing caller still compiles | integrator |
 | 2026-10-29 | DNS pin for the token refresh behind `ApiContext` (roadmap H3). `api/context`: `createApiContext` forwards `CreateApiContextOptions.lookup` into the refresh deps of `getAccessToken`. `cli/doctor` drops its own refresh wrapper and relies on the context. No signature changed | integrator |
+| 2026-11-07 | Test harness (roadmap REL-R2): `MockClock` gains `nextDeadline()`, and `test/helpers.ts` exports `runVirtual` — both additive. It replaces four local copies that added 500 ms per step whether or not anything was waiting, which let a plan expire during real I/O on a loaded machine (the cc-g7 `plan_not_found` failure). Time now moves only to the next pending sleep, and only while `process.getActiveResourcesInfo()` shows nothing real in flight, which also retires the `holdTime` option of the `api-upload` copy. Callback-API file requests, which that list omits, are counted through an `async_hooks` hook | integrator |

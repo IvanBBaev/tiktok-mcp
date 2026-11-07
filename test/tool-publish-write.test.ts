@@ -46,6 +46,7 @@ import {
 } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setImmediate as nextTurn, setTimeout as realDelay } from 'node:timers/promises';
 
 import { createApiContext, type ApiContext } from '../src/api/context.js';
 import { planChunks } from '../src/api/upload.js';
@@ -96,6 +97,7 @@ import {
   BASELINE_SCOPES,
   fsSandbox,
   mockClock,
+  runVirtual,
   ttEnvelope,
   withFetch,
   type FetchStub,
@@ -472,35 +474,6 @@ function hookedLogger(base: Logger, onWarn: (msg: string) => void): Logger {
     child: () => wrapped,
   };
   return wrapped;
-}
-
-/**
- * Await `pending` while pushing virtual time forward in slices.
- *
- * The poll loop registers its next sleep only once the status read before it
- * has resolved, so a single `advance` past the deadline would run out of due
- * waiters and stop early. Stepping — with the microtask queue drained between
- * steps, which `advance` does — walks the whole ladder. The step is smaller
- * than `SLEEP_SLICE_MS` so no bounded slice is ever skipped over.
- */
-async function runVirtual<T>(clock: MockClock, pending: Promise<T>): Promise<T> {
-  let done = false;
-  const settled = pending.finally(() => {
-    done = true;
-  });
-  // A rejection is re-thrown by the `await` below; this only stops Node from
-  // calling it unhandled while the loop is still stepping.
-  settled.catch(() => undefined);
-
-  // The budget is wall-clock, not a step count. `advance` yields to the event
-  // loop once per step, so a fixed number of steps is only a few real
-  // milliseconds — less than a loaded machine needs to return a single journal
-  // append, and the call would then be failed for someone else's I/O
-  // contention (the coverage run puts one process per test file on the box).
-  const giveUpAt = Date.now() + 20_000;
-  while (!done && Date.now() < giveUpAt) await clock.advance(500);
-  assert.ok(done, 'virtual time ran out before the call settled');
-  return await settled;
 }
 
 function dataOf<T>(result: ToolResult<T>): T {
@@ -2640,6 +2613,50 @@ function assertHintsIntact(result: ToolResult<unknown>, budget: number): void {
   const shipped = truncateResult(result, budget);
   assert.equal(shipped.truncated, false, 'the result was shortened to fit the budget');
   assert.deepEqual(shipped.result.hints, hints, 'truncation rewrote the hints');
+}
+
+// The cc-g7 failure on `main`: `runVirtual` used to add 500 ms per step whether
+// or not anything was waiting, so 1200 steps during real work before the plan
+// was consumed ran out its 600 s TTL and the apply came back `plan_not_found`.
+// The request timeout is raised past the TTL so that the plan is what these
+// cases exercise, and the slow `creator_info` answer sits between the preview
+// and the consume.
+for (const [label, env, stall] of [
+  [
+    '4000 idle event-loop turns against the default TTL',
+    {},
+    async (): Promise<void> => {
+      for (let turn = 0; turn < 4_000; turn += 1) await nextTurn();
+    },
+  ],
+  [
+    '200 ms of real waiting against a 1 s TTL',
+    { TT_PLAN_TTL_S: '1' },
+    async (): Promise<void> => {
+      await realDelay(200);
+    },
+  ],
+] as const) {
+  test(`a plan survives ${label} before its apply consumes it`, async () => {
+    await withCtx({ ...env, TT_TIMEOUT_MS: '900000' }, async (ctx, _dir, clock) => {
+      const stub = fakeApi({
+        creator: async (n) => {
+          if (n === 1) await stall();
+          return creatorResponse();
+        },
+      });
+
+      const result = await withFetch(stub, async () => {
+        const preview = previewOf(await run(ctx, previewArgs()));
+        return await runVirtual(
+          clock,
+          run(ctx, previewArgs({ plan_id: preview.plan_id })),
+        );
+      });
+
+      assert.equal(appliedOf(result).publish_id, 'v_pub_url~test.123');
+    });
+  });
 }
 
 test('cc-g7: the deepest hint chain fills all three slots and ships every one of them', async () => {

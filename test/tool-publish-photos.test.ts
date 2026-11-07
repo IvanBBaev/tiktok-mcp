@@ -71,6 +71,7 @@ import {
   BASELINE_SCOPES,
   fsSandbox,
   mockClock,
+  runVirtual,
   ttEnvelope,
   withFetch,
   type FetchStub,
@@ -300,34 +301,6 @@ function drainPublishBucket(ctx: ToolCtx): void {
   for (let i = resolvePublishBucket(limits).capacity; i > 0; i -= 1) {
     takePublishToken(ctx.api.profile, ctx.api.clock, limits);
   }
-}
-
-/**
- * Await `pending` while pushing virtual time forward in slices.
- *
- * The poll loop registers its next sleep only once the status read before it
- * has resolved, so a single `advance` past the deadline would run out of due
- * waiters and stop early. Stepping — with the microtask queue drained between
- * steps, which `advance` does — walks the whole ladder.
- */
-async function runVirtual<T>(clock: MockClock, pending: Promise<T>): Promise<T> {
-  let done = false;
-  const settled = pending.finally(() => {
-    done = true;
-  });
-  // A rejection is re-thrown by the `await` below; this only stops Node from
-  // calling it unhandled while the loop is still stepping.
-  settled.catch(() => undefined);
-
-  // The budget is wall-clock, not a step count. `advance` yields to the event
-  // loop once per step, so a fixed number of steps is only a few real
-  // milliseconds — less than a loaded machine needs to return a single journal
-  // append, and the call would then be failed for someone else's I/O
-  // contention (the coverage run puts one process per test file on the box).
-  const giveUpAt = Date.now() + 20_000;
-  while (!done && Date.now() < giveUpAt) await clock.advance(500);
-  assert.ok(done, 'virtual time ran out before the call settled');
-  return await settled;
 }
 
 function dataOf<T>(result: ToolResult<T>): T {

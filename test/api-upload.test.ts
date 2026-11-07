@@ -56,6 +56,7 @@ import {
   baselineEnv,
   fsSandbox,
   mockClock,
+  runVirtual,
   withFetch,
   type FetchStub,
   type MockClock,
@@ -234,39 +235,6 @@ function recordHeaders(inner: FetchStub): {
 // ---------------------------------------------------------------------------
 // assertion plumbing
 // ---------------------------------------------------------------------------
-
-/**
- * Await `pending` while stepping virtual time forward.
- *
- * `mockClock` never moves on its own and the chunk retry loop awaits
- * `clock.sleep(backoff)`, so a retry case that does not step time hangs.
- * Only the retry cases need this; the per-request timeout waiter is cancelled
- * when the request settles, so everything else can simply be awaited.
- *
- * `holdTime` pauses the clock while it answers true: a stub that awaits real
- * file I/O inside a request would otherwise see that request's timeout fire in
- * virtual time before the I/O returns, and fail for a reason it did not stage.
- */
-async function runVirtual<T>(
-  clock: MockClock,
-  pending: Promise<T>,
-  holdTime: () => boolean = () => false,
-): Promise<T> {
-  let done = false;
-  const settled = pending.finally(() => {
-    done = true;
-  });
-  settled.catch(() => undefined);
-  // The budget is wall-clock, not a step count. `advance` yields to the event
-  // loop once per step, so a fixed number of steps is only a few real
-  // milliseconds — less than a loaded machine needs to return a single file
-  // read, and the call would then be failed for someone else's I/O contention
-  // (the coverage run puts one instrumented process per test file on the box).
-  const giveUpAt = Date.now() + 20_000;
-  while (!done && Date.now() < giveUpAt) await clock.advance(holdTime() ? 0 : 500);
-  assert.ok(done, 'virtual time ran out before the call settled');
-  return await settled;
-}
 
 async function rejection(work: Promise<unknown>): Promise<unknown> {
   try {
@@ -1761,21 +1729,15 @@ test('cc-g4 a same-size rewrite before a 416 that completes the upload is networ
       if (ordinal === 2) return new TypeError('fetch failed');
       return bare(416, { 'content-range': 'bytes 0-25000/25000' });
     });
-    let inRequest = false;
     const rewrite: FetchStub = async (input, init) => {
-      inRequest = true;
-      try {
-        const response = await stub.fetch(input, init);
-        if (stub.puts.length === 3) await rewriteSameSize(media);
-        return response;
-      } finally {
-        inRequest = false;
-      }
+      const response = await stub.fetch(input, init);
+      if (stub.puts.length === 3) await rewriteSameSize(media);
+      return response;
     };
     const progress: number[] = [];
 
-    // The retry needs virtual time for its backoff; time stands still while the
-    // stub does real file I/O, so the request timeout cannot win that race.
+    // The retry needs virtual time for its backoff; `runVirtual` holds it while
+    // the stub does real file I/O, so the request timeout cannot win that race.
     const error = ttError(
       await withFetch(rewrite, () =>
         rejection(
@@ -1788,7 +1750,6 @@ test('cc-g4 a same-size rewrite before a 416 that completes the upload is networ
               random: () => 0,
               onProgress: (index) => progress.push(index),
             }),
-            () => inRequest,
           ),
         ),
       ),
@@ -2026,22 +1987,16 @@ test('a file truncated while its chunk body is being read fails the upload loudl
   await withMedia({ size }, async (media) => {
     const clock = mockClock();
     let puts = 0;
-    let inRequest = false;
     const shrink: FetchStub = async (_input, init) => {
       puts += 1;
-      inRequest = true;
-      try {
-        if (puts === 1) await truncate(media.path, 1_048_576);
-        await drainBody(init?.body);
-        return bare(201);
-      } finally {
-        inRequest = false;
-      }
+      if (puts === 1) await truncate(media.path, 1_048_576);
+      await drainBody(init?.body);
+      return bare(201);
     };
 
-    // Virtual time stands still while the stub truncates and reads: on a slow
-    // disk the request timeout would otherwise win the race and the short read
-    // under test would never be the failure.
+    // `runVirtual` holds virtual time while the stub truncates and reads: on a
+    // slow disk the request timeout would otherwise win the race and the short
+    // read under test would never be the failure.
     const error = await withFetch(shrink, () =>
       rejection(
         runVirtual(
@@ -2052,7 +2007,6 @@ test('a file truncated while its chunk body is being read fails the upload loudl
             uploadUrl: UPLOAD_URL,
             random: () => 0,
           }),
-          () => inRequest,
         ),
       ),
     );

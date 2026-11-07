@@ -24,6 +24,8 @@
  * multi-process lock driver) lives in `test/harness/**` and may change freely.
  */
 
+import assert from 'node:assert/strict';
+import { createHook } from 'node:async_hooks';
 import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -353,6 +355,13 @@ export interface MockClock extends Clock {
   pending(): number;
 
   /**
+   * The earliest deadline among the waiting sleeps (epoch ms), or `undefined`
+   * when none is waiting. It can lie behind `now()`, for a sleep overtaken by
+   * `setNow`. `runVirtual` uses it to step exactly as far as the next timer.
+   */
+  nextDeadline(): number | undefined;
+
+  /**
    * Reposition virtual time without firing or cancelling anything.
    *
    * `Clock.now()` explicitly does not promise monotonicity ("the system clock
@@ -485,10 +494,91 @@ export function mockClock(startEpochMs: number = BASELINE_NOW_MS): MockClock {
     sleep,
     advance,
     pending: () => waiters.size,
+    nextDeadline: () => due(Number.POSITIVE_INFINITY)?.deadline,
     setNow: (epochMs: number) => {
       current = epochMs;
     },
   };
+}
+
+/** The most wall-clock time `runVirtual` gives a call before it fails the test. */
+const RUN_VIRTUAL_BUDGET_MS = 20_000;
+
+/**
+ * Active resources that stay open whether or not the code under test is
+ * working: the channels between the test process and its runner.
+ */
+const STANDING_RESOURCES: ReadonlySet<string> = new Set([
+  'PipeWrap',
+  'TCPSocketWrap',
+  'TTYWrap',
+]);
+
+/**
+ * File requests made through the callback API that have not finished yet.
+ * `process.getActiveResourcesInfo()` does not list them, and Node 26's
+ * promise `readFile` opens its file with one, so they are counted here. The
+ * hook is enabled at import: `runVirtual(clock, call())` receives `call()`
+ * after it has already started its first request.
+ */
+const fsCallbacksInFlight = new Set<number>();
+createHook({
+  init(asyncId, type) {
+    if (type === 'FSREQCALLBACK') fsCallbacksInFlight.add(asyncId);
+  },
+  destroy(asyncId) {
+    fsCallbacksInFlight.delete(asyncId);
+  },
+}).enable();
+
+/**
+ * True while something real is outstanding in this process: a file operation,
+ * a real timer, a queued `setImmediate`. The code under test can then still
+ * make progress on its own, so no virtual timer may fire yet. `test/helpers.test.ts`
+ * pins this reading of `process.getActiveResourcesInfo()`, which Node marks
+ * experimental.
+ */
+function realWorkInFlight(): boolean {
+  return (
+    fsCallbacksInFlight.size > 0 ||
+    process.getActiveResourcesInfo().some((kind) => !STANDING_RESOURCES.has(kind))
+  );
+}
+
+/**
+ * Await `pending` while virtual time follows the pending sleeps: a small
+ * discrete-event loop for a call that needs time to pass but cannot be stepped
+ * by hand, such as a poll loop that registers its next sleep only once the read
+ * before it has resolved.
+ *
+ * Time moves only when the call can do nothing else. Once a real event-loop
+ * turn has passed, nothing real is in flight and a sleep is waiting, the clock
+ * jumps to that sleep's deadline and no further. So however long the machine
+ * takes over a journal append or a file read, no virtual time passes during it:
+ * a plan cannot outlive its TTL and a request timeout cannot beat a stub's file
+ * I/O because of load. `TESTING.md` § Harness has the rule.
+ *
+ * The budget is wall-clock, not a step count, so a call that truly never settles
+ * fails the test instead of hanging it. A rejection of `pending` is re-thrown.
+ */
+export async function runVirtual<T>(clock: MockClock, pending: Promise<T>): Promise<T> {
+  let done = false;
+  const settled = pending.finally(() => {
+    done = true;
+  });
+  // A rejection is re-thrown by the `await` below; this only stops Node from
+  // calling it unhandled while the loop is still stepping.
+  settled.catch(() => undefined);
+
+  const giveUpAt = Date.now() + RUN_VIRTUAL_BUDGET_MS;
+  while (!done && Date.now() < giveUpAt) {
+    await drain();
+    if (done || realWorkInFlight()) continue;
+    const next = clock.nextDeadline();
+    if (next !== undefined) await clock.advance(Math.max(0, next - clock.now()));
+  }
+  assert.ok(done, 'runVirtual: the call did not settle within its wall-clock budget');
+  return await settled;
 }
 
 // ---------------------------------------------------------------------------

@@ -82,8 +82,10 @@ export function mockClock(startEpochMs?: number): MockClock;
 export interface MockClock extends Clock {
   advance(ms: number): Promise<void>;   // runs due sleeps deterministically
   pending(): number;                    // waiters still asleep
+  nextDeadline(): number | undefined;   // earliest waiter's deadline
   setNow(epochMs: number): void;        // the only backwards-step seam
 }
+export function runVirtual<T>(clock: MockClock, pending: Promise<T>): Promise<T>;
 export function fsSandbox(): Promise<{ dir: string; cleanup(): Promise<void> }>;
 ```
 
@@ -98,6 +100,15 @@ export function fsSandbox(): Promise<{ dir: string; cleanup(): Promise<void> }>;
   `advance(ms)` moves time and resolves due `sleep`s in order, draining
   microtasks between resolutions. This is what makes CC-H4 hold: a TTL
   expiry test is `advance(600_001)`, not a ten-minute sleep.
+- `runVirtual(clock, pending)` — awaits a call whose sleeps cannot be stepped
+  by hand, such as a poll loop or a retry backoff. After each real event-loop
+  turn, if nothing real is in flight (file I/O, a real timer, a queued
+  immediate), virtual time jumps to the next pending sleep and no further. A
+  slow disk therefore costs no virtual time: a plan cannot outlive its TTL and
+  a request timeout cannot beat a stub's file I/O under load. "In flight" reads
+  `process.getActiveResourcesInfo()` plus callback-API file requests, which
+  that list omits and Node 26's `readFile` uses to open its file. A call that
+  never settles fails the test after 20 s of wall-clock time.
 - `fsSandbox()` — per-test scratch directory + cleanup; all config, journal,
   and lock tests operate inside it.
 - **Importing the harness sanitizes the environment.** Every ambient `TT_`

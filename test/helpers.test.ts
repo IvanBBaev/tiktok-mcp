@@ -9,10 +9,11 @@
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFile as readFileCallback } from 'node:fs';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
+import { setImmediate as nextTurn, setTimeout as realDelay } from 'node:timers/promises';
 
 import {
   BASELINE_NOW_MS,
@@ -22,6 +23,7 @@ import {
   baselineEnv,
   fsSandbox,
   mockClock,
+  runVirtual,
   scriptFetch,
   ttEnvelope,
   withEnv,
@@ -497,6 +499,150 @@ test('cc-b9 a failure envelope still arrives as HTTP 200 and keeps its log_id', 
   assert.equal(body.error.code, 'spam_risk_too_many_posts');
   assert.equal(body.error.message, 'daily post cap reached');
   assert.equal(body.error.log_id, TEST_LOG_ID);
+});
+
+// ---------------------------------------------------------------------------
+// runVirtual
+// ---------------------------------------------------------------------------
+
+test('nextDeadline names the earliest waiting sleep and nothing when none waits', async () => {
+  const clock = mockClock(1_000);
+  assert.equal(clock.nextDeadline(), undefined);
+
+  const late = clock.sleep(300);
+  const early = clock.sleep(100);
+  assert.equal(clock.nextDeadline(), 1_100);
+
+  await clock.advance(100);
+  await early;
+  assert.equal(clock.nextDeadline(), 1_300);
+
+  await clock.advance(200);
+  await late;
+  assert.equal(clock.nextDeadline(), undefined);
+});
+
+test('runVirtual steps time to each pending sleep and no further', async () => {
+  const clock = mockClock(0);
+  const woken: number[] = [];
+  const ladder = async (): Promise<string> => {
+    for (const ms of [30, 70, 1_000]) {
+      await clock.sleep(ms);
+      woken.push(clock.now());
+    }
+    return 'settled';
+  };
+
+  assert.equal(await runVirtual(clock, ladder()), 'settled');
+  assert.deepEqual(woken, [30, 100, 1_100]);
+  assert.equal(clock.now(), 1_100);
+});
+
+test('runVirtual fires a sleep that setNow left behind the current time', async () => {
+  const clock = mockClock(10_000);
+  const sleeping = clock.sleep(5);
+  clock.setNow(20_000);
+
+  await runVirtual(clock, sleeping);
+
+  assert.equal(clock.now(), 20_000, 'an overdue sleep moves time backwards');
+});
+
+test('runVirtual moves no time without a pending sleep, however many turns pass', async () => {
+  const clock = mockClock(0);
+  const idle = async (): Promise<number> => {
+    for (let turn = 0; turn < 2_000; turn += 1) await nextTurn();
+    return clock.now();
+  };
+
+  assert.equal(await runVirtual(clock, idle()), 0);
+});
+
+test('runVirtual holds a pending timeout across idle event-loop turns', async () => {
+  const clock = mockClock(0);
+  const stop = new AbortController();
+  const timeout = clock.sleep(30_000, stop.signal).then(
+    () => 'timed out',
+    () => 'cancelled',
+  );
+  const work = async (): Promise<string> => {
+    for (let turn = 0; turn < 2_000; turn += 1) await nextTurn();
+    stop.abort();
+    return await timeout;
+  };
+
+  assert.equal(await runVirtual(clock, work()), 'cancelled');
+  assert.equal(clock.now(), 0);
+});
+
+test('runVirtual holds a pending timeout across real file I/O and real timers', async () => {
+  const sandbox = await fsSandbox();
+  try {
+    const clock = mockClock(0);
+    const stop = new AbortController();
+    const timeout = clock.sleep(30_000, stop.signal).then(
+      () => 'timed out',
+      () => 'cancelled',
+    );
+    const path = join(sandbox.dir, 'slow');
+    const work = async (): Promise<string> => {
+      await writeFile(path, Buffer.alloc(8_000_000));
+      await readFile(path);
+      await realDelay(20);
+      stop.abort();
+      return await timeout;
+    };
+
+    assert.equal(await runVirtual(clock, work()), 'cancelled');
+    assert.equal(clock.now(), 0);
+  } finally {
+    await sandbox.cleanup();
+  }
+});
+
+// Node 26's promise `readFile` opens its file through the callback API, which
+// `process.getActiveResourcesInfo()` does not list.
+test('runVirtual holds a pending timeout across a callback-API file request', async () => {
+  const sandbox = await fsSandbox();
+  try {
+    const clock = mockClock(0);
+    const stop = new AbortController();
+    const timeout = clock.sleep(30_000, stop.signal).then(
+      () => 'timed out',
+      () => 'cancelled',
+    );
+    const path = join(sandbox.dir, 'slow');
+    await writeFile(path, Buffer.alloc(8_000_000));
+    const work = async (): Promise<string> => {
+      for (let read = 0; read < 5; read += 1) {
+        await new Promise<void>((resolve, reject) => {
+          readFileCallback(path, (error) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        });
+      }
+      stop.abort();
+      return await timeout;
+    };
+
+    assert.equal(await runVirtual(clock, work()), 'cancelled');
+    assert.equal(clock.now(), 0);
+  } finally {
+    await sandbox.cleanup();
+  }
+});
+
+test('runVirtual lets a timeout fire once the call is only waiting for it', async () => {
+  const clock = mockClock(0);
+  const hung = new Promise<never>((_resolve, reject) => {
+    void clock.sleep(30_000).then(() => {
+      reject(new Error('timed out'));
+    });
+  });
+
+  await assert.rejects(runVirtual(clock, hung), /timed out/);
+  assert.equal(clock.now(), 30_000);
 });
 
 // ---------------------------------------------------------------------------
