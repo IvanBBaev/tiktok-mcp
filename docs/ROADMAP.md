@@ -338,7 +338,7 @@ Deps — · Status done 2026-11-07 · Est 3 h
   - `npm run check` is green locally and on CI three times in a row.
 
 #### ARC-R1 — Classify retry class by endpoint table, failing closed
-Deps — · Status todo · Est 4 h
+Deps — · Status done 2026-11-07 · Est 4 h
 
 - **Scope:** **Release-blocking.**
   - A `(method, path)` table decides the retry class: known reads → `read`,
