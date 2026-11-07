@@ -26,9 +26,13 @@
 import { TikTokError } from '../core/errors.js';
 import { ttRequest } from '../core/http.js';
 import { malformedPayload, type ApiContext } from './context.js';
+import { classifyEndpoint } from './endpoints.js';
 
 /** The one oEmbed endpoint; `core/http` re-checks host and path. */
 export const OEMBED_ENDPOINT = 'https://www.tiktok.com/oembed';
+
+/** Path of {@link OEMBED_ENDPOINT}, the key `api/endpoints` classifies it by. */
+const OEMBED_PATH = new URL(OEMBED_ENDPOINT).pathname;
 
 /** Longest video URL accepted as input (characters). */
 export const VIDEO_URL_MAX_CHARS = 2048;
@@ -178,7 +182,7 @@ export async function getEmbed(
     method: 'GET',
     url,
     egress: 'oembed',
-    retryClass: 'read',
+    retryClass: classifyEndpoint('GET', OEMBED_PATH),
     clock: ctx.clock,
     logger: ctx.log,
     timeoutMs: ctx.settings.timeoutMs,

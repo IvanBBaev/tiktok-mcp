@@ -7,6 +7,8 @@
     "build/src/api/context.js",
     "build/src/api/embed.d.ts",
     "build/src/api/embed.js",
+    "build/src/api/endpoints.d.ts",
+    "build/src/api/endpoints.js",
     "build/src/api/media.d.ts",
     "build/src/api/media.js",
     "build/src/api/publish.d.ts",

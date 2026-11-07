@@ -29,6 +29,7 @@ import { ttRequest, type LookupFn, type RetryClass } from '../core/http.js';
 import type { Logger } from '../core/log.js';
 import { ensureFreshAccessToken, type RefreshDeps } from '../core/oauth.js';
 import type { Settings } from '../core/settings.js';
+import { effectiveRetryClass } from './endpoints.js';
 
 /** Options a caller may pass to {@link ApiContext.getAccessToken}. */
 export interface AccessTokenOptions {
@@ -149,11 +150,13 @@ export interface ApiRequestOptions {
    */
   fields?: readonly string[];
   /**
-   * Retry class (`core/http`); defaults to `read`. A publish init passes
-   * `init`, which is terminal upstream *and* here: it also forfeits the
-   * 401-refresh-and-replay below, because a replay of a call that may already
-   * have created a post is exactly what the whole write contract exists to
-   * prevent (TIKTOK-API.md § 4.2, probe P-12).
+   * Retry class hint (`core/http`). The class is decided by the endpoint table
+   * (`api/endpoints`): known reads are `read`, every other non-GET — unknown
+   * ones included — is `init`. This option may only make the class stricter;
+   * a looser value is ignored. `init` is terminal upstream *and* here: it also
+   * forfeits the 401-refresh-and-replay below, because a replay of a call that
+   * may already have created a post is exactly what the whole write contract
+   * exists to prevent (TIKTOK-API.md § 4.2, probe P-12).
    */
   retryClass?: RetryClass;
   /** JSON request body; `GET` must not have one (`core/http` rejects it). */
@@ -206,7 +209,8 @@ export function malformedPayload(endpoint: string, expected: string): TikTokErro
  * One Display-API call for `ctx.profile`.
  *
  * ARCHITECTURE § 6: a rejected access token buys **exactly one** forced refresh
- * and **exactly one** replay, for the `read` class only. A second rejection is
+ * and **exactly one** replay, for the `read` class only. The class comes from
+ * the endpoint table, so an unlisted write is never retried or replayed. A second rejection is
  * terminal — looping on a credential TikTok keeps refusing is how a client
  * burns an account's rate budget for nothing.
  */
@@ -214,7 +218,7 @@ export async function apiRequest<T>(
   ctx: ApiContext,
   opts: ApiRequestOptions,
 ): Promise<T> {
-  const retryClass = opts.retryClass ?? 'read';
+  const retryClass = effectiveRetryClass(opts.method, opts.path, opts.retryClass);
   const query =
     opts.fields === undefined || opts.fields.length === 0
       ? ''

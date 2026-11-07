@@ -28,6 +28,7 @@ src/
     oauth.ts        #   PKCE (hex challenge), code exchange, single-flight refresh (§ 7)
   api/              # Layer 1 — TikTok domain functions; may import core only
     context.ts      #   ApiContext (profile, settings, log, clock, getAccessToken)
+    endpoints.ts    #   (method, path) table → retry class, failing closed to init (§ 6.3)
     user.ts  video.ts  publish.ts
     upload.ts       #   planChunks() (pure decimal algorithm) + streamed chunk-PUT orchestration
   mcp/              # Layer 2 — MCP glue; may import core and api
@@ -392,8 +393,15 @@ non-envelope 206/201 responses).
    token; if it expires within the skew window (`TT_TOKEN_REFRESH_SKEW_S`) a refresh
    is performed first under the § 7 protocol. A 401 or `access_token_invalid`
    triggers **exactly one** forced refresh + replay — for the `read` class only.
-3. **Retry matrix** — **three classes** (CC-B7), classified by a **path
-   allowlist** in `core/http.ts`, never by HTTP method alone:
+3. **Retry matrix** — **three classes** (CC-B7), classified by the
+   `(method, path)` table in `api/endpoints.ts`, never by HTTP method alone
+   (`core/http.ts` only enforces what a class means). The table **fails
+   closed**: a listed endpoint gets its listed class, a `PUT` is a chunk
+   upload, any other `GET` is `read`, and **every other non-GET — unknown ones
+   included — is `init`**. `apiRequest` takes an optional `retryClass`, but it
+   can only make the class stricter (`read` < `chunk` < `init`); a looser value
+   is ignored. A test enumerates every endpoint `src/api/*.ts` calls and fails
+   when one is missing from the table:
 
 | Class | Membership | 429 | 5xx / network error | Attempts |
 |---|---|---|---|---|

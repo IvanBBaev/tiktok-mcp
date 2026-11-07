@@ -719,7 +719,8 @@ export interface ApiRequestOptions {
   fields?: readonly string[];      // joined unescaped — values come from frozen enums;
                                    // absent or empty ⇒ no `?fields=` at all (a publish
                                    // endpoint takes none, and `?fields=` reads as malformed)
-  retryClass?: RetryClass;         // defaults to "read"; a publish init passes "init"
+  retryClass?: RetryClass;         // stricter-only hint: the class comes from api/endpoints
+                                   // (known reads → "read", other non-GET → "init")
   body?: unknown;                  // a GET must not have one (core/http rejects it)
   signal?: AbortSignal;
 }
@@ -3619,3 +3620,4 @@ records an upstream rejection is a legitimate recording, so an outcome with
 | 2026-10-28 | oEmbed tool (roadmap A11, TOOLS.md § 3.17). New modules `api/embed` (`parseVideoUrl`, `getEmbed`, `OEMBED_ENDPOINT`, `VIDEO_URL_MAX_CHARS`, `OEMBED_MAX_ANSWER_CHARS`, `VideoRef`, `EmbedAnswer`) and `tools/embed` (`tiktok_get_embed`). `core/http`: new `EgressKind` (`'api' \| 'upload' \| 'oembed'`), `assertAllowedUrl` takes it, and additive `TtRequestOptions.egress?` (`'api'` default, or `'oembed'`, which refuses a bearer). `core/settings`: `ToolPackage` gains `embed` (in `all`, not in `core`). Additive: every existing caller still compiles | integrator |
 | 2026-10-29 | DNS pin for the token refresh behind `ApiContext` (roadmap H3). `api/context`: `createApiContext` forwards `CreateApiContextOptions.lookup` into the refresh deps of `getAccessToken`. `cli/doctor` drops its own refresh wrapper and relies on the context. No signature changed | integrator |
 | 2026-11-07 | Test harness (roadmap REL-R2): `MockClock` gains `nextDeadline()`, and `test/helpers.ts` exports `runVirtual` — both additive. It replaces four local copies that added 500 ms per step whether or not anything was waiting, which let a plan expire during real I/O on a loaded machine (the cc-g7 `plan_not_found` failure). Time now moves only to the next pending sleep, and only while `process.getActiveResourcesInfo()` shows nothing real in flight, which also retires the `holdTime` option of the `api-upload` copy. Callback-API file requests, which that list omits, are counted through an `async_hooks` hook | integrator |
+| 2026-11-07 | Retry class by endpoint table (roadmap ARC-R1, ARCHITECTURE § 6.3). New module `api/endpoints` (`ENDPOINTS`, `EndpointEntry`, `EndpointMethod`, `classifyEndpoint`, `effectiveRetryClass`): a `(method, path)` table decides the class — listed endpoints their class, `PUT` → `chunk`, other `GET` → `read`, every other non-GET (unknown included) → `init`. `api/context`: `ApiRequestOptions.retryClass` no longer defaults to `read`; it is a hint that may only make the table's class stricter, so an unlisted write is never retried or replayed after a 401. `api/embed` takes its class from the table. No signature changed | integrator |
