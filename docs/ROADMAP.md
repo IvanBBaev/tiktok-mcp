@@ -329,7 +329,10 @@ Deps — · Status todo · Est 3 h
   - Add a regression test. It injects extra idle event-loop turns before apply
     and asserts that the plan survives its 600 s TTL. This was the cc-g7
     `plan_not_found` failure on `main`.
-- **Owns:** `test/helpers.ts` and the suites that carry a copy of `runVirtual`.
+- **Owns:** `test/helpers.ts`, `test/helpers.test.ts` and the suites that carry a copy of
+  `runVirtual`.
+- **Shared:** `docs/CONTRACTS.md` § Test harness and change log, `docs/TESTING.md`
+  § Harness (the harness additions are recorded there).
 - **Acceptance:**
   - No local `runVirtual` remains.
   - `npm run check` is green locally and on CI three times in a row.
