@@ -319,7 +319,7 @@ These add to the table above.
 ### Release-blocking, codeable now
 
 #### REL-R2 — Make the virtual test clock deterministic
-Deps — · Status todo · Est 3 h
+Deps — · Status done 2026-11-07 · Est 3 h
 
 - **Absorbs:** QA-R3.
 - **Scope:** **Release-blocking.**
